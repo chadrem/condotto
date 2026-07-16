@@ -289,6 +289,18 @@ OS-level confinement (container, read-only repo mount, no credentials, no
 network) or not at all. Never simulate gating by watching output — by the time
 a command appears in a transcript, it has already run.
 
+**Reference gate semantics (M0-verified).** The Claude Code adapter sets the
+bar future harness adapters (Codex, OpenCode, ACP, …) are measured against:
+(1) the gated call pauses **un-executed**, with the pending call exposed as
+data (`{id, name, input}`) for rendering the approval; (2) the wait costs
+**zero processes** — session state persists on disk, and a fresh process can
+resume and re-drive the exact pending call after arbitrary delay. A harness
+that gates but cannot persist the wait (it must hold a process/connection open
+until the decision) is acceptable at the cost of one live process per pending
+approval — when adapter #2 arrives, capture this as a capability nuance
+(`gateParking: "zero-process" | "live-process"`). A harness that cannot gate
+at all falls under the confinement rule above.
+
 ### Headless APIs, not keypresses
 
 The obvious question for harness adapter #2: drive each coding agent through a
