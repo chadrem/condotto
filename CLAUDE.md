@@ -4,13 +4,13 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this repo is
 
-Conduit turns Slack threads into tickets that work themselves: each assigned thread gets a persistent Claude Code session running on a real dev machine, with humans (product + architect) and the AI implementer conversing in the thread. **There is no code yet** — `DESIGN.md` is the authoritative, self-contained design document. Read it before doing anything; this file only orients you.
+Conduit turns Slack threads into tickets that work themselves: each assigned thread gets a persistent Claude Code session running on a real dev machine, with humans (product + architect) and the AI implementer conversing in the thread. **There is no product code yet** (only the M0 spike scripts in `spikes/m0/`) — `DESIGN.md` is the authoritative, self-contained design document. Read it before doing anything; this file only orients you.
 
 ## Process rules (from DESIGN.md)
 
-- Execute the build plan in DESIGN.md §8, starting at **Milestone 0** (the gated-resume spike). Each milestone is independently demoable.
+- Execute the build plan in DESIGN.md §8. **Milestone 0 is done (2026-07-16)** — gating is `PreToolUse` `defer`; outcome in DECISIONS.md, spike scripts in `spikes/m0/`. Next up: Milestone 1. Each milestone is independently demoable.
 - Keep a `DECISIONS.md` log from M0 onward. Update DESIGN.md when reality disagrees with it.
-- The Agent SDK facts in DESIGN.md §6/Appendix B were verified at writing time but **re-confirm any exact field name against the live docs** (URLs in Appendix B) before building on it. The one load-bearing unknown is `PreToolUse` `permissionDecision: "defer"` and its resume handshake — M0 exists to settle `defer` vs. `canUseTool` with a working spike, not on paper.
+- The Agent SDK facts in DESIGN.md §6/Appendix B were verified at writing time but **re-confirm any exact field name against the live docs** (URLs in Appendix B) before building on it. The former load-bearing unknown — `defer` and its resume handshake — was settled by the M0 spike (2026-07-16): resume re-drives the deferred call through `PreToolUse` with the same `tool_use_id`. See DESIGN.md §6 and DECISIONS.md.
 - **Build-time safety:** while building, point the system only at a throwaway git repo and a scratch Slack workspace — never a real repo, deploy path, or team channel until M4 hardening. Wire deploy/land commands as no-ops/`echo` first.
 
 ## Toolchain
@@ -20,10 +20,10 @@ Runtime is **Bun 1.2+** — TypeScript run directly, no build step, no transpile
 - Run: `bun run <file>` — daemon and scripts run directly from source
 - Test: `bun test` (built-in runner); single file: `bun test <path>`
 - Deps: `bun add @anthropic-ai/claude-agent-sdk` (M0), `bun add @slack/bolt` (M1+). SQLite is built in via `bun:sqlite` — no package.
-- Auth: `ANTHROPIC_API_KEY` env var (the only credential the SDK needs headless)
+- Auth: the machine's Claude subscription login (keychain OAuth; verified headless 2026-07-16) — no `ANTHROPIC_API_KEY` in this deployment. Headless box alternative: `claude setup-token` → `CLAUDE_CODE_OAUTH_TOKEN`
 - Distribution target: `bun build --compile` → single binary
 
-The Agent SDK is developed against Node; M0 doubles as the Bun-compatibility check (spawn, streaming, hooks, resume). If Bun trips, record the exact failure in `DECISIONS.md` and pick a hedge from §6 (isolate the SDK in a Node child process behind the harness port, or run the daemon on Node temporarily).
+The Agent SDK is developed against Node; M0 verified Bun compatibility (Bun 1.3.14 via Homebrew, 2026-07-16): spawn, streaming, hooks, `defer`, and resume all work. If a future SDK update trips on Bun, record the exact failure in `DECISIONS.md` and pick a hedge from §6 (isolate the SDK in a Node child process behind the harness port, or run the daemon on Node temporarily).
 
 ## Architecture (the shape to preserve)
 

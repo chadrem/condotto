@@ -276,7 +276,8 @@ interface HarnessCapabilities {
 
 The Claude Code adapter implements this with the Agent SDK: `create`/`resume`
 map to `query()` with `cwd`/`resume`; `GateFn` maps to the `PreToolUse` hook
-(or `canUseTool` — the M0 decision, §6); `TurnEvent` maps to the SDK's
+returning `defer` (settled by the M0 spike — §6; `canUseTool` stays as the
+deny-by-default backstop for batched calls); `TurnEvent` maps to the SDK's
 streaming messages; `handle` is the SDK session id plus the worktree path.
 
 **Gating is the load-bearing capability, and it is not negotiable.** The
@@ -480,6 +481,11 @@ implementation turns; a hard cap that pauses a runaway session and pings the
 architect. `SDKResultMessage.subtype` includes `error_max_budget_usd` — wire it
 to a Slack notice, not a silent stall.
 
+Note (verified 2026-07-16): on subscription OAuth the SDK still reports
+`total_cost_usd` per result as notional API pricing — budgets keep working as
+runaway brakes, but the real constraint is the plan's rate limits, so treat
+them as usage governance, not spend.
+
 ---
 
 ## 5. Data model (SQLite, v1)
@@ -545,8 +551,14 @@ adapter:** `@slack/bolt` in Socket Mode. **Harness adapter (v1):**
 `@anthropic-ai/claude-agent-sdk` (bundles the Claude Code runtime; no separate
 `claude` CLI install needed). **Store:** SQLite via the built-in `bun:sqlite`
 (no native-module compile; same synchronous API shape as better-sqlite3).
-**Auth:** `ANTHROPIC_API_KEY` env var (the only credential the SDK needs
-headless; Bedrock/Vertex/Foundry are opt-in via `CLAUDE_CODE_USE_*` flags).
+**Auth:** the SDK's bundled runtime reads the same credential chain as the
+Claude Code CLI, so a **Claude subscription (Pro/Max) login is sufficient** —
+no API key. v0 uses the dev machine's existing `claude` keychain login; a
+headless box uses a long-lived token minted with `claude setup-token`
+(exported as `CLAUDE_CODE_OAUTH_TOKEN`). `ANTHROPIC_API_KEY` (API billing) and
+Bedrock/Vertex/Foundry (`CLAUDE_CODE_USE_*` flags) are alternatives, not
+requirements. Verified 2026-07-16: a headless `query()` succeeds with no
+`ANTHROPIC_API_KEY` set, on keychain OAuth alone (see DECISIONS.md).
 
 **Why Bun.** Anthropic acquired Oven (the company behind Bun) in late 2025,
 and Claude Code itself ships as a Bun-compiled standalone binary — the
@@ -576,25 +588,36 @@ fixed. The same check applies to `@slack/bolt`'s Socket Mode WebSocket in M1.
 > de-risk the one load-bearing uncertainty: pausing a turn on a gated tool and
 > resuming it after an out-of-band Slack approval.**
 
-### The one thing to prove first
+### The one thing to prove first — PROVEN (M0 spike, 2026-07-16)
 
-The entire product rests on this loop working:
+The entire product rests on this loop, and the M0 spike ran it end-to-end
+under Bun on subscription auth (full facts in DECISIONS.md; scripts in
+`spikes/m0/`):
 
 1. A turn runs; the agent calls a gated tool.
-2. A `PreToolUse` hook returns `permissionDecision: "defer"`, pausing the turn.
-3. The daemon posts a Slack approval; **minutes or hours pass**.
-4. An architect clicks Approve; the daemon resumes the session and the tool
-   executes as if no time had passed.
+2. A `PreToolUse` hook returns `permissionDecision: "defer"` — the query ends
+   with `stop_reason`/`terminal_reason: "tool_deferred"`, and the result's
+   `deferred_tool_use` carries the pending call (`{id, name, input}`): exactly
+   what the daemon needs to render a Slack approval. Nothing executes; no
+   process needs to stay alive.
+3. Out-of-band time passes. The spike resumed from a **separate OS process**,
+   so this is proven across daemon restarts, not just within one.
+4. To resume: `query({ prompt: "", options: { resume: sessionId } })`. The
+   pending tool call is re-driven mechanically (same `tool_use_id`) and flows
+   through `PreToolUse` again, where the daemon — now holding the recorded
+   approval — answers `allow` (or `deny`, feeding the reason to the agent).
+   The tool executes and the turn continues to completion.
 
-The docs describe `defer` as "pause the query so you can resume later"; the
-exact resume handshake (how the approved tool call is re-driven on resume) is
-the single most important thing to spike in Milestone 0. If `defer`'s
-out-of-band resume proves awkward, the fallback is the `canUseTool` callback,
-which pauses the turn synchronously by holding an unresolved promise until the
-Slack click resolves it — simpler to reason about, but it keeps the session's
-async generator (and thus a live process) open for the whole human-latency
-window. Decide between them **with a working spike**, not on paper. Record the
-outcome in `DECISIONS.md`.
+So the gate is: **defer → persist `deferred_tool_use` + session id → approval
+arrives → resume + allow-by-`tool_use_id`.** `canUseTool` is not needed for
+human-latency gates.
+
+**Caveat from the live docs (M2 must handle):** if the model issues several
+tool calls in one batch, `defer` is ignored with a warning and the call
+proceeds through the normal permission flow — resume can only re-drive one
+pending tool. The policy engine therefore needs a deny-by-default backstop
+behind the hook (e.g. `canUseTool` rejecting any gated call that reaches it)
+so a batched gated call can never slip through.
 
 ---
 
@@ -641,8 +664,10 @@ Each milestone is independently demoable. Keep `DECISIONS.md` from M0.
 **Prerequisites (before M0):** Bun 1.2+ (`curl -fsSL https://bun.sh/install |
 bash`); `bun add @anthropic-ai/claude-agent-sdk` (SQLite needs no package —
 `bun:sqlite` is built in); `bun add @slack/bolt` (needed from M1, not M0);
-`export ANTHROPIC_API_KEY=…`. M0 needs **no Slack app at all** — it's a local
-script. The Slack app (with the exact scopes and
+auth via the machine's existing Claude subscription login (verified — no
+`ANTHROPIC_API_KEY` needed; on a box with no keychain login, `claude
+setup-token` → `CLAUDE_CODE_OAUTH_TOKEN`). M0 needs **no Slack app at all** —
+it's a local script. The Slack app (with the exact scopes and
 Socket Mode setup) is only needed from M1; that setup is **Appendix C**.
 
 **Build-time safety (applies to every milestone).** You are building a tool
@@ -656,6 +681,12 @@ daemon's whole risk surface is "text from Slack → shell on a real machine";
 treat your own dev loop with the same suspicion the product treats its users.
 
 **Milestone 0 — Prove the gated-resume loop (spike, throwaway ok).**
+**✅ DONE 2026-07-16.** All success criteria met under Bun 1.3.14 on
+subscription OAuth (no API key): `defer` pauses with the pending call
+preserved; a separate process resumed by session id and the approved tool
+executed; resume-by-id and cwd-keyed storage confirmed. Verified handshake in
+§6; full log in DECISIONS.md; spike scripts in `spikes/m0/`. Original
+milestone text follows for reference.
 No Slack. **First, verify the `defer` mechanism actually exists and how it
 resumes** — read the current hooks doc (Appendix B links) and confirm
 `permissionDecision: "defer"` is real and what re-drives the paused tool call.
@@ -715,8 +746,10 @@ harness adapter (evaluate ACP first — §9).**
 
 ## 9. Open questions (decide as you build; log in DECISIONS.md)
 
-1. **`defer` vs. `canUseTool` for gating** — resolved by the M0 spike. (Leaning
-   `defer` for human-latency approvals; `canUseTool` for fast auto-checks.)
+1. **`defer` vs. `canUseTool` for gating** — **resolved 2026-07-16: `defer`**
+   for human-latency gates, verified end-to-end (§6, DECISIONS.md);
+   `canUseTool` retained only as the deny-by-default backstop for the
+   batched-calls caveat.
 2. **In-process vs. child-process/container per session** — start in-process;
    revisit at M3 concurrency testing.
 3. **Assignment UX** — slash command vs. @mention vs. emoji reaction on the
@@ -739,9 +772,9 @@ harness adapter (evaluate ACP first — §9).**
    already have ACP adapters, and its permission-request flow may map onto our
    gate. If it fits, the harness port becomes "ACP + capability probes" and
    adapters get much cheaper. Verify against live ACP docs first.
-10. **Bun blockers** — if the Agent SDK hits a Bun incompatibility in M0, do
-    we isolate the SDK in a Node child process behind the harness port, or pin
-    the daemon to Node temporarily? (Decide only if M0 actually hits one.)
+10. **Bun blockers** — **resolved 2026-07-16: none found.** M0 ran spawn,
+    streaming, hooks, `defer`, and resume under Bun 1.3.14 (Homebrew) with no
+    incompatibilities.
 
 ---
 
@@ -857,6 +890,13 @@ a string or an `AsyncIterable<SDKUserMessage>`. Key `options` (camelCase):
 | `persistSession` | `boolean` | Default true; false = memory only |
 | `includePartialMessages` | `boolean` | Yield token-level `stream_event`s |
 
+M0 note: without `systemPrompt: { type: "preset", preset: "claude_code" }` the
+default system prompt carries no environment context — in the spike the model
+didn't know its own cwd and invented `/home/user/…` paths (the `cwd` option
+itself worked; the recovered write landed in the right repo). The harness
+adapter should use the preset plus an appended Conduit protocol prompt so the
+agent knows its worktree.
+
 Start & capture id, then resume:
 ```typescript
 import { query } from "@anthropic-ai/claude-agent-sdk";
@@ -908,6 +948,19 @@ for out-of-band approval, resume later via the session id)**. Hook input for
 Register per matcher: `hooks: { PreToolUse: [{ matcher: "Write|Edit|Bash",
 hooks: [gateFn] }] }`.
 
+Re-verified 2026-07-16 against the live hooks doc: `defer` exists ("returning
+`defer` ends the query so you can resume it later"); with `defer`,
+`updatedInput` is **ignored**; when multiple hooks/rules apply, precedence is
+`deny` > `defer` > `ask` > `allow`. The resume handshake is **verified by the
+M0 spike** (2026-07-16): `defer` ends the query with
+`stop_reason`/`terminal_reason: "tool_deferred"` and
+`result.deferred_tool_use = {id, name, input}`; resuming with
+`query({ prompt: "", options: { resume: sessionId } })` re-drives the pending
+call through `PreToolUse` with the **same** `tool_use_id`, where the hook now
+answers `allow`/`deny`. Batching caveat: with multiple tool calls in one
+batch, `defer` is ignored (warning) and the call takes the normal permission
+flow — keep a deny-by-default backstop (§6).
+
 **B4. `canUseTool`** — synchronous per-call approval; the turn blocks on your
 returned promise:
 ```typescript
@@ -932,10 +985,16 @@ cwd** — moving a worktree loses the session. Relocate the whole store with
 `SessionStore` interface (`append`/`load` required; `listSessions`/`delete`/
 `listSubkeys` optional) — the SDK writes local disk first then mirrors,
 emitting `system/mirror_error` (non-fatal) if the store is down. An S3 example
-adapter ships in the SDK examples.
+adapter ships in the SDK examples. (Storage path format — encoded cwd +
+`<session-id>.jsonl` — confirmed live by the M0 spike, 2026-07-16.)
 
-**B6. Auth.** Headless: `ANTHROPIC_API_KEY` only. Alternatives via
-`CLAUDE_CODE_USE_BEDROCK=1` / `CLAUDE_CODE_USE_VERTEX=1` /
+**B6. Auth.** The bundled runtime reads the CLI's credential chain, so
+subscription OAuth works headless: the machine's `claude` keychain login, or
+`claude setup-token` → `CLAUDE_CODE_OAUTH_TOKEN` on a box with no login.
+Verified 2026-07-16: `query()` succeeded with no `ANTHROPIC_API_KEY` in the
+environment, on a Max-subscription keychain login (Node 24; Bun re-check in
+M0). `ANTHROPIC_API_KEY` is the API-billing alternative; Bedrock/Vertex/
+Foundry via `CLAUDE_CODE_USE_BEDROCK=1` / `CLAUDE_CODE_USE_VERTEX=1` /
 `CLAUDE_CODE_USE_FOUNDRY=1` (+ that provider's standard credential chain).
 
 ---
