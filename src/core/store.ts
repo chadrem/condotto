@@ -507,9 +507,18 @@ export class Store {
     }
   }
 
-  /** Toggle a session's worktree-write opt-in for workflow/escaped calls (M3.6 Tier 3). */
+  /**
+   * Toggle a session's worktree-write opt-in for workflow/escaped calls (M3.6 Tier 3).
+   * Enabling it also asserts the `write ⟹ workflows ⟹ subagents` invariant in the DB
+   * (defense-in-depth — the manager already enables both first, but this keeps the
+   * store self-consistent no matter the caller).
+   */
   setSessionWorkflowWrite(id: string, on: boolean): void {
-    this.db.query(`UPDATE sessions SET workflow_write = $v WHERE id = $id`).run({ id, v: on ? 1 : 0 });
+    if (on) {
+      this.db.query(`UPDATE sessions SET workflow_write = 1, workflows = 1, subagents = 1 WHERE id = $id`).run({ id });
+    } else {
+      this.db.query(`UPDATE sessions SET workflow_write = 0 WHERE id = $id`).run({ id });
+    }
   }
 
   /**

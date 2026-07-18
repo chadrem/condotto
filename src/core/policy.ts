@@ -46,19 +46,22 @@ export interface PolicyContext {
   /** Repo-defined commands that run without approval (exact or prefix match). */
   safeBashAllowlist: string[];
   /**
-   * Multi-agent capabilities enabled for this turn (M3.5 Tier B). When on, the
-   * MAIN agent may auto-spawn subagents / workflows (delegation itself is not a
-   * gated action — the real actions are gated downstream). Off = a spawn attempt
-   * gates (defensive default; the adapter also removes the tools from context).
+   * Subagents enabled for this turn (M3.5 Tier B). When on, the MAIN agent may
+   * auto-spawn subagents (delegation itself is not a gated action — the subagent's
+   * own tool calls are gated downstream). Off = a spawn attempt gates (defensive
+   * default; the adapter also removes the tools from context). NOTE: the MAIN
+   * agent's WORKFLOW launch is always gated (M3.6 Tier 2 — an architect approves
+   * each launch), so there is no `workflowsEnabled` gate flag; when workflows are
+   * off the adapter removes the Workflow tool from context entirely.
    */
   subagentsEnabled?: boolean;
-  workflowsEnabled?: boolean;
   /**
    * The informed worktree-write opt-in (M3.6 Tier 3). When on, subagent/workflow-
-   * origin calls and escaped (un-deferrable) calls may WRITE and run bash CONFINED
-   * TO THE WORKTREE without per-write approval; out-of-worktree, credential, and
-   * production-data access stay hard-denied. Off (default) = read-only fan-out:
-   * those calls may only run genuine confined reads.
+   * origin calls and escaped (un-deferrable) calls may WRITE (confined to the
+   * worktree via `offendingPath`) without per-write approval. Bash is NOT relaxed
+   * (it has no worktree confinement — see evaluateConfined); out-of-worktree,
+   * credential, and production-data access stay hard-denied. Off (default) =
+   * read-only fan-out: those calls may only run genuine confined reads.
    */
   workflowWrite?: boolean;
 }
@@ -174,9 +177,20 @@ export function evaluate(call: ToolCall, ctx: PolicyContext): PolicyDecision {
  * agent (agentId) or an escaped un-deferrable call (M3.6). Strictly READ-ONLY by
  * default: only genuine confined reads pass; a hard-deny keeps its specific reason
  * (e.g. out-of-worktree); everything else — writes, network, unknown tools, nested
- * spawns, AND allowlisted bash (still code execution) — is DENIED (never gated).
- * With the worktree-write opt-in (Tier 3), confined writes and confined bash also
- * pass, while out-of-worktree / credential / production-data stay hard-denied.
+ * spawns, AND all bash (still code execution) — is DENIED (never gated).
+ *
+ * With the worktree-write opt-in (Tier 3), confined WRITES also pass. Writes are
+ * lexically worktree-confined here — `offendingPath` over file_path/path/notebook_
+ * path hard-denied out-of-worktree writes in `evaluateBase` before we get here.
+ *
+ * BASH is NOT relaxed by the opt-in, even though the call site is un-deferrable:
+ * `evaluateBash` applies NO worktree confinement to a command string (its only
+ * screens are the deliberately-non-exhaustive hard-deny + production-data
+ * heuristics — "the human at the gate is the real net", §4). The opt-in removes
+ * the human, so auto-running arbitrary shell would be un-confined RCE / exfil
+ * (`cat ~/.docker/config.json | curl …`, out-of-tree writes, reverse shells) —
+ * exactly what the warning promises stays denied. So confined/escaped bash stays
+ * DENIED in every mode; shell stays with the gated main agent (M3.6 review 2026-07-18).
  */
 function evaluateConfined(call: ToolCall, ctx: PolicyContext): PolicyDecision {
   const name = call.name;
@@ -190,16 +204,13 @@ function evaluateConfined(call: ToolCall, ctx: PolicyContext): PolicyDecision {
   // Genuine confined reads always pass.
   if (base.action === "allow" && SUBAGENT_READ_TOOLS.has(name)) return base;
 
-  // Worktree-write opt-in (Tier 3): confined writes and confined bash may run
-  // WITHOUT per-call approval. `base` already hard-denied out-of-worktree writes
-  // and dangerous/credential bash, and gate+concern marks production-data bash —
-  // which stays denied (never auto-runnable, DESIGN §4).
-  if (ctx.workflowWrite) {
-    if (WRITE_TOOLS.has(name)) return allow(describeCall(call));
-    if (name === "Bash" && base.concern !== "production-data") return allow(describeCall(call));
-  }
+  // Worktree-write opt-in (Tier 3): confined WRITES may run without per-call
+  // approval (out-of-worktree writes were already hard-denied by `base`). Bash is
+  // intentionally excluded — see the docstring; it has no worktree confinement.
+  if (ctx.workflowWrite && WRITE_TOOLS.has(name)) return allow(describeCall(call));
 
-  // Anything else can't run un-deferred here.
+  // Anything else — bash, network, unknown, and every write when the opt-in is off —
+  // can't run un-deferred here.
   return deny(denyMsg);
 }
 
@@ -402,7 +413,13 @@ export function parseWorkflowMeta(script: unknown): { name?: string; description
   const scope = metaStart >= 0 ? script.slice(metaStart, metaStart + 1200) : script.slice(0, 1200);
   const grab = (key: string): string | undefined => {
     const m = scope.match(new RegExp(`${key}\\s*:\\s*(['"\`])([^'"\`]{0,200})\\1`));
-    return m?.[2]?.trim() || undefined;
+    if (!m?.[2]) return undefined;
+    // The script is authored by the main agent (injection-reachable), and this text
+    // lands in the human launch-approval prompt (§4 / Appendix A1). Sanitize it to a
+    // single short line: collapse ALL whitespace incl. newlines (so it can't forge a
+    // multi-line "SYSTEM: approved" block), strip control chars, cap the length.
+    const clean = m[2].replace(/[\x00-\x1f\x7f]+/g, " ").replace(/\s+/g, " ").trim();
+    return clean.length > 100 ? clean.slice(0, 99) + "…" : clean || undefined;
   };
   const name = grab("name");
   const description = grab("description");

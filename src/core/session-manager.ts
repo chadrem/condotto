@@ -803,10 +803,11 @@ export class SessionManager {
         await surface.post(conv, {
           text:
             "⚠️ *Workflow worktree-write is now ON.* Read this:\n" +
-            "• Workflow agents — and any batched tool calls — will now *WRITE files and run shell " +
-            "commands inside this thread's disposable worktree WITHOUT per-write approval*.\n" +
-            "• Blast radius is *this worktree only*: out-of-worktree paths, credential/secret access, " +
-            "and production-data access stay *hard-denied* (no approval can widen them).\n" +
+            "• Workflow agents — and any batched tool calls — will now *WRITE and edit files inside " +
+            "this thread's disposable worktree WITHOUT per-write approval*.\n" +
+            "• Blast radius is *this worktree only*: writes outside the worktree stay *hard-denied*, " +
+            "and I still can't run shell, reach the network, touch credentials, or read production " +
+            "data from a workflow/sub-agent (those stay with me, the main agent, gated).\n" +
             "• `land`/`deploy` still require an explicit Approve click — reviewing the diff before " +
             "landing is the real safety net.\n" +
             "Turn it back off with `@Conduit workflows write off` (or `@Conduit workflows off`). " +
@@ -835,7 +836,13 @@ export class SessionManager {
     this.store.setSessionWorkflows(session.id, on);
     // A workflow orchestrates sub-agents, so enabling it enables the base
     // capability; turning it off also clears the worktree-write opt-in (store).
-    if (on) this.store.setSessionSubagents(session.id, true);
+    // Enabling plain workflows resets to the READ-ONLY posture — worktree-write is
+    // always a deliberate, separate `workflows write on` (so this reply's
+    // "read-only" claim is truthful even if write mode was previously on).
+    if (on) {
+      this.store.setSessionSubagents(session.id, true);
+      this.store.setSessionWorkflowWrite(session.id, false);
+    }
     this.store.audit({ sessionId: session.id, actor: principalKey(author), event: "workflows_set", detail: { on } });
     const fresh = this.store.getSession(session.id)!;
     await surface.post(conv, {
@@ -874,9 +881,12 @@ export class SessionManager {
     if (on) {
       // Ultra = the "max it out" preset (M3.6): xhigh reasoning + parallel
       // subagents + the Workflow tool (re-folded back in now that workflows are
-      // gateable — spike 2026-07-18). All gated + worktree-confined.
+      // gateable — spike 2026-07-18). All gated + worktree-confined, READ-ONLY:
+      // ultra never turns on the dangerous worktree-write opt-in (kept explicit),
+      // so its "read-only" reply is truthful even if write mode was on before.
       this.store.setSessionSubagents(session.id, true);
       this.store.setSessionWorkflows(session.id, true);
+      this.store.setSessionWorkflowWrite(session.id, false);
       if (this.supportsEffort("xhigh")) this.store.setSessionEffort(session.id, "xhigh");
     } else {
       this.store.setSessionSubagents(session.id, false);
@@ -1227,13 +1237,13 @@ export class SessionManager {
       // folded in here, not into the repo's stored allowlist, so config stays
       // pristine and cost/prod checks still apply to everything else.
       safeBashAllowlist: [...(repo?.safe_bash_allowlist ?? []), ...(repo?.test_cmd ? [repo.test_cmd] : [])],
-      // M3.5 Tier B: let the MAIN agent spawn subagents/workflows when enabled
-      // (delegation itself isn't a gated action; subagent tool calls are gated
-      // downstream). Subagent-initiated gated calls are denied by the policy engine.
+      // M3.5 Tier B: let the MAIN agent spawn subagents when enabled (delegation
+      // isn't itself gated; subagent tool calls are gated downstream). The MAIN
+      // agent's Workflow launch is always gated (M3.6 Tier 2), so there is no
+      // workflowsEnabled flag. Subagent-initiated gated calls are denied by policy.
       subagentsEnabled: session.subagents === 1,
-      workflowsEnabled: session.workflows === 1,
-      // M3.6 Tier 3: the worktree-write opt-in — subagent/workflow/escaped calls
-      // may write & run bash confined to the worktree without per-write approval.
+      // M3.6 Tier 3: the worktree-write opt-in — subagent/workflow/escaped calls may
+      // WRITE (confined) without per-write approval; bash stays gated to the main agent.
       workflowWrite: session.workflow_write === 1,
     };
     // Remembers a policy concern (e.g. production-data) per gated tool_use_id so

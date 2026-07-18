@@ -52,7 +52,6 @@ const gate: GateFn = async (call) => {
     worktree: worktree.path,
     safeBashAllowlist: [],
     subagentsEnabled: true,
-    workflowsEnabled: true,
     workflowWrite: WRITE_MODE,
   });
   const origin = call.agentId ? `wf/sub(${call.agentId.slice(0, 6)})` : call.escaped ? "escaped" : "main";

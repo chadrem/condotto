@@ -11,6 +11,16 @@ import type {
 } from "../../core/types";
 import { parseWorkflowMeta } from "../../core/policy";
 
+/**
+ * The SDK `query()` surface the adapter drives — narrowed to what `runQuery` uses
+ * (an async iterable of messages plus `interrupt`). Injectable so tests can drive
+ * the real adapter loop with a scripted SDK message stream (buffering, canUseTool,
+ * hook mapping) without a live query. Production uses the real `query`.
+ */
+export type QueryFn = (args: { prompt: unknown; options: Record<string, any> }) => AsyncIterable<Record<string, any>> & {
+  interrupt(): Promise<void>;
+};
+
 // Claude Code harness adapter over the Agent SDK.
 //
 // Verified facts this code builds on (M0 spike 2026-07-16 + live docs, see
@@ -203,6 +213,8 @@ class ClaudeCodeSession implements HarnessSession {
     private cwd: string,
     /** Conduit protocol prompt (preset append). Supplied fresh each turn. */
     private system: string,
+    /** The SDK query function (injectable for tests). */
+    private queryFn: QueryFn,
   ) {}
 
   get handle(): SessionHandle {
@@ -299,7 +311,7 @@ class ClaudeCodeSession implements HarnessSession {
       return { behavior: "deny" as const, message };
     };
 
-    const q = query({
+    const q = this.queryFn({
       prompt: input.text,
       options: {
         cwd: this.cwd,
@@ -548,6 +560,8 @@ function describeWorkflowEvent(m: Record<string, any>): string | null {
 
 export class ClaudeCodeAdapter implements HarnessAdapter {
   readonly id = "claude-code";
+  /** Injectable query (tests pass a fake); defaults to the real SDK `query`. */
+  constructor(private queryFn: QueryFn = query as unknown as QueryFn) {}
   readonly capabilities: HarnessCapabilities = {
     mechanicalGating: true, // defer-based gating (M0-verified), wired live in M2
     resumeAfterRestart: true,
@@ -559,10 +573,10 @@ export class ClaudeCodeAdapter implements HarnessAdapter {
   };
 
   async create(opts: { cwd: string; system: string }): Promise<HarnessSession> {
-    return new ClaudeCodeSession({ v: 1, sessionId: null }, opts.cwd, opts.system);
+    return new ClaudeCodeSession({ v: 1, sessionId: null }, opts.cwd, opts.system, this.queryFn);
   }
 
   async resume(handle: SessionHandle, cwd: string, system: string): Promise<HarnessSession> {
-    return new ClaudeCodeSession(asHandle(handle), cwd, system);
+    return new ClaudeCodeSession(asHandle(handle), cwd, system, this.queryFn);
   }
 }

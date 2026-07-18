@@ -812,10 +812,12 @@ subagents + the `ultra` preset (architect opt-in, default off) — the spike fou
 **`defer`/resume is main-thread-only**, so subagents fan out READ-ONLY and any
 subagent-initiated gated call or nested spawn is **denied** in the policy engine
 (`ToolCall.agentId` marks origin); the main agent does mutations via the proven
-defer→approve→resume path. **Workflows were spiked and DEFERRED:** the Workflow
-tool's orchestrated agents bypass the PreToolUse gate (no `agent_id`) and are
-non-functional under our isolation, so the tool is disabled until it can be gated
-(M4+); `ultra` is therefore `xhigh` + subagents (not + Workflow). Tier C ships
+defer→approve→resume path. **Workflows were spiked and DEFERRED here, then
+RE-ENABLED in Milestone 3.6** (below): the M3.5 spike ran under
+`permissionMode:"default"`, under which the Workflow tool's background agents
+default-deny off-gate; M3.6 found `permissionMode:"bypassPermissions"` routes them
+THROUGH the PreToolUse hook (agent_id-tagged) so the same subagent policy confines
+them — so `ultra` is again `xhigh` + subagents + workflows. Tier C ships
 trust-scoped project config (`trusted: true` → `settingSources:["project"]` +
 `skills`; untrusted stays isolated; the gate still applies). Dial-down is built in
 (cheaper model / lower effort / subagents off / ultra off). Original text (the plan,
@@ -862,6 +864,35 @@ core persists and passes through, never core policy. **Demo: a PM describes a
 feature in plain language; the session (Opus, `xhigh`, subagents on) plans it,
 fans out to implement, the architect approves the writes and the land — the PM
 ships a feature they could not have hand-coded, guided in-thread.**
+
+**Milestone 3.6 — Workflows working in the thread. ✅ DONE 2026-07-18** (full facts
+in DECISIONS.md; 201 tests, `tsc` + `check-ports` clean; real-SDK `smoke:workflows`
+[+ `CONDUIT_SMOKE_WRITE=1`], spikes in `spikes/m3.6/`). Re-enabled Claude Code's
+multi-agent **Workflow** tool, gated + confined, after the spike-first re-test
+INVERTED the M3.5 conclusion: workflows aren't ungateable — the M3.5 finding was an
+artifact of `permissionMode:"default"`. Under **`permissionMode:"bypassPermissions"`**
+(set only for workflow-enabled sessions) the background workflow's sub-agent tool
+calls route THROUGH the PreToolUse hook with an `agent_id`, where the M3.5 read-only
+subagent policy confines them; the main agent's defer→approve→resume and the
+`canUseTool` batching backstop still hold (hooks outrank permission mode). Built in
+three tiers: **Tier 1** — secure read-only workflows (`@Conduit workflows on|off`,
+re-folded into `ultra`; reads via the hook, not `allowedTools`, so background
+sub-agents aren't shadow-denied; the adapter delivers the LAST of a workflow turn's
+multiple results). **Tier 2** — the running-workflow Slack UX: the launch is a gated
+action (Approve/Deny showing the workflow's name/description + a fan-out/budget
+concern), a live throttled status streams the background-task lifecycle, and the
+synthesized reply carries a cost footer. **Tier 3** — the informed worktree-write
+opt-in (`@Conduit workflows write on|off`, mandatory warning): the policy lets
+confined subagent/workflow/escaped calls WRITE (edit files, confined to the worktree)
+without per-write approval — bash stays gated to the main agent (it has no worktree
+confinement), and out-of-worktree/credential/production-data stay hard-denied
+and land/deploy still gate. **Known SDK limitation (documented):** a background
+workflow sub-agent's Grep/Bash/Write can be denied by the SDK's task permission
+UPSTREAM of our gate, so those are best-effort (Read/Glob route through the gate
+reliably; grep-style search stays with the main agent); the security boundary holds
+regardless. **Demo: a PM asks for a cross-cutting audit; the architect approves
+launching a workflow; it fans out read-only across many files in parallel and posts
+a synthesized, cited summary — gated and worktree-confined throughout.**
 
 **Milestone 4 — Dedicated box & hardening.** Move to the always-on machine with
 scoped daemon credentials. Session process isolation if needed. Read-only Slack

@@ -34,7 +34,6 @@ const gate: GateFn = async (call) => {
     worktree: worktree.path,
     safeBashAllowlist: [],
     subagentsEnabled: true,
-    workflowsEnabled: true,
   });
   const origin = call.agentId ? `subagent(${call.agentId.slice(0, 6)})` : "main";
   console.log(`[gate] ${origin} ${call.name} -> ${d.action}`);

@@ -1148,6 +1148,20 @@ describe("harness capabilities — workflows (M3.6)", () => {
     // The workflow-turn reply carries the summary cost footer.
     expect(w.surface.transcript().some((t) => /multi-agent workflow · \$/.test(t))).toBe(true);
   });
+
+  test("a workflow launch DENY runs nothing (Tier 2)", async () => {
+    const w = makeWorld();
+    const c = conv("wf8.000001");
+    await assign(w, "wf8.000001");
+    await w.manager.handleEvent({ kind: "command", conv: c, author: architect, name: "workflows", args: "on" });
+    const script = "export const meta = { name: 'auth-audit', description: 'x' }";
+    w.harness.scriptTurn([{ id: "wf-d", name: "Workflow", input: { script } }]);
+    await w.manager.handleEvent({ kind: "message", conv: c, author: member, text: "audit our auth", attachments: [] });
+    const requestId = w.surface.lastApprovalRequestId()!;
+    await w.manager.handleEvent({ kind: "approval_decision", requestId, decider: architect, decision: "denied" });
+    expect(w.harness.executed.length).toBe(0);
+    expect(w.store.getApproval(requestId)!.decision).toBe("denied");
+  });
 });
 
 describe("informed worktree-write opt-in (M3.6 Tier 3)", () => {
@@ -1203,6 +1217,38 @@ describe("informed worktree-write opt-in (M3.6 Tier 3)", () => {
     expect(w.store.getSessionByConversation("fake", "ww3.000001")!.workflow_write).toBe(1);
     await w.manager.handleEvent({ kind: "command", conv: c, author: architect, name: "workflows", args: "off" });
     const s = w.store.getSessionByConversation("fake", "ww3.000001")!;
+    expect(s.workflows).toBe(0);
+    expect(s.workflow_write).toBe(0);
+  });
+
+  test("`workflows on` and `ultra on` reset write mode to read-only (truthful messaging) — review fix", async () => {
+    for (const [id, cmd, arg] of [
+      ["wwa.000001", "workflows", "on"],
+      ["wwb.000001", "ultra", "on"],
+    ] as const) {
+      const w = makeWorld();
+      const c = conv(id);
+      await assign(w, id);
+      await w.manager.handleEvent({ kind: "command", conv: c, author: architect, name: "workflows", args: "write on" });
+      expect(w.store.getSessionByConversation("fake", id)!.workflow_write).toBe(1);
+      // Re-issuing plain workflows-on / ultra-on returns to the read-only posture.
+      await w.manager.handleEvent({ kind: "command", conv: c, author: architect, name: cmd, args: arg });
+      const s = w.store.getSessionByConversation("fake", id)!;
+      expect(s.workflow_write).toBe(0);
+      expect(s.workflows).toBe(1); // still on, just read-only again
+      // The reply's "read-only" claim is now truthful (no worktree-write live).
+      expect(w.surface.posts.at(-1)!.text).not.toContain("worktree-write");
+    }
+  });
+
+  test("`subagents off` clears the worktree-write opt-in end-to-end (invariant)", async () => {
+    const w = makeWorld();
+    const c = conv("wwc.000001");
+    await assign(w, "wwc.000001");
+    await w.manager.handleEvent({ kind: "command", conv: c, author: architect, name: "workflows", args: "write on" });
+    await w.manager.handleEvent({ kind: "command", conv: c, author: architect, name: "subagents", args: "off" });
+    const s = w.store.getSessionByConversation("fake", "wwc.000001")!;
+    expect(s.subagents).toBe(0);
     expect(s.workflows).toBe(0);
     expect(s.workflow_write).toBe(0);
   });

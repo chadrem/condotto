@@ -53,7 +53,6 @@ const gate: GateFn = async (call) => {
     worktree: worktree.path,
     safeBashAllowlist: [],
     subagentsEnabled: true,
-    workflowsEnabled: true,
   });
   gateCalls.push({ name: call.name, agentId: call.agentId, action: d.action });
   if (call.name === "Workflow") workflowToolUsed = true;

