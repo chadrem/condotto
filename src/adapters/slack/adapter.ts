@@ -18,6 +18,11 @@ import { renderMrkdwn } from "./render";
 // Slack `ts` values are strings with significant leading zeros in the
 // fractional part. They are NEVER parsed as numbers here.
 //
+// Conversation identity: a Slack thread_ts is only unique **within a channel**,
+// so the domain `conversationId` is the pair encoded as "<channel>:<ts>". The
+// encoding is private to this adapter (decoded again in post/update); the core
+// treats conversation ids as opaque strings.
+//
 // Verified live-doc fact (2026-07-18, contradicts DESIGN.md journey 1; logged
 // in DECISIONS.md): custom slash commands CANNOT be invoked inside a message
 // thread — the client only offers them at top level, and the payload carries
@@ -32,6 +37,35 @@ const SURFACE_ID = "slack";
 
 type Emit = (e: InboundEvent) => void;
 
+function encodeConversationId(channel: string, threadTs: string): string {
+  return `${channel}:${threadTs}`;
+}
+
+/** The thread root ts for an encoded conversation id ("" -> no thread). */
+function threadTsOf(conv: ConversationRef): string | undefined {
+  if (!conv.conversationId) return undefined;
+  const idx = conv.conversationId.indexOf(":");
+  return idx === -1 ? conv.conversationId : conv.conversationId.slice(idx + 1);
+}
+
+/**
+ * Slack delivers events at-least-once (retries on slow acks, reconnects), and
+ * a duplicated message event would run a duplicate agent turn. Bounded
+ * first-seen-wins memory of recent event keys.
+ */
+class DedupWindow {
+  private seen = new Set<string>();
+  private order: string[] = [];
+
+  has(key: string): boolean {
+    if (this.seen.has(key)) return true;
+    this.seen.add(key);
+    this.order.push(key);
+    if (this.order.length > 2000) this.seen.delete(this.order.shift()!);
+    return false;
+  }
+}
+
 export class SlackAdapter implements SurfaceAdapter {
   readonly id = SURFACE_ID;
   readonly capabilities: SurfaceCapabilities = {
@@ -45,6 +79,7 @@ export class SlackAdapter implements SurfaceAdapter {
   private app: App;
   private botUserId: string | null = null;
   private emit: Emit = () => {};
+  private dedup = new DedupWindow();
 
   constructor(
     tokens: { botToken: string; appToken: string },
@@ -65,6 +100,7 @@ export class SlackAdapter implements SurfaceAdapter {
 
     this.app.command("/conduit", async ({ command, ack, respond }) => {
       await ack();
+      if (command.trigger_id && this.dedup.has(`cmd:${command.trigger_id}`)) return;
       try {
         await this.handleSlashCommand(command, respond);
       } catch (err) {
@@ -77,7 +113,7 @@ export class SlackAdapter implements SurfaceAdapter {
     });
 
     this.app.event("app_mention", async ({ event }) => {
-      this.handleMention(event as Record<string, any>);
+      await this.handleMention(event as Record<string, any>);
     });
 
     this.app.event("message", async ({ event }) => {
@@ -124,7 +160,11 @@ export class SlackAdapter implements SurfaceAdapter {
         }
         this.emit({
           kind: "command",
-          conv: { surfaceId: SURFACE_ID, channelId, conversationId: anchorTs },
+          conv: {
+            surfaceId: SURFACE_ID,
+            channelId,
+            conversationId: encodeConversationId(channelId, anchorTs),
+          },
           author,
           name: "assign",
           args,
@@ -161,36 +201,59 @@ export class SlackAdapter implements SurfaceAdapter {
     }
   }
 
+  /**
+   * Strict command forms only — anything looser is conversation, not a
+   * command ("@Conduit take a look at src/x.ts" must reach the session, not
+   * trigger an assign).
+   */
   private mentionCommand(text: string): { name: "assign" | "stop" | "status"; args: string } | null {
     if (!this.botUserId) return null;
-    const m = text.match(new RegExp(`^\\s*<@${this.botUserId}>\\s*(.*)$`, "s"));
+    const m = text.match(new RegExp(`^\\s*<@${this.botUserId}(?:\\|[^>]*)?>\\s*(.*)$`, "s"));
     if (!m) return null;
-    const [word = "", ...rest] = m[1]!.trim().split(/\s+/);
-    switch (word.toLowerCase()) {
-      case "assign":
-      case "take":
-        return { name: "assign", args: rest.filter((w) => w !== "this").join(" ") };
-      case "stop":
-        return { name: "stop", args: rest.join(" ") };
-      case "status":
-        return { name: "status", args: rest.join(" ") };
-      default:
-        return null;
+    const words = m[1]!.trim().split(/\s+/).filter(Boolean);
+    const [first = "", second = "", third] = words.map((w) => w.toLowerCase());
+    if (first === "assign" && words.length <= 2) {
+      return { name: "assign", args: words.length === 2 ? words[1]! : "" };
     }
+    if (first === "take" && second === "this" && third === undefined) {
+      return { name: "assign", args: "" };
+    }
+    if (first === "stop" && words.length === 1) return { name: "stop", args: "" };
+    if (first === "status" && words.length === 1) return { name: "status", args: "" };
+    return null;
   }
 
-  private handleMention(event: Record<string, any>): void {
-    if (!event.user || event.user === this.botUserId) return;
+  private async handleMention(event: Record<string, any>): Promise<void> {
+    if (!event.user || event.bot_id || event.user === this.botUserId) return;
+    if (this.dedup.has(`mention:${event.channel}:${event.ts}`)) return;
     const cmd = this.mentionCommand(String(event.text ?? ""));
-    if (!cmd) return; // plain mentions flow through the message handler as turns
-    // Mentions DO carry thread context; a top-level mention roots its own thread.
-    const conversationId = String(event.thread_ts ?? event.ts);
+    const channelId = String(event.channel);
+    if (!cmd) {
+      // Conversational mentions inside threads flow through the message
+      // handler. A top-level plain mention reaches no session — answer with a
+      // pointer instead of silence.
+      if (!event.thread_ts) {
+        await this.app.client.chat
+          .postMessage({
+            channel: channelId,
+            thread_ts: String(event.ts),
+            text:
+              "I work inside assigned threads. Start one with `/conduit assign`, " +
+              "or mention `@Conduit assign` in an existing thread.",
+          })
+          .catch(() => {});
+      }
+      return;
+    }
+    // Mentions DO carry thread context; a top-level command mention roots its
+    // own thread.
+    const rootTs = String(event.thread_ts ?? event.ts);
     this.emit({
       kind: "command",
       conv: {
         surfaceId: SURFACE_ID,
-        channelId: String(event.channel),
-        conversationId,
+        channelId,
+        conversationId: encodeConversationId(channelId, rootTs),
       },
       author: { surface: SURFACE_ID, externalId: String(event.user) },
       name: cmd.name,
@@ -203,6 +266,7 @@ export class SlackAdapter implements SurfaceAdapter {
     const subtype = event.subtype as string | undefined;
     if (subtype && subtype !== "file_share" && subtype !== "thread_broadcast") return;
     if (!event.thread_ts) return; // sessions are threads; top-level chatter is not ours
+    if (this.dedup.has(`msg:${event.channel}:${event.ts}`)) return;
     const text = String(event.text ?? "");
     if (this.mentionCommand(text)) return; // command mentions are handled via app_mention
 
@@ -218,7 +282,7 @@ export class SlackAdapter implements SurfaceAdapter {
       conv: {
         surfaceId: SURFACE_ID,
         channelId: String(event.channel),
-        conversationId: String(event.thread_ts),
+        conversationId: encodeConversationId(String(event.channel), String(event.thread_ts)),
       },
       author: { surface: SURFACE_ID, externalId: String(event.user) },
       text,
@@ -231,7 +295,7 @@ export class SlackAdapter implements SurfaceAdapter {
   async post(conv: ConversationRef, msg: OutboundMessage): Promise<PostedRef> {
     const res = await this.app.client.chat.postMessage({
       channel: conv.channelId,
-      thread_ts: conv.conversationId || undefined,
+      thread_ts: threadTsOf(conv),
       text: renderMrkdwn(msg.text),
     });
     return { conv, messageId: String(res.ts) };

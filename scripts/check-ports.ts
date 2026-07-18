@@ -5,20 +5,25 @@
 // Also enforced: no `thread_ts` (or other Slack wire names) leaking into core.
 
 import { readdirSync, readFileSync, statSync } from "node:fs";
-import { join, relative } from "node:path";
+import { dirname, join, normalize, relative, sep } from "node:path";
 
 const ROOT = join(import.meta.dir, "..");
 const SRC = join(ROOT, "src");
-const ADAPTERS_PREFIX = join("src", "adapters") + "/";
+const ADAPTERS_PREFIX = join("src", "adapters") + sep;
 
 const FORBIDDEN_IMPORTS = ["@slack/", "@anthropic-ai/claude-agent-sdk"];
 const FORBIDDEN_CORE_TOKENS = ["thread_ts", "block_actions", "xoxb-", "xapp-"];
+/** The composition root is the one non-adapter file allowed to import adapters. */
+const COMPOSITION_ROOTS = new Set([join("src", "daemon.ts")]);
+
+const IMPORT_SPECIFIER =
+  /(?:from\s+|import\s*\(\s*|require\s*\(\s*|import\s+)["']([^"']+)["']/g;
 
 function* walk(dir: string): Generator<string> {
   for (const name of readdirSync(dir)) {
     const full = join(dir, name);
     if (statSync(full).isDirectory()) yield* walk(full);
-    else if (name.endsWith(".ts")) yield full;
+    else if (/\.(ts|tsx|mts|js|mjs|cjs)$/.test(name)) yield full;
   }
 }
 
@@ -38,6 +43,19 @@ export function checkPorts(): string[] {
       for (const token of FORBIDDEN_CORE_TOKENS) {
         if (line.includes(token)) {
           violations.push(`${rel}:${i + 1} contains surface wire token "${token}"`);
+        }
+      }
+      // Importing an adapter module from core smuggles platform types across
+      // the seam without ever naming the package — resolve relative
+      // specifiers and flag anything landing under src/adapters/.
+      if (!COMPOSITION_ROOTS.has(rel)) {
+        for (const match of line.matchAll(IMPORT_SPECIFIER)) {
+          const spec = match[1]!;
+          if (!spec.startsWith(".")) continue;
+          const resolved = relative(ROOT, normalize(join(dirname(file), spec)));
+          if (resolved.startsWith(ADAPTERS_PREFIX)) {
+            violations.push(`${rel}:${i + 1} imports adapter module "${spec}"`);
+          }
         }
       }
     });

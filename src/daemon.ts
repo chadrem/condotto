@@ -26,12 +26,18 @@ async function main(): Promise<void> {
 
   const store = new Store(config.dbPath);
   for (const repo of config.repos) store.upsertRepo(repo);
+  const orphans = store.parkOrphanedActiveSessions();
+  if (orphans > 0) log(`[daemon] parked ${orphans} session(s) orphaned mid-turn by a previous crash`);
 
   const worktrees = new WorktreeManager(config.worktreesRoot);
   const harness = new ClaudeCodeAdapter();
   const manager = new SessionManager(store, harness, worktrees, log);
 
-  if (!config.slack) {
+  // Surface credentials belong to the adapter, not core config — the
+  // composition root reads them and hands them straight over.
+  const botToken = process.env.SLACK_BOT_TOKEN;
+  const appToken = process.env.SLACK_APP_TOKEN;
+  if (!botToken || !appToken) {
     console.error(
       "No Slack tokens found. Create .env with SLACK_BOT_TOKEN and SLACK_APP_TOKEN " +
         "(see DESIGN.md Appendix C for the Slack app setup), then rerun.",
@@ -39,7 +45,7 @@ async function main(): Promise<void> {
     process.exit(1);
   }
 
-  const slack = new SlackAdapter(config.slack, log);
+  const slack = new SlackAdapter({ botToken, appToken }, log);
   manager.registerSurface(slack);
   await slack.start((event) => {
     void manager.handleEvent(event);

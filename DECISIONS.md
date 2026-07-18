@@ -142,3 +142,48 @@ behind the surface port) remains available per §6.
   every tool call, and a **separate process** resumed by handle and recalled
   the prior answer — the M1 park/resume loop works outside tests
   (`scripts/smoke-create.ts` / `smoke-resume.ts`).
+
+## 2026-07-18 — M1 adversarial review: 41 confirmed findings, fixes applied
+
+A six-dimension multi-agent review (ports, security, Slack, store, lifecycle,
+SDK usage) with three-lens adversarial verification confirmed 41 findings
+(15 refuted). Fixed the same day; the load-bearing ones:
+
+- **Worktree confinement (security, high):** read-only tools could read ANY
+  host file (`.env` tokens, the daemon DB) and post it into the thread — a
+  clean exfiltration channel. The M1 gate now denies any Read/Glob/Grep whose
+  path resolves outside the session's worktree (`pathConfined` in
+  `core/session-manager.ts`; symlink-chasing is M3/M4 hardening).
+- **Fail-closed gate (security, high):** a throwing GateFn used to fall
+  through to the SDK permission system where `allowedTools` auto-approved the
+  call. The `PreToolUse` hook now catches and answers `deny`.
+- **Settings isolation (security):** `settingSources: []` on every `query()` —
+  repo content (worktree `CLAUDE.md`, `.mcp.json`, `.claude/`) is untrusted
+  input and must never register MCP servers or alter permissions.
+- **Stop is now irreversible mid-turn (high):** the turn's cleanup only ever
+  downgrades `active`→`parked`, and stop no longer deletes the per-session
+  FIFO (stop → re-assign → message used to run two concurrent turns on one
+  SDK session).
+- **Delivery correctness:** a delivered reply is never overwritten by a late
+  error; surface delivery failures fall back edit→post and are not confused
+  with harness failures; harness attach errors surface in-thread.
+- **Slack correctness:** conversation ids are now `channel:ts` (thread_ts is
+  only unique per channel); strict mention-command parsing ("@Conduit take a
+  look…" is conversation, not an assign); bounded dedup for Slack's
+  at-least-once delivery; inline code spans protected in mrkdwn rendering.
+- **A1 framing:** all Unicode line separators (\r, NEL, LS, PS) normalized
+  before quoting so no content line can escape the `> ` prefix.
+- **check-ports:** now also flags core files importing adapter modules by
+  relative path (the probe that slipped through), with `src/daemon.ts`
+  allowlisted as the composition root.
+- Plus: dead-session-id recovery (resume failure restarts fresh instead of
+  wedging the thread forever), a 10-minute turn inactivity watchdog with
+  `interrupt()`, startup reconciliation parking crash-orphaned `active`
+  sessions, `busy_timeout`, channel-scoped `/conduit status`, and
+  `updatedInput` forwarded through the gate hook.
+
+**Deliberately deferred** (logged, not bugs): append-mode progress for
+`editMessages: false` surfaces (no such surface until adapter #2), worktree
+orphan cleanup on assign races (M4), symlink-aware confinement (M3/M4),
+render polish (URLs containing `)`, truncation mid-fence), turn duration
+timestamps.

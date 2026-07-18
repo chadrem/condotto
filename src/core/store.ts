@@ -47,6 +47,7 @@ export class Store {
     this.db = new Database(path, { create: true, strict: true });
     this.db.run("PRAGMA journal_mode = WAL;");
     this.db.run("PRAGMA foreign_keys = ON;");
+    this.db.run("PRAGMA busy_timeout = 5000;"); // fail slow, not sporadically, if a second process appears
     this.migrate();
   }
 
@@ -237,6 +238,16 @@ export class Store {
 
   updateSessionStatus(id: string, status: SessionStatus): void {
     this.db.query(`UPDATE sessions SET status = $status WHERE id = $id`).run({ id, status });
+  }
+
+  /**
+   * Startup reconciliation: 'active' means a turn is in flight, so any
+   * 'active' row at boot is an orphan from a crash mid-turn. Park them so the
+   * state machine starts clean.
+   */
+  parkOrphanedActiveSessions(): number {
+    return this.db.query(`UPDATE sessions SET status = 'parked' WHERE status = 'active'`).run()
+      .changes;
   }
 
   touchSession(id: string): void {

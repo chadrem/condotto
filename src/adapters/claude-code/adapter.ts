@@ -33,9 +33,11 @@ interface ClaudeCodeHandle {
   system: string;
 }
 
-// Read-only surface for M1. `allowedTools` auto-approves these; every other
-// built-in is disallowed by bare name, which removes it from the model's
-// context entirely (verified against the live typescript.md, 2026-07-18).
+// Read-only surface for M1. `allowedTools` auto-approves these. The denylist
+// removes the known dangerous built-ins from context by bare name, but it is
+// NOT assumed exhaustive (the SDK grows tools) — the core's GateFn sees every
+// tool call via the PreToolUse hook below and denies anything outside the
+// read-only set, so an unlisted tool is still blocked, just later.
 const ALLOWED_TOOLS = ["Read", "Glob", "Grep", "TodoWrite"];
 const DISALLOWED_TOOLS = [
   "Write",
@@ -47,11 +49,21 @@ const DISALLOWED_TOOLS = [
   "WebFetch",
   "WebSearch",
   "Task",
+  "ExitPlanMode",
+  "SlashCommand",
 ];
+
+/** Abort a turn if the SDK produces nothing at all for this long. */
+const TURN_INACTIVITY_MS = 10 * 60_000;
 
 function asHandle(handle: SessionHandle): ClaudeCodeHandle {
   const h = handle as Partial<ClaudeCodeHandle> | null;
-  if (!h || h.v !== 1 || typeof h.system !== "string") {
+  if (
+    !h ||
+    h.v !== 1 ||
+    typeof h.system !== "string" ||
+    (h.sessionId !== null && typeof h.sessionId !== "string")
+  ) {
     throw new Error("claude-code: unrecognized session handle");
   }
   return h as ClaudeCodeHandle;
@@ -68,23 +80,38 @@ class ClaudeCodeSession implements HarnessSession {
   }
 
   async *turn(input: TurnInput, gate: GateFn): AsyncIterable<TurnEvent> {
-    const events = this.runQuery(input, gate);
-    yield* events;
+    yield* this.runQuery(input, gate, /* allowFreshRetry */ true);
   }
 
-  private async *runQuery(input: TurnInput, gate: GateFn): AsyncGenerator<TurnEvent> {
+  private async *runQuery(
+    input: TurnInput,
+    gate: GateFn,
+    allowFreshRetry: boolean,
+  ): AsyncGenerator<TurnEvent> {
+    // The gate is THE security boundary — it must fail closed. A gate that
+    // throws would otherwise fall through to the SDK permission system, where
+    // allowedTools would silently auto-approve the call.
     const gateHook = async (hookInput: unknown, toolUseID: string | undefined) => {
       const call = hookInput as { tool_name?: string; tool_input?: unknown };
-      const decision = await gate({
-        id: toolUseID ?? "",
-        name: call.tool_name ?? "unknown",
-        input: call.tool_input,
-      });
+      let decision: Awaited<ReturnType<GateFn>>;
+      try {
+        decision = await gate({
+          id: toolUseID ?? "",
+          name: call.tool_name ?? "unknown",
+          input: call.tool_input,
+        });
+      } catch (err) {
+        decision = { decision: "deny", reason: `gate error (denied fail-closed): ${err}` };
+      }
       return {
         hookSpecificOutput: {
           hookEventName: "PreToolUse" as const,
           permissionDecision: decision.decision,
           permissionDecisionReason: decision.decision === "deny" ? decision.reason : undefined,
+          updatedInput:
+            decision.decision === "allow" && decision.updatedInput !== undefined
+              ? (decision.updatedInput as Record<string, unknown>)
+              : undefined,
         },
       };
     };
@@ -98,44 +125,82 @@ class ClaudeCodeSession implements HarnessSession {
         allowedTools: ALLOWED_TOOLS,
         disallowedTools: DISALLOWED_TOOLS,
         permissionMode: "default",
+        // Never load filesystem settings (CLAUDE.md, .mcp.json, .claude/) from
+        // the worktree: repo content is untrusted input and must not be able to
+        // register MCP servers or alter permissions (DESIGN.md §4).
+        settingSources: [],
         hooks: { PreToolUse: [{ hooks: [gateHook] }] },
       },
     });
 
-    let sawReply = false;
-    for await (const message of q) {
-      const m = message as Record<string, any>;
-      if (m.type === "system" && m.subtype === "init") {
-        if (m.session_id && m.session_id !== this._handle.sessionId) {
-          this._handle = { ...this._handle, sessionId: m.session_id };
-          yield { kind: "handle_updated", handle: this._handle };
+    let sawResult = false;
+    try {
+      const iterator = q[Symbol.asyncIterator]();
+      while (true) {
+        // Inactivity watchdog: a wedged SDK query must not hang the session's
+        // turn queue forever.
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        const timeout = new Promise<"timeout">((resolveTimeout) => {
+          timer = setTimeout(() => resolveTimeout("timeout"), TURN_INACTIVITY_MS);
+        });
+        const step = await Promise.race([iterator.next(), timeout]).finally(() =>
+          clearTimeout(timer),
+        );
+        if (step === "timeout") {
+          await q.interrupt().catch(() => {});
+          yield { kind: "error", message: "session turn timed out (no activity for 10 minutes)" };
+          return;
         }
-        continue;
-      }
-      if (m.type === "assistant") {
-        const blocks: any[] = m.message?.content ?? [];
-        for (const block of blocks) {
-          if (block?.type === "tool_use") {
-            yield { kind: "progress", text: describeToolUse(block.name, block.input) };
+        if (step.done) break;
+
+        const m = step.value as Record<string, any>;
+        if (m.type === "system" && m.subtype === "init") {
+          if (m.session_id && m.session_id !== this._handle.sessionId) {
+            this._handle = { ...this._handle, sessionId: m.session_id };
+            yield { kind: "handle_updated", handle: this._handle };
+          }
+          continue;
+        }
+        if (m.type === "assistant") {
+          const blocks: any[] = m.message?.content ?? [];
+          for (const block of blocks) {
+            if (block?.type === "tool_use") {
+              yield { kind: "progress", text: describeToolUse(block.name, block.input) };
+            }
+          }
+          continue;
+        }
+        if (m.type === "result") {
+          sawResult = true;
+          if (m.subtype === "success") {
+            yield {
+              kind: "reply",
+              text: typeof m.result === "string" && m.result.length > 0 ? m.result : "(no reply)",
+              costUsd: typeof m.total_cost_usd === "number" ? m.total_cost_usd : undefined,
+            };
+          } else {
+            yield { kind: "error", message: `session turn ended abnormally (${m.subtype})` };
           }
         }
-        continue;
       }
-      if (m.type === "result") {
-        if (m.subtype === "success") {
-          sawReply = true;
-          yield {
-            kind: "reply",
-            text: typeof m.result === "string" && m.result.length > 0 ? m.result : "(no reply)",
-            costUsd: typeof m.total_cost_usd === "number" ? m.total_cost_usd : undefined,
-          };
-        } else {
-          sawReply = true;
-          yield { kind: "error", message: `session turn ended abnormally (${m.subtype})` };
-        }
+    } catch (err) {
+      // A persisted session id the runtime no longer knows (pruned storage,
+      // moved machine) would otherwise wedge the thread forever. Recover by
+      // starting fresh once: context is lost but the conversation continues.
+      const message = err instanceof Error ? err.message : String(err);
+      if (allowFreshRetry && this._handle.sessionId && /No conversation found/i.test(message)) {
+        this._handle = { ...this._handle, sessionId: null };
+        yield { kind: "handle_updated", handle: this._handle };
+        yield {
+          kind: "progress",
+          text: "previous session could not be resumed — starting fresh (prior context lost)",
+        };
+        yield* this.runQuery(input, gate, false);
+        return;
       }
+      throw err;
     }
-    if (!sawReply) {
+    if (!sawResult) {
       yield { kind: "error", message: "session turn produced no result" };
     }
   }
@@ -167,7 +232,7 @@ export class ClaudeCodeAdapter implements HarnessAdapter {
     mechanicalGating: true, // verified by the M0 spike (defer); M1 uses instant decisions
     resumeAfterRestart: true,
     costReporting: true, // notional API pricing on subscription auth — usage governance only
-    imageInput: true,
+    imageInput: true, // the runtime accepts images; the TurnInput image path arrives with M3 attachments
   };
 
   async create(opts: { cwd: string; system: string }): Promise<HarnessSession> {

@@ -129,8 +129,8 @@ describe("conversing", () => {
 
     // The human saw a status message that became the reply.
     expect(w.surface.updates.at(-1)?.text).toContain("echo(fake-session-1)");
-    // Gate ran and allowed the read-only tool.
-    expect(w.surface.updates.at(-1)?.text).toContain("gate=allow");
+    // Gate allowed the in-worktree read and denied the /etc/hosts escape.
+    expect(w.surface.updates.at(-1)?.text).toContain("gate=allow,deny");
     // Handle was persisted for park & resume.
     expect(row!.harness_session_handle).toMatchObject({ sessionId: "fake-session-1" });
   });
@@ -208,7 +208,36 @@ describe("stop & status", () => {
     await w.manager.handleEvent({ kind: "command", conv: c, author: architect, name: "assign", args: "" });
     const second = w.store.getSessionByConversation("fake", "800.000001")!;
     expect(second.id).toBe(first.id);
-    expect(second.status).toBe("active");
+    expect(second.status).toBe("parked");
+  });
+
+  test("stop during an in-flight turn sticks — the turn's cleanup never resurrects the session", async () => {
+    const w = makeWorld();
+    const c = conv("810.000001");
+    await w.manager.handleEvent({ kind: "command", conv: c, author: architect, name: "assign", args: "" });
+
+    // Hold the turn open until we release it, so stop lands mid-turn.
+    let release!: () => void;
+    const held = new Promise<void>((r) => (release = r));
+    w.harness.beforeReply = () => held;
+
+    const turnPromise = w.manager.handleEvent({
+      kind: "message",
+      conv: c,
+      author: architect,
+      text: "long running question",
+      attachments: [],
+    });
+    await Bun.sleep(10); // let the turn start
+    await w.manager.handleEvent({ kind: "command", conv: c, author: architect, name: "stop", args: "" });
+    w.harness.beforeReply = null;
+    release();
+    await turnPromise;
+
+    expect(w.store.getSessionByConversation("fake", "810.000001")!.status).toBe("stopped");
+    const before = w.harness.allTurns.length;
+    await w.manager.handleEvent({ kind: "message", conv: c, author: architect, text: "hi?", attachments: [] });
+    expect(w.harness.allTurns.length).toBe(before);
   });
 
   test("status lists sessions", async () => {

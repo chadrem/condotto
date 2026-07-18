@@ -34,6 +34,8 @@ for await (const ev of session.turn(
   if (ev.kind === "reply") reply = ev.text;
 }
 
-const remembered = /ledger|format/i.test(reply);
+// Match the actual filenames, not loose substrings ("format" is inside
+// "information" — a fresh, context-free session could false-pass).
+const remembered = /ledger\.ts|format\.ts/i.test(reply);
 console.log(`[smoke] context retained across processes: ${remembered}`);
 process.exit(remembered ? 0 : 1);

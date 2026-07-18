@@ -75,17 +75,23 @@ class FakeHarnessSession implements HarnessSession {
   async *turn(input: TurnInput, gate: GateFn): AsyncIterable<TurnEvent> {
     this.turns.push(input);
     this.parent.allTurns.push({ cwd: this.cwd, text: input.text });
+    if (this.parent.beforeReply) await this.parent.beforeReply();
     if (this._handle.sessionId === null) {
       this._handle = { ...this._handle, sessionId: `fake-session-${++this.parent.sessionSeq}` };
       yield { kind: "handle_updated", handle: this._handle };
     }
-    const call: ToolCall = { id: "t1", name: "Read", input: { file_path: "README.md" } };
-    this.gateCalls.push(call);
-    const decision = await gate(call);
+    // Exercise the gate with one in-worktree read and one escape attempt.
+    const inside: ToolCall = { id: "t1", name: "Read", input: { file_path: "README.md" } };
+    const outside: ToolCall = { id: "t2", name: "Read", input: { file_path: "/etc/hosts" } };
+    this.gateCalls.push(inside, outside);
+    const insideDecision = await gate(inside);
+    const outsideDecision = await gate(outside);
     yield { kind: "progress", text: "reading README.md" };
     yield {
       kind: "reply",
-      text: `echo(${this._handle.sessionId}) gate=${decision.decision}: ${input.text.slice(-60)}`,
+      text:
+        `echo(${this._handle.sessionId}) gate=${insideDecision.decision},${outsideDecision.decision}: ` +
+        input.text.slice(-60),
       costUsd: 0.01,
     };
   }
@@ -106,6 +112,8 @@ export class FakeHarness implements HarnessAdapter {
   created: { cwd: string; system: string }[] = [];
   resumed: { handle: SessionHandle; cwd: string }[] = [];
   allTurns: { cwd: string; text: string }[] = [];
+  /** Test hook: awaited at the start of every turn (lets tests hold a turn open). */
+  beforeReply: (() => Promise<void>) | null = null;
 
   async create(opts: { cwd: string; system: string }): Promise<HarnessSession> {
     this.created.push(opts);

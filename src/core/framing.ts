@@ -26,7 +26,10 @@ export function frameMessage(opts: {
   text: string;
 }): string {
   const name = opts.displayName ? sanitizeDisplayName(opts.displayName) : "";
-  const quoted = opts.text
+  // Normalize every line separator the model might render as a line break
+  // (\r\n, \r, NEL, LS, PS) so no content line can escape the quote prefix.
+  const normalized = opts.text.replace(/\r\n|[\r\u0085\u2028\u2029]/g, "\n");
+  const quoted = normalized
     .split("\n")
     .map((line) => `> ${line}`)
     .join("\n");

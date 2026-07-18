@@ -23,7 +23,7 @@ const gate: GateFn = async (call) => {
 const config = loadConfig();
 const repo = config.repos[0]!;
 const worktrees = new WorktreeManager(config.worktreesRoot);
-const sessionId = `smoke-${Date.now()}`;
+const sessionId = crypto.randomUUID(); // same shape as the real flow (branch name derives from it)
 const worktree = await worktrees.create({
   repoPath: repo.path,
   defaultBranch: repo.defaultBranch,
