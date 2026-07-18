@@ -591,3 +591,64 @@ mutations via the M0-proven defer→approve→resume path. Defense-in-depth: dae
 catches any subagent (built-in type or Workflow-spawned) that still reaches for a
 gated tool. The `ultra` preset = `xhigh` + subagents + the `Workflow` tool; its
 orchestrated sub-agents obey the same subagent gate.
+
+## 2026-07-18 — M3.5 complete: full Claude Code power in the thread
+
+**Implementation (DESIGN.md §8 Milestone 3.5).** Three tiers, each independently
+demoable; 168 tests green, `tsc` + `check-ports` clean; real-SDK smokes pass
+(`smoke:model`, `smoke:subagents`) plus the two-phase subagent spike.
+
+1. **Tier A — model + effort.** Per-session `model`/`effort` (opaque tokens) with
+   per-repo defaults + a daemon-wide default of **Opus + high**. Commands
+   `@Conduit model <opus|sonnet|fable>` / `effort <low…max>` (architect-only,
+   audited); surfaced in intro/status/reactivation/help. The core validates by
+   membership against `HarnessCapabilities.supportedModels/supportedEfforts` and
+   forwards the token via `TurnInput.harness`; the adapter maps to SDK ids and
+   applies effort. Verified live (`smoke:model`).
+2. **Tier B — subagents + workflows + `ultra`.** Architect opt-in, default off:
+   `@Conduit subagents on|off`, `@Conduit ultra on|off` (= xhigh + subagents +
+   Workflow tool). Spike-driven design (previous entry): subagents fan out
+   **read-only**; a subagent-initiated gated action or nested spawn is **denied**
+   in the policy engine (`ToolCall.agentId` marks origin), because defer→resume is
+   main-thread-only. The main agent does mutations via the M0-proven
+   defer→approve→resume path. Daemon-defined read-only `explorer` subagent is
+   defense-in-depth over the gate. Verified live (`smoke:subagents`).
+3. **Tier C — trust-scoped project config.** `trusted: true` in `conduit.repos.json`
+   loads the repo's own config (`settingSources:["project"]` + `skills:"all"`);
+   untrusted (default, incl. testrepo) stays isolated. The §4 gate still applies
+   (the PreToolUse hook fires regardless of settingSources, and a hook deny/defer
+   beats any repo allow-rule). Admin-controlled trust root.
+
+**Dial-down** is first-class (cheaper model / lower effort / `subagents off` /
+`ultra off`) — model×effort×subagents burn the plan's rate limit, the real
+constraint on subscription auth (§4).
+
+**Ports stayed sealed:** model/effort/subagents/workflows/trusted are opaque to the
+core; `agentId` is an opaque origin marker; no SDK types crossed into `src/core/`
+(`check-ports` clean). The claude-code adapter is the only place that knows SDK
+model ids and tool names.
+
+**Adversarial review (7 dimensions, refute-by-default verification, run as a
+multi-agent Workflow).** 3 candidates, 2 confirmed and fixed (commit 74f42a0):
+- **(policy)** A subagent-initiated **allowlisted** bash executed — the subagent
+  branch only rewrote `gate`→`deny`, so an allowlisted command (e.g. the repo test
+  command) returned `allow` and ran, breaking the read-only-subagent invariant.
+  Fixed: subagents may run only genuine confined reads; allowlisted bash is denied.
+- **(lifecycle)** A capability toggle during a turn's async harness-attach window
+  could lose the prompt-cache invalidation (stale delegation guidance; tools/gate
+  unaffected). Fixed with a race-free `promptKey` check in `getOrAttachHarness`.
+- Refuted: config model/effort tokens are case-sensitive — fails safe (warning +
+  fallback), documented lowercase; left as-is.
+
+**Open question §9 #7 (model routing) — partially resolved:** *who* can change the
+model/effort per thread is settled (the architect, via in-thread commands, audited).
+A single model/effort applies per session; separate conversation-vs-implementation
+model routing remains open (not needed for the demo).
+
+**Demo (defines done):** a PM describes a feature in plain language; the session
+(Opus, `ultra` on) plans it and fans out read-only exploration to subagents in
+parallel; the main agent proposes edits; the architect approves the writes and the
+land — all in Slack, on the throwaway `testrepo`. Build-time safety intact: writes
+only on testrepo, land/deploy echo/no-ops, subagents/trusted opt-in default-off.
+
+**New smokes:** `smoke:model`, `smoke:subagents`; spikes in `spikes/m3.5/`.

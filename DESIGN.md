@@ -801,7 +801,21 @@ framing (Appendix A) and add the production-data gate (§4). **Demo: a PM
 reports a bug in a thread; the session diagnoses, proposes a fix, gets
 architect approval, runs tests, lands on approval — all in Slack.**
 
-**Milestone 3.5 — Full Claude Code power in the thread (harness capabilities).**
+**Milestone 3.5 — Full Claude Code power in the thread (harness capabilities).
+✅ DONE 2026-07-18** (full facts in DECISIONS.md; 166 tests, `tsc` + `check-ports`
+clean; real-SDK smokes `smoke:model` and `smoke:subagents`, plus the two-phase
+subagent spike). Built in the three tiers below. Tier A ships per-session model +
+effort (opaque tokens the core validates by membership against
+`HarnessCapabilities.supportedModels/supportedEfforts` and forwards via
+`TurnInput.harness`; the adapter maps to SDK ids; default Opus + high). Tier B ships
+subagents/workflows + the `ultra` preset (architect opt-in, default off) — but the
+spike found **`defer`/resume is main-thread-only**, so subagents fan out READ-ONLY
+and any subagent-initiated gated call or nested spawn is **denied** in the policy
+engine (`ToolCall.agentId` marks origin); the main agent does mutations via the
+proven defer→approve→resume path. Tier C ships trust-scoped project config
+(`trusted: true` → `settingSources:["project"]` + `skills`; untrusted stays
+isolated; the gate still applies). Dial-down is built in (cheaper model / lower
+effort / subagents off / ultra off). Original text follows for reference.
 The implementer must be a *first-class* Claude Code agent for the north-star (§1)
 to work: a product manager building a real feature needs the best model, high
 reasoning effort, and — for non-trivial work — subagents/workflows and the team's
@@ -874,7 +888,10 @@ harness adapter (evaluate ACP first — §9).**
 6. **Where the policy lives** — per-repo config file in the repo itself
    (versioned, reviewable) vs. daemon-side config. (Leaning: in the repo.)
 7. **Model routing** — which model for conversation vs. implementation, and who
-   can change it per thread.
+   can change it per thread. **Partially resolved (M3.5): the architect changes
+   model + effort per thread via `@Conduit model`/`effort` (audited); one model/
+   effort applies per session.** Separate conversation-vs-implementation routing
+   is still open.
 8. **Second surface** — Teams, email, or a minimal web app first? (The web app
    is the best forcing function for the surface port and doubles as the
    signed-approval-link target for weak-identity surfaces; Teams is the
