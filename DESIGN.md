@@ -47,6 +47,18 @@ Claude Code — but the core is written against the interfaces from day one.
 | **Architect** (engineer/EM) | Slack humans with command authority | Decides how; approves dangerous actions; owns merges and deploys |
 | **Implementer** | Claude Code session | Writes the code, runs the tests, posts progress, asks good questions, ships when told |
 
+**North star (the real power).** The point is to let people with **domain
+expertise but not coding skill — product managers first — build features
+themselves**, in the surface they already live in (Slack), while a software
+engineer (the architect) guides and guards in the *same thread*. The PM drives
+the *what* and *why* in plain language; the implementer does the coding; the
+architect approves the consequential moves and keeps quality/safety honest. For
+that to be real, the implementer must be a **first-class Claude Code agent** —
+best model, high reasoning effort, subagents/workflows, the team's skills — not a
+toy. Exposing those capabilities to the thread is Milestone 3.5, and it is
+what turns "a chatbot that edits files" into "a PM shipping a feature with an
+engineer riding shotgun."
+
 **Why this doesn't exist yet.** Anthropic ships three adjacent things, none of
 which is this:
 
@@ -788,6 +800,50 @@ threads/sessions. Cost budgets and the runaway cap. Harden the injection
 framing (Appendix A) and add the production-data gate (§4). **Demo: a PM
 reports a bug in a thread; the session diagnoses, proposes a fix, gets
 architect approval, runs tests, lands on approval — all in Slack.**
+
+**Milestone 3.5 — Full Claude Code power in the thread (harness capabilities).**
+The implementer must be a *first-class* Claude Code agent for the north-star (§1)
+to work: a product manager building a real feature needs the best model, high
+reasoning effort, and — for non-trivial work — subagents/workflows and the team's
+skills. Today the adapter pins none of these: default model, default effort, the
+`Agent`/`Task` tool disallowed, `settingSources: []` (no repo `CLAUDE.md`, skills,
+or MCP). This milestone exposes them to the **architect** as in-thread controls,
+all still behind the §4 gate. Verified SDK facts (2026-07-18, see DECISIONS.md;
+re-confirm against live docs before building): `query()` takes `model`
+(`claude-opus-4-8`/`claude-fable-5`/`claude-sonnet-5`) and `effort`
+(`low|medium|high|xhigh|max`); **`PreToolUse` hooks fire inside subagents too**
+(hook input carries `agent_id`/`agent_type`), so subagent tool calls are gateable
+— enabling subagents does NOT bypass the gate; "ultracode" is CLI-only =
+`xhigh` + standing multi-agent permission, reproduced at the SDK as
+`effort:"xhigh"` + the `Agent`/`Workflow` tools; `settingSources:["project"]`
+(+`skills`) selectively loads a repo's config while the gate still applies.
+Build in tiers, safest first:
+
+- **Tier A — model + effort (safe, do first).** Persist `model` and `effort` per
+  session (like `budget_limit_usd`), with per-repo defaults + a global default
+  (default to Opus + high). Architect commands `@Conduit model <…>` /
+  `@Conduit effort <…>`; the harness port carries them (opaque to the core; the
+  adapter validates via `HarnessCapabilities`); shown in the intro/status.
+- **Tier B — subagents + workflows (needs a spike).** Architect opt-in per
+  session, default off: `@Conduit subagents on`, and an `@Conduit ultra on` preset
+  (= `xhigh` + `Agent`+`Workflow` tools). Un-disallow `Agent`/`Workflow`; give
+  subagents restricted default toolsets; **run an M0-style spike first** to confirm
+  the defer→Slack-approval→resume loop survives a *subagent-initiated* gated call
+  (hooks fire for subagents, but resume re-driving a subagent's pending call is
+  M0-proven only for the main agent). Log the result in DECISIONS.md.
+- **Tier C — skills / project config (trust-scoped).** A repo marked
+  `trusted: true` enables `settingSources:["project"]` + `skills` so its
+  `CLAUDE.md`/skills/`.claude/agents` load; daemon-configured MCP via `mcpServers`.
+  Untrusted repos unchanged. Needs a small trust model.
+
+Also give the architect a way to *dial down* (cheaper model / lower effort /
+subagents off), because model×effort×subagents burn the plan's **rate limit**
+(the real constraint on subscription auth — cost budgets are notional, §4). Keep
+the harness port honest: model/effort/capability flags are harness config the
+core persists and passes through, never core policy. **Demo: a PM describes a
+feature in plain language; the session (Opus, `xhigh`, subagents on) plans it,
+fans out to implement, the architect approves the writes and the land — the PM
+ships a feature they could not have hand-coded, guided in-thread.**
 
 **Milestone 4 — Dedicated box & hardening.** Move to the always-on machine with
 scoped daemon credentials. Session process isolation if needed. Read-only Slack

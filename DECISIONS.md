@@ -487,3 +487,51 @@ env-denylist-vs-allowlist design point — deliberate, since a real deploy needs
 most of the env). Regression tests added for each fix; 124 tests green, `tsc` +
 `check-ports` clean; the real-harness gate→approve→resume and 4-way concurrency
 smokes pass.
+
+## 2026-07-18 — Milestone 3.5 planned: expose full Claude Code power to the thread
+
+**Product driver (sharpens §1).** The north-star for Conduit is empowering people
+with **domain expertise but not coding skill — product managers first — to build
+features themselves** via Slack, with a software engineer (the architect) guiding
+and gating in the *same thread*. For that to be real the implementer must be a
+first-class Claude Code agent, not a constrained toy. The M3 adapter pins none of
+the levers (default model, default effort, `Agent`/`Task` disallowed,
+`settingSources: []`), so this is a dedicated milestone **before M4**.
+
+**SDK capability verification (authoritative, via the Claude Code SDK-guide
+against live docs; re-confirm exact IDs before building).**
+
+- **Model:** `query({ options: { model } })` accepts exact IDs —
+  `claude-opus-4-8`, `claude-fable-5`, `claude-sonnet-5`. Unset = CLI default.
+- **Effort:** `options.effort ∈ {low, medium, high, xhigh, max}`, *independent* of
+  extended thinking. `xhigh` needs Fable 5 / Opus 4.8·4.7 / Sonnet 5; `max` also
+  Opus 4.6 / Sonnet 4.6. Unset = model default (~high).
+- **Subagents are GATEABLE (the load-bearing finding):** per the hooks doc, a
+  `PreToolUse` hook fires **inside subagents too**, with `agent_id`/`agent_type`
+  on the hook input. So enabling the `Agent`/`Task` tool does NOT bypass our gate
+  — every subagent `Write`/`Bash` still hits it. Defense-in-depth: a subagent can
+  be given a restricted `tools` list. **Caveat to spike:** hooks *firing* proves
+  we can allow/deny a subagent call synchronously; our defer→Slack-approval→resume
+  loop re-driving a *subagent-initiated* pending call is M0-proven only for the
+  main agent — run an M0-style spike before shipping Tier B.
+- **"ultracode" is CLI-only, not an SDK flag.** It is `xhigh` effort + standing
+  permission to launch multi-agent workflows. Reproduce at the SDK with
+  `effort:"xhigh"` + the `Agent`/`Workflow` tools (the `Workflow` tool exists in
+  our SDK ≥0.3.149; we run 0.3.214).
+- **`settingSources`:** `[]` disables project/user `CLAUDE.md`, skills, project
+  hooks/settings/MCP, local settings (loads managed policy, `~/.claude.json`, auto
+  memory, claude.ai MCP regardless). `settingSources:["project"]` (+ `skills:"all"`)
+  selectively loads a repo's config while the `PreToolUse` gate still applies —
+  but it also loads that repo's permissions/hooks/MCP, so it is **trust-scoped**
+  (opt-in per repo). Daemon-defined programmatic `agents`/`mcpServers` avoid repo
+  trust entirely and are preferred where they fit.
+
+**Decision.** Add **Milestone 3.5 — Full Claude Code power in the thread** to
+DESIGN.md §8 (before M4), built in tiers: A model+effort (safe, first), B
+subagents/workflows + an `ultra` preset (architect opt-in, default off, gated,
+spike first), C skills/project config (trust-scoped). All exposed as architect
+in-thread commands, all behind the §4 gate; the harness port carries model/effort/
+capability flags as config the core persists and passes through (never core
+policy). Include a way to dial capability *down* — model×effort×subagents spend
+the subscription plan's **rate limit**, the real constraint (cost budgets are
+notional). **Not yet implemented** — this entry records the plan + verified facts.
