@@ -74,6 +74,10 @@ function approvalDetail(toolName: string, input: unknown): string | null {
       return str(i.file_path || i.notebook_path) || null;
     case "WebFetch":
       return str(i.url) || null;
+    case "conduit:land":
+    case "conduit:deploy":
+      // Show the exact repo command the architect is approving to run.
+      return str(i.command) || null;
     default: {
       const j = str(i);
       return j && j !== "{}" ? j : null;

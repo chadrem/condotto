@@ -174,6 +174,13 @@ class ClaudeCodeSession implements HarnessSession {
         allowedTools: ALLOWED_TOOLS,
         disallowedTools: DISALLOWED_TOOLS,
         permissionMode: "default",
+        // Intra-turn runaway brake (M3, DESIGN §4). The SDK stops the turn if it
+        // exceeds this, returning an `error_max_budget_usd` result we surface as
+        // a clear Slack notice (never a silent stall). The core passes the
+        // session's remaining thread headroom; omitted = no per-turn cap.
+        ...(typeof input.budgetUsd === "number" && input.budgetUsd > 0
+          ? { maxBudgetUsd: input.budgetUsd }
+          : {}),
         // Never load filesystem settings (CLAUDE.md, .mcp.json, .claude/) from
         // the worktree: repo content is untrusted input and must not be able to
         // register MCP servers or alter permissions (DESIGN.md §4).
@@ -228,6 +235,10 @@ class ClaudeCodeSession implements HarnessSession {
         }
         if (m.type === "result") {
           sawResult = true;
+          // total_cost_usd is reported on EVERY result — success, deferred, and
+          // error (incl. error_max_budget_usd) — so the core's cost ledger and
+          // runaway cap count all of them (verified against SDKResult* types).
+          const cost = typeof m.total_cost_usd === "number" ? m.total_cost_usd : undefined;
           const deferred = m.deferred_tool_use as
             | { id?: string; name?: string; input?: unknown }
             | undefined;
@@ -239,21 +250,33 @@ class ClaudeCodeSession implements HarnessSession {
               yield {
                 kind: "deferred",
                 call: { id: deferred.id, name: deferred.name ?? "unknown", input: deferred.input },
+                costUsd: cost,
               };
             } else {
               yield {
                 kind: "error",
                 message: "a tool call was deferred but no pending call was preserved",
+                costUsd: cost,
               };
             }
           } else if (m.subtype === "success") {
             yield {
               kind: "reply",
               text: typeof m.result === "string" && m.result.length > 0 ? m.result : "(no reply)",
-              costUsd: typeof m.total_cost_usd === "number" ? m.total_cost_usd : undefined,
+              costUsd: cost,
+            };
+          } else if (m.subtype === "error_max_budget_usd" || m.terminal_reason === "budget_exhausted") {
+            // The turn hit its cost budget and stopped (M3). Surface it clearly
+            // with the spend — the core will then pause the session (§4).
+            yield {
+              kind: "error",
+              message:
+                `I hit this turn's cost budget${cost !== undefined ? ` ($${cost.toFixed(2)})` : ""} and ` +
+                `stopped before finishing. An architect can raise the budget to let me continue.`,
+              costUsd: cost,
             };
           } else {
-            yield { kind: "error", message: `session turn ended abnormally (${m.subtype})` };
+            yield { kind: "error", message: `session turn ended abnormally (${m.subtype})`, costUsd: cost };
           }
         }
       }

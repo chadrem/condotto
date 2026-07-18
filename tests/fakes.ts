@@ -87,7 +87,7 @@ class FakeHarnessSession implements HarnessSession {
 
   async *turn(input: TurnInput, gate: GateFn): AsyncIterable<TurnEvent> {
     this.turns.push(input);
-    this.parent.allTurns.push({ cwd: this.cwd, text: input.text });
+    this.parent.allTurns.push({ cwd: this.cwd, text: input.text, budgetUsd: input.budgetUsd });
     if (this.parent.beforeReply) await this.parent.beforeReply();
     if (this._handle.sessionId === null) {
       this._handle = { ...this._handle, sessionId: `fake-session-${++this.parent.sessionSeq}` };
@@ -167,6 +167,10 @@ class FakeHarnessSession implements HarnessSession {
     this.gateCalls.push(inside, outside);
     const insideDecision = await gate(inside);
     const outsideDecision = await gate(outside);
+    // Optional burst of progress events (for testing status throttling).
+    for (let i = 0; i < this.parent.progressBurst; i++) {
+      yield { kind: "progress", text: `step ${i + 1}` };
+    }
     yield { kind: "progress", text: "reading README.md" };
     yield {
       kind: "reply",
@@ -192,13 +196,15 @@ export class FakeHarness implements HarnessAdapter {
   sessionSeq = 0;
   created: { cwd: string; system: string }[] = [];
   resumed: { handle: SessionHandle; cwd: string; system: string }[] = [];
-  allTurns: { cwd: string; text: string }[] = [];
+  allTurns: { cwd: string; text: string; budgetUsd?: number }[] = [];
   /** Tool calls the gate allowed to run (approved or auto-allowed). */
   executed: ToolCall[] = [];
   /** Queue of scripted tool-call lists, one per upcoming fresh turn. */
   private scripts: ToolCall[][] = [];
   /** Test hook: awaited at the start of every turn (lets tests hold a turn open). */
   beforeReply: (() => Promise<void>) | null = null;
+  /** Number of extra progress events the default turn emits (status-throttle tests). */
+  progressBurst = 0;
 
   /** Queue the tool calls the agent will attempt on its next fresh turn. */
   scriptTurn(calls: ToolCall[]): void {
@@ -218,5 +224,19 @@ export class FakeHarness implements HarnessAdapter {
     this.resumed.push({ handle, cwd, system });
     // Reflect the freshly-supplied prompt, as the real adapter does.
     return new FakeHarnessSession({ ...(handle as FakeHandle), system }, cwd, this);
+  }
+}
+
+/** Fake land/deploy command runner — records calls, returns a canned result. */
+export class FakeCommandRunner {
+  calls: { command: string; cwd: string }[] = [];
+  result: { code: number | null; output: string; timedOut: boolean } = {
+    code: 0,
+    output: "[land] no-op",
+    timedOut: false,
+  };
+  async run(command: string, cwd: string): Promise<{ code: number | null; output: string; timedOut: boolean }> {
+    this.calls.push({ command, cwd });
+    return this.result;
   }
 }

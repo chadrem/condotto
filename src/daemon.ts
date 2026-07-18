@@ -45,7 +45,14 @@ async function main(): Promise<void> {
 
   const worktrees = new WorktreeManager(config.worktreesRoot);
   const harness = new ClaudeCodeAdapter();
-  const manager = new SessionManager(store, harness, worktrees, log);
+  const manager = new SessionManager(store, harness, worktrees, log, {
+    defaultCostCapUsd: config.defaultCostCapUsd,
+    maxConcurrentTurns: config.maxConcurrentTurns,
+  });
+  log(
+    `[daemon] cost cap $${config.defaultCostCapUsd}/thread (default), ` +
+      `max ${config.maxConcurrentTurns} concurrent turns`,
+  );
 
   // Surface credentials belong to the adapter, not core config — the
   // composition root reads them and hands them straight over.

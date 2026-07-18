@@ -6,7 +6,7 @@ import { Store } from "../src/core/store";
 import { SessionManager } from "../src/core/session-manager";
 import { WorktreeManager } from "../src/core/worktrees";
 import type { ConversationRef, Principal } from "../src/core/types";
-import { FakeHarness, FakeSurface } from "./fakes";
+import { FakeHarness, FakeSurface, FakeCommandRunner } from "./fakes";
 
 let repoPath: string;
 let worktreesRoot: string;
@@ -47,18 +47,31 @@ interface World {
   store: Store;
   surface: FakeSurface;
   harness: FakeHarness;
+  runner: FakeCommandRunner;
   manager: SessionManager;
 }
 
-function makeWorld(store?: Store): World {
+function makeWorld(store?: Store, opts: { costCap?: number; maxConcurrentTurns?: number } = {}): World {
   const s = store ?? new Store(":memory:");
-  s.upsertRepo({ name: "testrepo", path: repoPath, defaultBranch: "main", safeBashAllowlist: ["git status"] });
+  s.upsertRepo({
+    name: "testrepo",
+    path: repoPath,
+    defaultBranch: "main",
+    safeBashAllowlist: ["git status"],
+    landCmd: "echo land-ran",
+    deployCmd: "echo deploy-ran",
+  });
   s.setRole("fake:U_ARCH", "architect"); // command authority (assign/stop/approve)
   const surface = new FakeSurface();
   const harness = new FakeHarness();
-  const manager = new SessionManager(s, harness, new WorktreeManager(worktreesRoot), () => {});
+  const runner = new FakeCommandRunner();
+  const manager = new SessionManager(s, harness, new WorktreeManager(worktreesRoot), () => {}, {
+    defaultCostCapUsd: opts.costCap ?? 10,
+    maxConcurrentTurns: opts.maxConcurrentTurns,
+    commandRunner: runner,
+  });
   manager.registerSurface(surface);
-  return { store: s, surface, harness, manager };
+  return { store: s, surface, harness, runner, manager };
 }
 
 const member: Principal = { surface: "fake", externalId: "U_MEMBER" };
@@ -481,5 +494,172 @@ describe("gating & approval loop (M2)", () => {
     w.harness.scriptTurn([{ id: "tu-read2", name: "Read", input: { file_path: "README.md" } }]);
     await w.manager.handleEvent({ kind: "message", conv: conv("b90.000001"), author: member, text: "hello again", attachments: [] });
     expect(w.harness.executed.map((c) => c.name)).toContain("Read");
+  });
+});
+
+describe("land / deploy (M3, DESIGN §2 journey 4)", () => {
+  async function assign(w: World, id: string): Promise<string> {
+    await w.manager.handleEvent({ kind: "command", conv: conv(id), author: architect, name: "assign", args: "" });
+    return w.store.getSessionByConversation("fake", id)!.id;
+  }
+
+  test("an architect ordering land posts an approval; approval runs the exact repo command and audits a deploy", async () => {
+    const w = makeWorld();
+    await assign(w, "d00.000001");
+    await w.manager.handleEvent({ kind: "command", conv: conv("d00.000001"), author: architect, name: "land", args: "" });
+
+    // A conduit:land approval was posted — not run yet (gated, §4).
+    expect(w.surface.approvalRequests.length).toBe(1);
+    expect(w.surface.approvalRequests[0]!.req.toolName).toBe("conduit:land");
+    expect(w.runner.calls.length).toBe(0);
+
+    const requestId = w.surface.lastApprovalRequestId()!;
+    await w.manager.handleEvent({ kind: "approval_decision", requestId, decider: architect, decision: "approved" });
+
+    // The daemon ran EXACTLY the repo's configured command in the worktree.
+    expect(w.runner.calls.length).toBe(1);
+    expect(w.runner.calls[0]!.command).toBe("echo land-ran");
+    const session = w.store.getSessionByConversation("fake", "d00.000001")!;
+    expect(w.runner.calls[0]!.cwd).toBe(session.worktree_path);
+    expect(w.store.listAudit(session.id).some((a) => a.event === "deploy")).toBe(true);
+    expect(w.surface.transcript().some((t) => t.includes("succeeded"))).toBe(true);
+  });
+
+  test("denying a land runs nothing", async () => {
+    const w = makeWorld();
+    await assign(w, "d10.000001");
+    await w.manager.handleEvent({ kind: "command", conv: conv("d10.000001"), author: architect, name: "deploy", args: "" });
+    const requestId = w.surface.lastApprovalRequestId()!;
+    await w.manager.handleEvent({ kind: "approval_decision", requestId, decider: architect, decision: "denied" });
+    expect(w.runner.calls.length).toBe(0);
+    expect(w.surface.transcript().some((t) => t.includes("cancelled"))).toBe(true);
+  });
+
+  test("a member cannot order a deploy", async () => {
+    const w = makeWorld();
+    await assign(w, "d20.000001");
+    await w.manager.handleEvent({ kind: "command", conv: conv("d20.000001"), author: member, name: "deploy", args: "" });
+    expect(w.surface.approvalRequests.length).toBe(0);
+    expect(w.surface.posts.at(-1)?.text).toContain("Only architects can deploy");
+  });
+
+  test("land is refused when the repo has no land command", async () => {
+    const w = makeWorld();
+    w.store.upsertRepo({ name: "testrepo", path: repoPath, defaultBranch: "main", safeBashAllowlist: ["git status"] }); // clears land/deploy
+    await assign(w, "d30.000001");
+    await w.manager.handleEvent({ kind: "command", conv: conv("d30.000001"), author: architect, name: "land", args: "" });
+    expect(w.surface.approvalRequests.length).toBe(0);
+    expect(w.surface.posts.at(-1)?.text).toContain("No land command is configured");
+  });
+
+  test("a nonzero exit is reported as a failure", async () => {
+    const w = makeWorld();
+    w.runner.result = { code: 2, output: "boom", timedOut: false };
+    await assign(w, "d40.000001");
+    await w.manager.handleEvent({ kind: "command", conv: conv("d40.000001"), author: architect, name: "land", args: "" });
+    const requestId = w.surface.lastApprovalRequestId()!;
+    await w.manager.handleEvent({ kind: "approval_decision", requestId, decider: architect, decision: "approved" });
+    expect(w.surface.transcript().some((t) => t.includes("exited 2"))).toBe(true);
+  });
+});
+
+describe("cost budgets & runaway cap (M3, DESIGN §4)", () => {
+  async function assignAndSpend(w: World, id: string, spent: number): Promise<string> {
+    await w.manager.handleEvent({ kind: "command", conv: conv(id), author: architect, name: "assign", args: "" });
+    const sid = w.store.getSessionByConversation("fake", id)!.id;
+    w.store.insertTurn({ sessionId: sid, direction: "out", text: "prior", costUsd: spent });
+    return sid;
+  }
+
+  test("a new turn passes the remaining budget to the harness as a per-turn cap", async () => {
+    const w = makeWorld(undefined, { costCap: 5 });
+    await w.manager.handleEvent({ kind: "command", conv: conv("e00.000001"), author: architect, name: "assign", args: "" });
+    await w.manager.handleEvent({ kind: "message", conv: conv("e00.000001"), author: member, text: "hi", attachments: [] });
+    expect(w.harness.allTurns.at(-1)!.budgetUsd).toBe(5); // full headroom on the first turn
+  });
+
+  test("a session over its cap pauses new turns and pings for a budget raise", async () => {
+    const w = makeWorld(undefined, { costCap: 5 });
+    const sid = await assignAndSpend(w, "e10.000001", 6); // already over the $5 cap
+    const before = w.harness.allTurns.length;
+    await w.manager.handleEvent({ kind: "message", conv: conv("e10.000001"), author: member, text: "do more", attachments: [] });
+    expect(w.harness.allTurns.length).toBe(before); // no turn ran
+    expect(w.surface.posts.at(-1)?.text).toContain("cost budget");
+    expect(w.store.listAudit(sid).some((a) => a.event === "budget_exceeded")).toBe(true);
+  });
+
+  test("an architect raising the budget unblocks the session", async () => {
+    const w = makeWorld(undefined, { costCap: 5 });
+    await assignAndSpend(w, "e20.000001", 6);
+    await w.manager.handleEvent({ kind: "command", conv: conv("e20.000001"), author: architect, name: "budget", args: "20" });
+    expect(w.surface.posts.at(-1)?.text).toContain("Cost budget set to $20.00");
+
+    const before = w.harness.allTurns.length;
+    await w.manager.handleEvent({ kind: "message", conv: conv("e20.000001"), author: member, text: "now continue", attachments: [] });
+    expect(w.harness.allTurns.length).toBe(before + 1); // runs again
+  });
+
+  test("a member cannot change the budget", async () => {
+    const w = makeWorld(undefined, { costCap: 5 });
+    await assignAndSpend(w, "e30.000001", 1);
+    await w.manager.handleEvent({ kind: "command", conv: conv("e30.000001"), author: member, name: "budget", args: "99" });
+    expect(w.surface.posts.at(-1)?.text).toContain("Only architects can change the cost budget");
+    expect(w.store.getSessionByConversation("fake", "e30.000001")!.budget_limit_usd).toBe(5);
+  });
+});
+
+describe("streaming progress (M3)", () => {
+  test("a burst of progress events is coalesced into the one status message and never clobbers the reply", async () => {
+    const w = makeWorld();
+    w.harness.progressBurst = 5; // emits 5 extra progress events before the reply
+    await w.manager.handleEvent({ kind: "command", conv: conv("g00.000001"), author: architect, name: "assign", args: "" });
+    await w.manager.handleEvent({ kind: "message", conv: conv("g00.000001"), author: architect, text: "go", attachments: [] });
+
+    // Throttled: 6 progress events did NOT produce 6 edits.
+    expect(w.surface.updates.length).toBeLessThan(4);
+    // The reply is the last thing shown, not a stranded progress line.
+    expect(w.surface.updates.at(-1)?.text).toContain("echo(");
+
+    // A late trailing flush must not fire after the reply and clobber it.
+    const finalText = w.surface.updates.at(-1)?.text;
+    await Bun.sleep(3000);
+    expect(w.surface.updates.at(-1)?.text).toBe(finalText);
+  });
+});
+
+describe("concurrency (M3, DESIGN §7)", () => {
+  test("turns across different sessions run concurrently but never exceed the cap", async () => {
+    const w = makeWorld(undefined, { maxConcurrentTurns: 2 });
+    const ids = ["f00.000001", "f01.000001", "f02.000001", "f03.000001"];
+    for (const id of ids) {
+      await w.manager.handleEvent({ kind: "command", conv: conv(id), author: architect, name: "assign", args: "" });
+    }
+
+    // Every turn blocks at its start until we open the shared gate, so the
+    // number "held" at once is exactly the number of admitted concurrency slots.
+    let active = 0;
+    let peak = 0;
+    let openGate!: () => void;
+    const gate = new Promise<void>((r) => (openGate = r));
+    w.harness.beforeReply = async () => {
+      active++;
+      peak = Math.max(peak, active);
+      await gate;
+      active--;
+    };
+
+    const turns = ids.map((id) =>
+      w.manager.handleEvent({ kind: "message", conv: conv(id), author: architect, text: "go", attachments: [] }),
+    );
+    // Wait for the semaphore to admit its maximum, then confirm it caps there.
+    for (let i = 0; i < 40 && active < 2; i++) await Bun.sleep(5);
+    await Bun.sleep(20);
+    expect(active).toBe(2); // capped — the other two are queued
+    expect(peak).toBe(2);
+
+    openGate();
+    await Promise.all(turns);
+    expect(peak).toBe(2); // never exceeded the cap across the whole run
+    expect(w.harness.allTurns.length).toBe(4); // all four eventually ran
   });
 });

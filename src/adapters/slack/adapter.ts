@@ -235,7 +235,9 @@ export class SlackAdapter implements SurfaceAdapter {
    * command ("@Conduit take a look at src/x.ts" must reach the session, not
    * trigger an assign).
    */
-  private mentionCommand(text: string): { name: "assign" | "stop" | "status"; args: string } | null {
+  private mentionCommand(
+    text: string,
+  ): { name: "assign" | "stop" | "status" | "land" | "deploy" | "budget"; args: string } | null {
     if (!this.botUserId) return null;
     const m = text.match(new RegExp(`^\\s*<@${this.botUserId}(?:\\|[^>]*)?>\\s*(.*)$`, "s"));
     if (!m) return null;
@@ -249,6 +251,10 @@ export class SlackAdapter implements SurfaceAdapter {
     }
     if (first === "stop" && words.length === 1) return { name: "stop", args: "" };
     if (first === "status" && words.length === 1) return { name: "status", args: "" };
+    if (first === "land" && words.length === 1) return { name: "land", args: "" };
+    if (first === "deploy" && words.length === 1) return { name: "deploy", args: "" };
+    // `@Conduit budget 20` — the amount is the one argument.
+    if (first === "budget" && words.length === 2) return { name: "budget", args: words[1]! };
     return null;
   }
 

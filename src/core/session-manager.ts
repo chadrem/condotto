@@ -9,9 +9,10 @@ import type {
   SurfaceAdapter,
 } from "./types";
 import { principalKey } from "./types";
-import type { Store, SessionRow } from "./store";
+import type { Store, SessionRow, ApprovalRow } from "./store";
 import { ConflictError } from "./store";
 import { WorktreeManager } from "./worktrees";
+import { CommandRunner, type CommandRunnerLike } from "./command-runner";
 import { frameMessage } from "./framing";
 import { evaluate, describeCall, type PolicyContext, type PolicyConcern } from "./policy";
 
@@ -97,17 +98,63 @@ interface LiveEntry {
   chain: Promise<void>;
 }
 
+export interface SessionManagerOptions {
+  /** Per-thread cost ceiling (USD) when a repo sets none (M3, DESIGN §4). */
+  defaultCostCapUsd?: number;
+  /** Max harness turns running at once across all sessions (M3 §7). */
+  maxConcurrentTurns?: number;
+  /** Runs repo land/deploy commands (M3); injectable for tests. */
+  commandRunner?: CommandRunnerLike;
+}
+
+/** Prefix marking an approval whose action the daemon runs itself (land/deploy) */
+const SHIP_TOOL_PREFIX = "conduit:";
+
+/**
+ * Counting semaphore bounding how many harness turns execute concurrently across
+ * all sessions (M3, DESIGN §7). Per-session turns are already serialized by the
+ * FIFO; this protects the box from N simultaneous heavy `query()` processes when
+ * many threads are active. FIFO order guarantees no deadlock: a turn never waits
+ * on another turn of the same session while holding a slot.
+ */
+class Semaphore {
+  private active = 0;
+  private waiters: (() => void)[] = [];
+  constructor(private max: number) {}
+  async acquire(): Promise<void> {
+    if (this.active < this.max) {
+      this.active++;
+      return;
+    }
+    await new Promise<void>((resolve) => this.waiters.push(resolve));
+    this.active++;
+  }
+  release(): void {
+    this.active--;
+    const next = this.waiters.shift();
+    if (next) next();
+  }
+}
+
 export class SessionManager {
   private surfaces = new Map<string, SurfaceAdapter>();
   /** Live harness sessions + a per-session FIFO so turns never interleave. */
   private live = new Map<string, LiveEntry>();
+  private readonly defaultCostCapUsd: number;
+  private readonly turnSlots: Semaphore;
+  private readonly commandRunner: CommandRunnerLike;
 
   constructor(
     private store: Store,
     private harness: HarnessAdapter,
     private worktrees: WorktreeManager,
     private log: (msg: string) => void = console.log,
-  ) {}
+    opts: SessionManagerOptions = {},
+  ) {
+    this.defaultCostCapUsd = opts.defaultCostCapUsd ?? 10;
+    this.turnSlots = new Semaphore(Math.max(1, opts.maxConcurrentTurns ?? 6));
+    this.commandRunner = opts.commandRunner ?? new CommandRunner();
+  }
 
   registerSurface(surface: SurfaceAdapter): void {
     this.surfaces.set(surface.id, surface);
@@ -168,6 +215,13 @@ export class SessionManager {
         break;
       case "stop":
         await this.stopSession(event.conv, event.author);
+        break;
+      case "budget":
+        await this.setBudget(event.conv, event.author, event.args);
+        break;
+      case "land":
+      case "deploy":
+        await this.shipCommand(event.conv, event.author, event.name);
         break;
     }
   }
@@ -239,6 +293,8 @@ export class SessionManager {
         harness_session_handle: null,
         branch: worktree.branch,
         status: "parked",
+        // Seed the per-thread cost ceiling: repo override, else daemon default.
+        budget_limit_usd: repo.cost_cap_usd ?? this.defaultCostCapUsd,
       });
     } catch (err) {
       if (err instanceof ConflictError) {
@@ -312,6 +368,152 @@ export class SessionManager {
     await surface.post(conv, {
       text: `Session stopped. Worktree preserved at ${session.worktree_path}.`,
     });
+  }
+
+  /** `@Conduit budget <usd>` — architect raises/lowers the thread cost cap (M3). */
+  private async setBudget(conv: ConversationRef, author: Principal, args: string): Promise<void> {
+    const surface = this.surfaceFor(conv);
+    const session = this.store.getSessionByConversation(conv.surfaceId, conv.conversationId);
+    if (!session || session.status === "stopped") {
+      await surface.post(conv, { text: "No active session in this thread." });
+      return;
+    }
+    if (!this.store.isArchitect(principalKey(author), conv.channelId)) {
+      this.store.audit({ sessionId: session.id, actor: principalKey(author), event: "authz_denied", detail: { action: "budget" } });
+      await surface.post(conv, { text: "Only architects can change the cost budget." });
+      return;
+    }
+    const amount = Number(args.trim().replace(/^\$/, ""));
+    if (!Number.isFinite(amount) || amount <= 0) {
+      await surface.post(conv, { text: "Usage: `@Conduit budget <amount>` — e.g. `@Conduit budget 20` (US dollars)." });
+      return;
+    }
+    this.store.setSessionBudgetLimit(session.id, amount);
+    this.store.audit({ sessionId: session.id, actor: principalKey(author), event: "budget_set", detail: { limitUsd: amount } });
+    const spent = this.store.sessionCostUsd(session.id);
+    await surface.post(conv, {
+      text: `Cost budget set to $${amount.toFixed(2)} for this session (spent so far: $${spent.toFixed(2)}).`,
+    });
+  }
+
+  /**
+   * `@Conduit land` / `@Conduit deploy` (M3, DESIGN §2 journey 4). Architect-
+   * ordered, and still gated behind an explicit Approve/Deny click (§4: the
+   * deploy path is a gated action). Records a `conduit:land`/`conduit:deploy`
+   * approval that, when approved, the daemon runs itself via CommandRunner —
+   * never through the agent's shell — so exactly the repo's configured command
+   * executes and is audited as a `deploy` event.
+   */
+  private async shipCommand(conv: ConversationRef, author: Principal, kind: "land" | "deploy"): Promise<void> {
+    const surface = this.surfaceFor(conv);
+    const session = this.store.getSessionByConversation(conv.surfaceId, conv.conversationId);
+    if (!session || session.status === "stopped") {
+      await surface.post(conv, { text: "No active session in this thread." });
+      return;
+    }
+    if (!this.store.isArchitect(principalKey(author), conv.channelId)) {
+      this.store.audit({ sessionId: session.id, actor: principalKey(author), event: "authz_denied", detail: { action: kind } });
+      await surface.post(conv, { text: `Only architects can ${kind}.` });
+      return;
+    }
+    const repo = this.store.getRepo(session.repo_id);
+    const command = kind === "land" ? repo?.land_cmd : repo?.deploy_cmd;
+    if (!command) {
+      await surface.post(conv, { text: `No ${kind} command is configured for repo \`${session.repo_id}\`.` });
+      return;
+    }
+    // Serialize through the FIFO so it can't overlap an in-flight turn, and
+    // re-check state inside it (a turn may have deferred or a stop landed).
+    const entry = this.entryFor(session.id);
+    entry.chain = entry.chain
+      .then(async () => {
+        const s = this.store.getSession(session.id);
+        if (!s || s.status === "stopped") return;
+        if (this.store.hasPendingApproval(s.id)) {
+          await surface.post(conv, { text: "There's already a pending approval in this thread — resolve it first." });
+          return;
+        }
+        const requestId = crypto.randomUUID();
+        const toolName = `${SHIP_TOOL_PREFIX}${kind}`;
+        const toolInput = { kind, repo: s.repo_id, command };
+        this.store.createApproval({ id: requestId, sessionId: s.id, toolUseId: null, toolName, toolInput });
+        this.store.audit({
+          sessionId: s.id,
+          actor: principalKey(author),
+          event: "approval_request",
+          detail: { requestId, tool: toolName, kind, command },
+        });
+        const prompt: ApprovalPrompt = {
+          requestId,
+          toolName,
+          toolInput,
+          summary: `${kind} \`${s.repo_id}\``,
+          concern:
+            kind === "deploy"
+              ? "This runs the repo's deploy path. Approve only when you intend to ship."
+              : undefined,
+        };
+        try {
+          await surface.requestApproval(conv, prompt);
+        } catch (err) {
+          this.store.expirePendingApprovals(s.id);
+          await surface
+            .post(conv, { text: `⚠️ Couldn't post the ${kind} approval (${err instanceof Error ? err.message : err}). Nothing ran.` })
+            .catch(() => {});
+        }
+      })
+      .catch((err) => this.log(`[session ${session.id}] ${kind} command failed: ${err}`));
+    await entry.chain;
+  }
+
+  /** Run an approved land/deploy command itself (not via the harness). */
+  private async runShip(
+    session: SessionRow,
+    approval: ApprovalRow,
+    conv: ConversationRef,
+    surface: SurfaceAdapter,
+    decider: string,
+  ): Promise<void> {
+    const input = (approval.tool_input ?? {}) as { kind?: string; repo?: string; command?: string };
+    const kind = input.kind === "deploy" ? "deploy" : "land";
+    const command = input.command ?? "";
+    const entry = this.entryFor(session.id);
+    entry.chain = entry.chain
+      .then(async () => {
+        const s = this.store.getSession(session.id);
+        if (!s || s.status === "stopped" || !command) return;
+        const statusRef = surface.capabilities.editMessages
+          ? await surface.post(conv, { text: `⚙︎ ${kind}ing \`${s.repo_id}\`…` }).catch(() => null)
+          : null;
+        await this.turnSlots.acquire();
+        try {
+          const result = await this.commandRunner.run(command, s.worktree_path);
+          const ok = result.code === 0 && !result.timedOut;
+          this.store.audit({
+            sessionId: s.id,
+            actor: decider,
+            event: "deploy",
+            detail: { kind, command, exitCode: result.code, timedOut: result.timedOut },
+          });
+          const mark = ok ? "✅" : "⚠️";
+          const status = result.timedOut ? "timed out" : ok ? "succeeded" : `exited ${result.code}`;
+          const body =
+            `${mark} \`${kind}\` ${status}.` + (result.output ? `\n\`\`\`\n${result.output}\n\`\`\`` : "");
+          if (statusRef) {
+            await surface.update(statusRef, { text: body }).catch(() => surface.post(conv, { text: body }).catch(() => {}));
+          } else {
+            await surface.post(conv, { text: body }).catch(() => {});
+          }
+        } catch (err) {
+          this.store.audit({ sessionId: s.id, actor: "system", event: "error", detail: { ship: kind, error: String(err) } });
+          await surface.post(conv, { text: `⚠️ The ${kind} command failed to run: ${err instanceof Error ? err.message : err}` }).catch(() => {});
+        } finally {
+          this.turnSlots.release();
+          this.store.touchSession(s.id);
+        }
+      })
+      .catch((err) => this.log(`[session ${session.id}] runShip failed: ${err}`));
+    await entry.chain;
   }
 
   // -- messages -------------------------------------------------------------
@@ -415,13 +617,24 @@ export class SessionManager {
       this.log(`[approval] request ${event.requestId} was already decided — ignoring`);
       return;
     }
-    this.log(`[approval] ${outcome} by ${decider} — resuming session ${session.id}`);
+    this.log(`[approval] ${outcome} by ${decider} for ${approval.tool_name} on session ${session.id}`);
     this.store.audit({
       sessionId: session.id,
       actor: decider,
       event: "approval_decision",
       detail: { requestId: event.requestId, decision: outcome, tool: approval.tool_name },
     });
+
+    // A daemon-run action (land/deploy): the daemon runs the configured command
+    // itself rather than resuming the harness. On denial, just acknowledge.
+    if (approval.tool_name.startsWith(SHIP_TOOL_PREFIX)) {
+      if (outcome === "approved") {
+        await this.runShip(session, approval, conv, surface!, decider);
+      } else {
+        await surface?.post(conv, { text: `${approval.tool_name.replace(SHIP_TOOL_PREFIX, "")} cancelled — nothing ran.` }).catch(() => {});
+      }
+      return;
+    }
 
     // Resume the session with an empty prompt to re-drive the pending call; the
     // gate now answers allow/deny from the recorded decision. FIFO-serialized.
@@ -472,6 +685,27 @@ export class SessionManager {
         .catch(() => {});
       return;
     }
+
+    // Runaway cost cap (M3, DESIGN §4). Block a NEW human turn once cumulative
+    // spend reaches the thread budget; an architect raises it with `@Conduit
+    // budget`. Approval-resume turns (no `inbound`) are NOT blocked — they finish
+    // an action an architect already approved and must not be stranded.
+    const budgetLimit = session.budget_limit_usd ?? this.defaultCostCapUsd;
+    const spent = this.store.sessionCostUsd(sessionId);
+    if (inbound && spent >= budgetLimit) {
+      this.store.audit({ sessionId, actor: "system", event: "budget_exceeded", detail: { spentUsd: spent, limitUsd: budgetLimit } });
+      await surface
+        .post(conv, {
+          text:
+            `⛔ This session has reached its cost budget ($${spent.toFixed(2)} of $${budgetLimit.toFixed(2)}). ` +
+            `I've paused. An architect can raise it — e.g. \`@Conduit budget ${Math.ceil(budgetLimit * 2)}\` — ` +
+            `or stop me with \`@Conduit stop\`.`,
+        })
+        .catch(() => {});
+      return;
+    }
+    const remaining = budgetLimit - spent;
+    const turnBudgetUsd = remaining > 0 ? remaining : undefined;
 
     const repo = this.store.getRepo(session.repo_id);
     const policyCtx: PolicyContext = {
@@ -544,17 +778,53 @@ export class SessionManager {
       : null;
     let lastEdit = 0;
     let replyDelivered = false;
+    // A small rolling window of recent steps, shown in the single edited status
+    // message (A4: one message, don't flood). Updates are throttled with a
+    // TRAILING flush so the newest step is never stranded when several arrive
+    // inside the throttle window, yet chat.update stays well under its rate limit.
+    const recentSteps: string[] = [];
+    let progressTimer: ReturnType<typeof setTimeout> | undefined;
+    let progressClosed = false; // set the instant delivery starts — no more edits
+    let progressInFlight: Promise<unknown> = Promise.resolve();
+    const PROGRESS_INTERVAL_MS = 2500;
 
-    const showProgress = async (text: string): Promise<void> => {
-      if (!statusRef || replyDelivered) return;
-      const now = Date.now();
-      if (now - lastEdit < 2000) return; // stay well under the update rate limit
-      lastEdit = now;
-      await surface.update(statusRef, { text }).catch(() => {});
+    const flushProgress = (): void => {
+      if (!statusRef || progressClosed) return;
+      lastEdit = Date.now();
+      // Track the in-flight edit so delivery can wait for it — otherwise a
+      // fire-and-forget progress edit could land AFTER the reply and clobber it.
+      progressInFlight = surface.update(statusRef, { text: recentSteps.map((s) => `⚙︎ ${s}`).join("\n") }).catch(() => {});
+    };
+
+    const showProgress = (text: string): void => {
+      if (!statusRef || progressClosed) return;
+      recentSteps.push(text);
+      if (recentSteps.length > 4) recentSteps.shift();
+      const elapsed = Date.now() - lastEdit;
+      if (elapsed >= PROGRESS_INTERVAL_MS) {
+        if (progressTimer) {
+          clearTimeout(progressTimer);
+          progressTimer = undefined;
+        }
+        flushProgress();
+      } else if (!progressTimer) {
+        progressTimer = setTimeout(() => {
+          progressTimer = undefined;
+          flushProgress();
+        }, PROGRESS_INTERVAL_MS - elapsed);
+      }
     };
 
     /** Deliver final output; falls back from edit to post; never throws. */
     const deliverFinal = async (text: string): Promise<void> => {
+      // Close progress and let any in-flight progress edit settle first, so the
+      // final text is the last write to the status message.
+      progressClosed = true;
+      if (progressTimer) {
+        clearTimeout(progressTimer);
+        progressTimer = undefined;
+      }
+      await progressInFlight.catch(() => {});
       try {
         if (statusRef && !replyDelivered) {
           await surface.update(statusRef, { text });
@@ -578,30 +848,37 @@ export class SessionManager {
     // stopped session (#6).
     if (!this.store.tryActivate(sessionId)) return;
     let producedOutput = false;
+    // Bound concurrent harness turns box-wide (the FIFO already serializes per
+    // session). Acquired only for the actual turn execution, released in finally.
+    await this.turnSlots.acquire();
+    let slotHeld = true;
     try {
       const harnessSession = await this.getOrAttachHarness(session);
 
-      for await (const ev of harnessSession.turn({ text: framedText }, gate)) {
+      for await (const ev of harnessSession.turn({ text: framedText, budgetUsd: turnBudgetUsd }, gate)) {
         switch (ev.kind) {
           case "handle_updated":
             this.store.updateSessionHandle(sessionId, ev.handle);
             break;
           case "progress":
-            await showProgress(`⚙︎ ${ev.text}`);
+            showProgress(ev.text);
             break;
           case "reply":
             producedOutput = true;
-            this.store.insertTurn({
-              sessionId,
-              direction: "out",
-              text: ev.text,
-              costUsd: ev.costUsd,
-              resultSubtype: "success",
-            });
-            this.store.audit({ sessionId, actor: "agent", event: "message_out", detail: { costUsd: ev.costUsd } });
-            // A resumed (empty-prompt) turn can emit more than one result; the
-            // first is the substantive reply — don't post the redundant follow-up.
-            if (!replyDelivered) await deliverFinal(ev.text);
+            // A resumed (empty-prompt) turn can emit more than one result; record
+            // and post only the first — recording every result would double-count
+            // cost, since total_cost_usd is cumulative per query (M3).
+            if (!replyDelivered) {
+              this.store.insertTurn({
+                sessionId,
+                direction: "out",
+                text: ev.text,
+                costUsd: ev.costUsd,
+                resultSubtype: "success",
+              });
+              this.store.audit({ sessionId, actor: "agent", event: "message_out", detail: { costUsd: ev.costUsd } });
+              await deliverFinal(ev.text);
+            }
             break;
           case "deferred":
             producedOutput = true;
@@ -635,6 +912,11 @@ export class SessionManager {
       this.store.audit({ sessionId, actor: "system", event: "error", detail: { text } });
       await deliverFinal(text);
     } finally {
+      if (progressTimer) clearTimeout(progressTimer);
+      if (slotHeld) {
+        this.turnSlots.release();
+        slotHeld = false;
+      }
       this.store.touchSession(sessionId);
       // Park only if still active — never resurrect a session stopped mid-turn.
       if (this.store.getSession(sessionId)?.status === "active") {
