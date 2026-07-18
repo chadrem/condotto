@@ -1,5 +1,6 @@
 import type {
   ApprovalPrompt,
+  ChoicePrompt,
   ConversationRef,
   GateFn,
   HarnessAdapter,
@@ -189,6 +190,9 @@ export class SessionManager {
         case "approval_decision":
           await this.handleApprovalDecision(event);
           break;
+        case "choice":
+          await this.handleChoice(event);
+          break;
       }
     } catch (err) {
       this.log(`[session-manager] error handling ${event.kind}: ${err}`);
@@ -238,6 +242,9 @@ export class SessionManager {
       case "land":
       case "deploy":
         await this.shipCommand(event.conv, event.author, event.name);
+        break;
+      case "help":
+        await this.guide(event.conv);
         break;
     }
   }
@@ -338,6 +345,56 @@ export class SessionManager {
         `commands, and land/deploy pause for an architect's Approve/Deny.\n\n` +
         threadCommandHelp(),
     });
+  }
+
+  /**
+   * Guide a human who pinged Conduit (M3.1). State-aware: an assigned thread gets
+   * the command summary; an UNASSIGNED thread gets onboarding — "which repo?" as
+   * clickable choices where the surface supports them (assignment is architect-
+   * only; the core re-verifies on the click), else a text fallback listing the
+   * repos and the command. Turns a bare @Conduit from silence into self-service
+   * setup. Extensible: future thread-setup questions reuse the choice primitive.
+   */
+  private async guide(conv: ConversationRef): Promise<void> {
+    const surface = this.surfaceFor(conv);
+    const session = this.store.getSessionByConversation(conv.surfaceId, conv.conversationId);
+    if (session && session.status !== "stopped") {
+      await surface.post(conv, {
+        text:
+          `I'm working in this thread — repo \`${session.repo_id}\`, branch \`${session.branch}\`.\n\n` +
+          threadCommandHelp(),
+      });
+      return;
+    }
+
+    const repos = this.store.listRepos();
+    const MAX_CHOICE_BUTTONS = 5;
+    const lead = "👋 I'm not set up in this thread yet. To start, an architect assigns me to a repo";
+    if (surface.capabilities.buttons && repos.length >= 1 && repos.length <= MAX_CHOICE_BUTTONS) {
+      await surface.requestChoice(conv, {
+        choiceId: "assign_repo",
+        text: `${lead} — pick one (architects only):`,
+        options: repos.map((r) => ({ label: r.name, value: r.name })),
+        architectOnly: true,
+      });
+      return;
+    }
+    const list = repos.map((r) => `\`${r.name}\``).join(", ") || "(none configured)";
+    await surface.post(conv, {
+      text:
+        `${lead}. Available repos: ${list}.\n` +
+        `An architect can assign with \`@Conduit assign <repo>\`, or start a fresh thread with \`/conduit assign <repo>\`.`,
+    });
+  }
+
+  /** A human picked an option from a ChoicePrompt (M3.1). */
+  private async handleChoice(event: Extract<InboundEvent, { kind: "choice" }>): Promise<void> {
+    if (event.choiceId === "assign_repo") {
+      // Authority is (re-)verified inside assign — a non-architect click is refused.
+      await this.assign(event.conv, event.author, event.value);
+      return;
+    }
+    this.log(`[choice] unknown choiceId "${event.choiceId}" — ignoring`);
   }
 
   private async status(conv: ConversationRef): Promise<void> {
@@ -545,7 +602,13 @@ export class SessionManager {
       event.conv.surfaceId,
       event.conv.conversationId,
     );
-    if (!session || session.status === "stopped") return; // not a chatbot: unassigned threads are ignored
+    if (!session || session.status === "stopped") {
+      // Not a chatbot: unassigned threads are ignored — UNLESS someone actually
+      // @-mentioned Conduit, in which case guide them into setup (M3.1) rather
+      // than staying silent.
+      if (event.mentioned) await this.guide(event.conv);
+      return;
+    }
 
     // Don't stack a turn on top of a deferred one: while an approval is pending
     // the session is mid-action. Ask the human to resolve it first (M2

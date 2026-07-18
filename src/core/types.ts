@@ -45,7 +45,7 @@ export interface Attachment {
 // ---------------------------------------------------------------------------
 // Surface port — how humans reach Conduit
 
-export type CommandName = "assign" | "status" | "stop" | "land" | "deploy" | "budget";
+export type CommandName = "assign" | "status" | "stop" | "land" | "deploy" | "budget" | "help";
 
 export type InboundEvent =
   | {
@@ -56,6 +56,9 @@ export type InboundEvent =
       attachments: Attachment[];
       /** Decoration only — attacker-editable free text, never authority. */
       authorDisplayName?: string;
+      /** True when the author @-mentioned Conduit. Lets the core offer guidance
+       *  (vs. staying silent) when someone pings an unassigned thread. */
+      mentioned?: boolean;
     }
   | {
       kind: "command";
@@ -69,6 +72,14 @@ export type InboundEvent =
       requestId: string;
       decider: Principal;
       decision: "approved" | "denied";
+    }
+  | {
+      /** A human picked an option from a ChoicePrompt (e.g. which repo to assign). */
+      kind: "choice";
+      conv: ConversationRef;
+      author: Principal;
+      choiceId: string;
+      value: string;
     };
 
 export interface OutboundMessage {
@@ -86,6 +97,26 @@ export interface SurfaceCapabilities {
   buttons: boolean;
   attachments: boolean;
   identityStrength: "verified" | "weak";
+}
+
+/**
+ * A guided choice presented to a human (M3.1). The core builds it (it knows the
+ * options — e.g. which repos exist); the surface renders it natively (Slack:
+ * buttons) and a click comes back as a `choice` InboundEvent carrying `choiceId`
+ * and the selected `value`. Generic so future thread-setup questions (branch,
+ * etc.) reuse the same primitive. `architectOnly` marks a choice that only a
+ * command-authority principal may make (assignment); surfaces should reject
+ * others for UX, but the core re-verifies authority regardless.
+ */
+export interface ChoiceOption {
+  label: string;
+  value: string;
+}
+export interface ChoicePrompt {
+  choiceId: string; // e.g. "assign_repo"
+  text: string; // the question
+  options: ChoiceOption[];
+  architectOnly?: boolean;
 }
 
 /** M2 — carried in the port from day one so the seam doesn't drift. */
@@ -112,6 +143,8 @@ export interface SurfaceAdapter {
   /** Only called when capabilities.editMessages is true. */
   update(ref: PostedRef, msg: OutboundMessage): Promise<void>;
   requestApproval(conv: ConversationRef, req: ApprovalPrompt): Promise<void>;
+  /** Present a guided choice (M3.1). Only called when capabilities.buttons. */
+  requestChoice(conv: ConversationRef, prompt: ChoicePrompt): Promise<void>;
 }
 
 // ---------------------------------------------------------------------------

@@ -1,10 +1,14 @@
 import { describe, expect, test } from "bun:test";
 import {
   APPROVE_ACTION,
+  CHOICE_ACTION,
   DENY_ACTION,
   approvalBlocks,
+  choiceBlocks,
+  parseChoiceBlockId,
   renderMrkdwn,
   resolveApprovalMessage,
+  resolveChoiceMessage,
 } from "../src/adapters/slack/render";
 
 describe("renderMrkdwn", () => {
@@ -103,6 +107,46 @@ describe("approvalBlocks", () => {
     const resolved = resolveApprovalMessage(blocks, "approved", "U_ARCH");
     expect((resolved.blocks as any[]).some((b) => b.type === "actions")).toBe(false);
     expect(JSON.stringify(resolved.blocks)).toContain("Approved");
+    expect(JSON.stringify(resolved.blocks)).toContain("U_ARCH");
+  });
+});
+
+describe("choiceBlocks (M3.1 guided choice)", () => {
+  test("renders one button per option carrying its value; block_id round-trips", () => {
+    const { blocks, text } = choiceBlocks({
+      choiceId: "assign_repo",
+      text: "Which repo?",
+      options: [
+        { label: "testrepo", value: "testrepo" },
+        { label: "webapp", value: "webapp" },
+      ],
+      architectOnly: true,
+    });
+    expect(text).toBe("Which repo?");
+    const actions = (blocks as any[]).find((b) => b.type === "actions");
+    expect(actions.elements.map((e: any) => e.value)).toEqual(["testrepo", "webapp"]);
+    expect(actions.elements[0].action_id).toBe(`${CHOICE_ACTION}:testrepo`);
+    expect(parseChoiceBlockId(actions.block_id)).toEqual({ choiceId: "assign_repo", architectOnly: true });
+  });
+
+  test("caps at 5 buttons (Slack limit)", () => {
+    const options = Array.from({ length: 8 }, (_, i) => ({ label: `r${i}`, value: `r${i}` }));
+    const { blocks } = choiceBlocks({ choiceId: "assign_repo", text: "pick", options });
+    const actions = (blocks as any[]).find((b) => b.type === "actions");
+    expect(actions.elements.length).toBe(5);
+    expect(parseChoiceBlockId(actions.block_id)).toEqual({ choiceId: "assign_repo", architectOnly: false });
+  });
+
+  test("parseChoiceBlockId rejects foreign block ids", () => {
+    expect(parseChoiceBlockId("conduit_approval:req-1")).toBeNull();
+    expect(parseChoiceBlockId(undefined)).toBeNull();
+  });
+
+  test("resolveChoiceMessage drops the buttons and records the chooser", () => {
+    const { blocks } = choiceBlocks({ choiceId: "assign_repo", text: "pick", options: [{ label: "testrepo", value: "testrepo" }] });
+    const resolved = resolveChoiceMessage(blocks, "testrepo", "U_ARCH");
+    expect((resolved.blocks as any[]).some((b) => b.type === "actions")).toBe(false);
+    expect(JSON.stringify(resolved.blocks)).toContain("testrepo");
     expect(JSON.stringify(resolved.blocks)).toContain("U_ARCH");
   });
 });

@@ -2,6 +2,7 @@ import { App, type RespondFn } from "@slack/bolt";
 import type {
   ApprovalPrompt,
   Attachment,
+  ChoicePrompt,
   ConversationRef,
   InboundEvent,
   OutboundMessage,
@@ -12,10 +13,14 @@ import type {
 } from "../../core/types";
 import {
   APPROVE_ACTION,
+  CHOICE_ACTION,
   DENY_ACTION,
   approvalBlocks,
+  choiceBlocks,
+  parseChoiceBlockId,
   renderMrkdwn,
   resolveApprovalMessage,
+  resolveChoiceMessage,
 } from "./render";
 
 /**
@@ -149,6 +154,16 @@ export class SlackAdapter implements SurfaceAdapter {
     this.app.action(APPROVE_ACTION, onDecision);
     this.app.action(DENY_ACTION, onDecision);
 
+    // Guided-choice buttons (M3.1): action_ids look like `conduit_choice:<value>`.
+    this.app.action(new RegExp(`^${CHOICE_ACTION}:`), async (args: any) => {
+      await args.ack();
+      try {
+        await this.handleChoiceAction(args);
+      } catch (err) {
+        this.log(`[slack] choice action failed: ${err}`);
+      }
+    });
+
     await this.app.start();
     this.log("[slack] Socket Mode connected");
   }
@@ -259,42 +274,43 @@ export class SlackAdapter implements SurfaceAdapter {
     return null;
   }
 
+  /**
+   * A bare `@Conduit` or `@Conduit help`/`start` — a request for guidance rather
+   * than a command or a conversational message. (Commands are matched first.)
+   */
+  private isHelpMention(text: string): boolean {
+    if (!this.botUserId) return false;
+    const m = text.match(new RegExp(`^\\s*<@${this.botUserId}(?:\\|[^>]*)?>\\s*(.*)$`, "s"));
+    if (!m) return false;
+    const rest = m[1]!.trim().toLowerCase().replace(/[?!.]+$/, "").trim();
+    return rest === "" || /^help( me)?$/.test(rest) || rest === "start" || rest === "commands";
+  }
+
+  private mentioned(text: string): boolean {
+    return !!this.botUserId && text.includes(`<@${this.botUserId}`);
+  }
+
   private async handleMention(event: Record<string, any>): Promise<void> {
     if (!event.user || event.bot_id || event.user === this.botUserId) return;
     if (this.dedup.has(`mention:${event.channel}:${event.ts}`)) return;
-    const cmd = this.mentionCommand(String(event.text ?? ""));
+    const text = String(event.text ?? "");
     const channelId = String(event.channel);
-    if (!cmd) {
-      // Conversational mentions inside threads flow through the message
-      // handler. A top-level plain mention reaches no session — answer with a
-      // pointer instead of silence.
-      if (!event.thread_ts) {
-        await this.app.client.chat
-          .postMessage({
-            channel: channelId,
-            thread_ts: String(event.ts),
-            text:
-              "I work inside assigned threads. Start one with `/conduit assign`, " +
-              "or mention `@Conduit assign` in an existing thread.",
-          })
-          .catch(() => {});
-      }
+    const rootTs = String(event.thread_ts ?? event.ts);
+    const author = { surface: SURFACE_ID, externalId: String(event.user) };
+    const conv = { surfaceId: SURFACE_ID, channelId, conversationId: encodeConversationId(channelId, rootTs) };
+
+    const cmd = this.mentionCommand(text);
+    if (cmd) {
+      this.emit({ kind: "command", conv, author, name: cmd.name, args: cmd.args });
       return;
     }
-    // Mentions DO carry thread context; a top-level command mention roots its
-    // own thread.
-    const rootTs = String(event.thread_ts ?? event.ts);
-    this.emit({
-      kind: "command",
-      conv: {
-        surfaceId: SURFACE_ID,
-        channelId,
-        conversationId: encodeConversationId(channelId, rootTs),
-      },
-      author: { surface: SURFACE_ID, externalId: String(event.user) },
-      name: cmd.name,
-      args: cmd.args,
-    });
+    // A bare/"help" mention, or ANY non-command mention at the top level (no
+    // thread yet), is a request for guidance — root a thread if needed and let
+    // the core guide (onboarding if unassigned, command summary if assigned). A
+    // conversational mention INSIDE a thread instead flows through handleMessage.
+    if (this.isHelpMention(text) || !event.thread_ts) {
+      this.emit({ kind: "command", conv, author, name: "help", args: "" });
+    }
   }
 
   private handleMessage(event: Record<string, any>): void {
@@ -304,7 +320,8 @@ export class SlackAdapter implements SurfaceAdapter {
     if (!event.thread_ts) return; // sessions are threads; top-level chatter is not ours
     if (this.dedup.has(`msg:${event.channel}:${event.ts}`)) return;
     const text = String(event.text ?? "");
-    if (this.mentionCommand(text)) return; // command mentions are handled via app_mention
+    if (this.mentionCommand(text)) return; // command mentions handled via app_mention
+    if (this.isHelpMention(text)) return; // bare/help mentions handled via app_mention (as `help`)
 
     const attachments: Attachment[] = Array.isArray(event.files)
       ? event.files.map((f: Record<string, any>) => ({
@@ -322,6 +339,7 @@ export class SlackAdapter implements SurfaceAdapter {
       },
       author: { surface: SURFACE_ID, externalId: String(event.user) },
       text,
+      mentioned: this.mentioned(text),
       attachments,
     });
   }
@@ -342,6 +360,16 @@ export class SlackAdapter implements SurfaceAdapter {
       channel: ref.conv.channelId,
       ts: ref.messageId,
       text: renderMrkdwn(msg.text),
+    });
+  }
+
+  async requestChoice(conv: ConversationRef, prompt: ChoicePrompt): Promise<void> {
+    const { text, blocks } = choiceBlocks(prompt);
+    await this.app.client.chat.postMessage({
+      channel: conv.channelId,
+      thread_ts: threadTsOf(conv),
+      text, // notification fallback; the blocks carry the interactive content
+      blocks: blocks as any[],
     });
   }
 
@@ -396,5 +424,55 @@ export class SlackAdapter implements SurfaceAdapter {
     }
 
     this.emit({ kind: "approval_decision", requestId, decider, decision: outcome });
+  }
+
+  /**
+   * A guided-choice button click (M3.1), e.g. picking a repo to assign. Same
+   * pattern as approvals: Bolt has verified the signature; we pre-check authority
+   * for UX on architect-only choices, and the core re-verifies when it acts.
+   */
+  private async handleChoiceAction(args: {
+    body: Record<string, any>;
+    client: { chat: { update: (o: Record<string, any>) => Promise<unknown> } };
+    respond: RespondFn;
+  }): Promise<void> {
+    const { body, client, respond } = args;
+    const action = (body.actions ?? [])[0] ?? {};
+    const value = action.value ? String(action.value) : "";
+    const parsed = parseChoiceBlockId(action.block_id ? String(action.block_id) : undefined);
+    if (!value || !parsed) return;
+    if (action.action_ts && this.dedup.has(`choice:${action.action_ts}`)) return;
+
+    const decider: Principal = { surface: SURFACE_ID, externalId: String(body.user?.id) };
+    const channelId = String(body.channel?.id ?? body.container?.channel_id ?? "");
+    // The choice message lives in the thread; its thread_ts is the root.
+    const rootTs = String(body.message?.thread_ts ?? body.message?.ts ?? "");
+    this.log(`[slack] choice click: ${parsed.choiceId}=${value} by ${decider.externalId} ch=${channelId}`);
+
+    if (parsed.architectOnly && !this.authority.isArchitect(decider, channelId)) {
+      // Leave the buttons so an architect can still choose.
+      await respond({
+        response_type: "ephemeral",
+        text: "Only architects can choose this — ask one to pick.",
+      }).catch(() => {});
+      return;
+    }
+
+    // Resolve the message: drop the buttons, record who chose what.
+    const label = action.text?.text ? String(action.text.text) : value;
+    const resolved = resolveChoiceMessage(body.message?.blocks, label, decider.externalId);
+    if (body.message?.ts) {
+      await client.chat
+        .update({ channel: channelId, ts: String(body.message.ts), text: resolved.text, blocks: resolved.blocks as any[] })
+        .catch((err) => this.log(`[slack] could not update choice message: ${err}`));
+    }
+
+    this.emit({
+      kind: "choice",
+      conv: { surfaceId: SURFACE_ID, channelId, conversationId: encodeConversationId(channelId, rootTs) },
+      author: decider,
+      choiceId: parsed.choiceId,
+      value,
+    });
   }
 }

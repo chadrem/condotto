@@ -298,6 +298,71 @@ describe("stop & status", () => {
   });
 });
 
+describe("guided onboarding (M3.1)", () => {
+  test("@Conduit in an unassigned thread offers a repo picker (anyone can ask)", async () => {
+    const w = makeWorld();
+    await w.manager.handleEvent({ kind: "command", conv: conv("h00.000001"), author: member, name: "help", args: "" });
+    const choice = w.surface.lastChoice();
+    expect(choice?.choiceId).toBe("assign_repo");
+    expect(choice?.options.map((o) => o.value)).toContain("testrepo");
+    expect(choice?.architectOnly).toBe(true);
+    expect(w.store.getSessionByConversation("fake", "h00.000001")).toBeNull(); // nothing assigned yet
+  });
+
+  test("picking a repo (architect) assigns the session", async () => {
+    const w = makeWorld();
+    await w.manager.handleEvent({ kind: "command", conv: conv("h10.000001"), author: member, name: "help", args: "" });
+    await w.manager.handleEvent({ kind: "choice", conv: conv("h10.000001"), author: architect, choiceId: "assign_repo", value: "testrepo" });
+    const row = w.store.getSessionByConversation("fake", "h10.000001");
+    expect(row).not.toBeNull();
+    expect(row!.repo_id).toBe("testrepo");
+    expect(w.surface.posts.at(-1)?.text).toContain("I'm on it");
+  });
+
+  test("a member picking a repo is refused (assignment is architect-only)", async () => {
+    const w = makeWorld();
+    await w.manager.handleEvent({ kind: "choice", conv: conv("h20.000001"), author: member, choiceId: "assign_repo", value: "testrepo" });
+    expect(w.store.getSessionByConversation("fake", "h20.000001")).toBeNull();
+    expect(w.surface.posts.at(-1)?.text).toContain("Only architects can assign");
+  });
+
+  test("@Conduit in an assigned thread shows the command summary, not a picker", async () => {
+    const w = makeWorld();
+    await w.manager.handleEvent({ kind: "command", conv: conv("h30.000001"), author: architect, name: "assign", args: "" });
+    const choicesBefore = w.surface.choiceRequests.length;
+    await w.manager.handleEvent({ kind: "command", conv: conv("h30.000001"), author: member, name: "help", args: "" });
+    expect(w.surface.choiceRequests.length).toBe(choicesBefore); // no picker on an assigned thread
+    expect(w.surface.posts.at(-1)?.text).toContain("working in this thread");
+    expect(w.surface.posts.at(-1)?.text).toContain("@Conduit stop");
+  });
+
+  test("a mention in an unassigned thread guides; a plain message stays silent", async () => {
+    const w = makeWorld();
+    // Plain message (no mention) in an unassigned thread → ignored (not a chatbot).
+    await w.manager.handleEvent({ kind: "message", conv: conv("h40.000001"), author: member, text: "anyone home?", attachments: [] });
+    expect(w.surface.choiceRequests.length).toBe(0);
+    expect(w.surface.posts.length).toBe(0);
+    // A mention → guided.
+    await w.manager.handleEvent({ kind: "message", conv: conv("h40.000001"), author: member, text: "hey @conduit", attachments: [], mentioned: true });
+    expect(w.surface.lastChoice()?.choiceId).toBe("assign_repo");
+  });
+
+  test("with more repos than fit as buttons, guidance falls back to a text list", async () => {
+    const w = makeWorld();
+    for (let i = 0; i < 6; i++) w.store.upsertRepo({ name: `repo${i}`, path: repoPath, defaultBranch: "main" });
+    await w.manager.handleEvent({ kind: "command", conv: conv("h50.000001"), author: member, name: "help", args: "" });
+    expect(w.surface.choiceRequests.length).toBe(0); // too many for buttons
+    expect(w.surface.posts.at(-1)?.text).toContain("Available repos:");
+    expect(w.surface.posts.at(-1)?.text).toContain("@Conduit assign");
+  });
+
+  test("an unknown choiceId is ignored (no crash)", async () => {
+    const w = makeWorld();
+    await w.manager.handleEvent({ kind: "choice", conv: conv("h60.000001"), author: architect, choiceId: "not_a_thing", value: "x" });
+    expect(w.store.getSessionByConversation("fake", "h60.000001")).toBeNull();
+  });
+});
+
 describe("roles: command authority (M2)", () => {
   test("a member cannot assign a session", async () => {
     const w = makeWorld();

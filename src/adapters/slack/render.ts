@@ -2,7 +2,7 @@
 // GitHub markdown: bold is *text*, links are <url|text>, headers don't exist.
 // Escaping happens BEFORE link/mention markup is substituted (Appendix A4).
 
-import type { ApprovalPrompt } from "../../core/types";
+import type { ApprovalPrompt, ChoicePrompt } from "../../core/types";
 
 const MAX_MESSAGE_CHARS = 12_000; // chat-scale ceiling well under Slack's 40k hard cap
 
@@ -147,4 +147,58 @@ export function resolveApprovalMessage(
   );
   kept.push({ type: "context", elements: [{ type: "mrkdwn", text: `${mark} *${verb}* by <@${deciderUserId}>` }] });
   return { text: `${verb} by <@${deciderUserId}>`, blocks: kept };
+}
+
+// -- guided choice rendering (M3.1) -----------------------------------------
+
+export const CHOICE_ACTION = "conduit_choice";
+
+/**
+ * A guided choice as a question plus one button per option. `block_id` carries
+ * the choiceId and the architect-only flag so the click handler can route and
+ * pre-check authority; each button's `value` is the option's value.
+ */
+export function choiceBlocks(prompt: ChoicePrompt): { text: string; blocks: unknown[] } {
+  const options = prompt.options.slice(0, 5); // Slack caps buttons per actions block
+  return {
+    text: prompt.text,
+    blocks: [
+      { type: "section", text: { type: "mrkdwn", text: renderMrkdwn(prompt.text) } },
+      {
+        type: "actions",
+        block_id: `${CHOICE_ACTION}:${prompt.choiceId}:${prompt.architectOnly ? 1 : 0}`,
+        elements: options.map((o) => ({
+          type: "button",
+          action_id: `${CHOICE_ACTION}:${o.value}`,
+          text: { type: "plain_text", text: o.label.slice(0, 75) },
+          value: o.value,
+        })),
+      },
+    ],
+  };
+}
+
+/** Parse a choice message's block_id back into {choiceId, architectOnly}. */
+export function parseChoiceBlockId(blockId: string | undefined): { choiceId: string; architectOnly: boolean } | null {
+  if (!blockId || !blockId.startsWith(CHOICE_ACTION + ":")) return null;
+  const rest = blockId.slice(CHOICE_ACTION.length + 1);
+  const lastColon = rest.lastIndexOf(":");
+  if (lastColon === -1) return null;
+  return { choiceId: rest.slice(0, lastColon), architectOnly: rest.slice(lastColon + 1) === "1" };
+}
+
+/** Resolved version of a choice message: buttons dropped, selection recorded. */
+export function resolveChoiceMessage(
+  originalBlocks: unknown[] | undefined,
+  selectedLabel: string,
+  deciderUserId: string,
+): { text: string; blocks: unknown[] } {
+  const kept = (Array.isArray(originalBlocks) ? originalBlocks : []).filter(
+    (b) => !(b && typeof b === "object" && (b as { type?: string }).type === "actions"),
+  );
+  kept.push({
+    type: "context",
+    elements: [{ type: "mrkdwn", text: `:point_right: <@${deciderUserId}> chose *${selectedLabel}*` }],
+  });
+  return { text: `Selected ${selectedLabel}`, blocks: kept };
 }

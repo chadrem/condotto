@@ -1,6 +1,7 @@
 // Fake adapters exercising both ports without any platform dependency.
 import type {
   ApprovalPrompt,
+  ChoicePrompt,
   ConversationRef,
   GateFn,
   HarnessAdapter,
@@ -30,6 +31,7 @@ export class FakeSurface implements SurfaceAdapter {
   posts: { conv: ConversationRef; text: string; messageId: string }[] = [];
   updates: { messageId: string; text: string }[] = [];
   approvalRequests: { conv: ConversationRef; req: ApprovalPrompt }[] = [];
+  choiceRequests: { conv: ConversationRef; prompt: ChoicePrompt }[] = [];
   /** When true, requestApproval throws (simulates a Slack post failure). */
   failApprovals = false;
   private nextId = 1;
@@ -50,6 +52,15 @@ export class FakeSurface implements SurfaceAdapter {
   async requestApproval(conv: ConversationRef, req: ApprovalPrompt): Promise<void> {
     if (this.failApprovals) throw new Error("fake: approval post failed");
     this.approvalRequests.push({ conv, req });
+  }
+
+  async requestChoice(conv: ConversationRef, prompt: ChoicePrompt): Promise<void> {
+    this.choiceRequests.push({ conv, prompt });
+  }
+
+  /** The most recent guided-choice prompt (for tests to answer). */
+  lastChoice(): ChoicePrompt | undefined {
+    return this.choiceRequests.at(-1)?.prompt;
   }
 
   /** The requestId of the most recent approval prompt (for tests to decide). */
