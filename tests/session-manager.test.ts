@@ -1001,3 +1001,51 @@ describe("harness capabilities — subagents & ultra (M3.5 Tier B)", () => {
     expect(w.surface.posts.at(-1)!.text).toContain("ultra on");
   });
 });
+
+describe("trust-scoped project config (M3.5 Tier C)", () => {
+  async function assign(w: World, id: string): Promise<void> {
+    await w.manager.handleEvent({ kind: "command", conv: conv(id), author: architect, name: "assign", args: "" });
+  }
+  function trust(w: World, trusted: boolean): void {
+    w.store.upsertRepo({
+      name: "testrepo",
+      path: repoPath,
+      defaultBranch: "main",
+      safeBashAllowlist: ["git status"],
+      landCmd: "echo land-ran",
+      deployCmd: "echo deploy-ran",
+      trusted,
+    });
+  }
+
+  test("a trusted repo loads project config for its turns and says so in the intro", async () => {
+    const w = makeWorld();
+    trust(w, true);
+    const c = conv("tc1.000001");
+    await assign(w, "tc1.000001");
+    expect(w.surface.posts.at(-1)!.text).toMatch(/trusted repo/i);
+    await w.manager.handleEvent({ kind: "message", conv: c, author: architect, text: "hi", attachments: [] });
+    expect(w.harness.allTurns.at(-1)!.harness?.projectConfig).toBe(true);
+  });
+
+  test("an untrusted repo (default) keeps project config off and stays isolated", async () => {
+    const w = makeWorld(); // testrepo untrusted by default
+    const c = conv("tc2.000001");
+    await assign(w, "tc2.000001");
+    expect(w.surface.posts.at(-1)!.text).not.toMatch(/trusted repo/i);
+    await w.manager.handleEvent({ kind: "message", conv: c, author: architect, text: "hi", attachments: [] });
+    expect(w.harness.allTurns.at(-1)!.harness?.projectConfig).toBe(false);
+  });
+
+  test("flipping a repo to untrusted takes project config off on the next turn", async () => {
+    const w = makeWorld();
+    trust(w, true);
+    const c = conv("tc3.000001");
+    await assign(w, "tc3.000001");
+    await w.manager.handleEvent({ kind: "message", conv: c, author: architect, text: "one", attachments: [] });
+    expect(w.harness.allTurns.at(-1)!.harness?.projectConfig).toBe(true);
+    trust(w, false); // admin revokes trust; the very next turn is isolated again
+    await w.manager.handleEvent({ kind: "message", conv: c, author: architect, text: "two", attachments: [] });
+    expect(w.harness.allTurns.at(-1)!.harness?.projectConfig).toBe(false);
+  });
+});

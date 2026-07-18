@@ -430,7 +430,11 @@ export class SessionManager {
     await surface.post(conv, {
       text:
         `I'm on it — repo \`${repo.name}\`, branch \`${worktree.branch}\`.\n` +
-        `Running ${this.capabilitySummary(session)}.\n\n` +
+        `Running ${this.capabilitySummary(session)}.` +
+        (repo.trusted === 1
+          ? `\n🔐 Trusted repo — I'm loading its own \`CLAUDE.md\`, skills, and \`.claude/\` config (still behind the gate).`
+          : "") +
+        `\n\n` +
         `Reply in this thread to talk — reading and analysis are free. Edits, shell ` +
         `commands, and land/deploy pause for an architect's Approve/Deny.\n\n` +
         threadCommandHelp(),
