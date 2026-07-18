@@ -59,6 +59,47 @@ const BATCH_GATE_DENY =
   "This action needs an architect's approval, but it came in a parallel batch of tool calls, " +
   "which can't be paused for approval. Re-issue it on its own and I'll request approval.";
 
+/**
+ * The SDK warns — with a full stack trace, on EVERY query() — that read-only
+ * tools are "shadowed" from canUseTool by allowedTools
+ * (CLAUDE_SDK_CAN_USE_TOOL_SHADOWED). For Conduit that is expected and correct:
+ * read-only tools are auto-approved by allowedTools and confined by the
+ * PreToolUse hook, so they must never reach the deny-by-default canUseTool
+ * backstop — only gated tools do (see DECISIONS.md). Left alone it masquerades
+ * as an error in the daemon log after every turn. Silence exactly that one
+ * warning code (nothing else) across every emission path. Idempotent; runs once
+ * on import so both the daemon and the smoke scripts get clean output.
+ */
+const SDK_SHADOW_WARNING = "CLAUDE_SDK_CAN_USE_TOOL_SHADOWED";
+let sdkWarningsSuppressed = false;
+function suppressKnownSdkWarnings(): void {
+  if (sdkWarningsSuppressed) return;
+  sdkWarningsSuppressed = true;
+  const mentions = (v: unknown): boolean => {
+    if (typeof v === "string") return v.includes(SDK_SHADOW_WARNING);
+    if (v && typeof v === "object") {
+      const o = v as { code?: unknown; message?: unknown };
+      if (o.code === SDK_SHADOW_WARNING) return true;
+      if (typeof o.message === "string" && o.message.includes(SDK_SHADOW_WARNING)) return true;
+    }
+    return false;
+  };
+  for (const method of ["warn", "error"] as const) {
+    const orig = console[method].bind(console);
+    console[method] = (...args: unknown[]) => {
+      if (!args.some(mentions)) orig(...args);
+    };
+  }
+  const origEmit = process.emitWarning.bind(process);
+  process.emitWarning = ((warning: unknown, ...rest: unknown[]) => {
+    const opt = rest[0];
+    const code = opt && typeof opt === "object" ? (opt as { code?: unknown }).code : rest[1];
+    if (code === SDK_SHADOW_WARNING || mentions(warning)) return;
+    return (origEmit as (...a: unknown[]) => void)(warning, ...rest);
+  }) as typeof process.emitWarning;
+}
+suppressKnownSdkWarnings();
+
 /** Abort a turn if the SDK produces nothing at all for this long. */
 const TURN_INACTIVITY_MS = 10 * 60_000;
 

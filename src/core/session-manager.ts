@@ -552,7 +552,9 @@ export class SessionManager {
               resultSubtype: "success",
             });
             this.store.audit({ sessionId, actor: "agent", event: "message_out", detail: { costUsd: ev.costUsd } });
-            await deliverFinal(ev.text);
+            // A resumed (empty-prompt) turn can emit more than one result; the
+            // first is the substantive reply — don't post the redundant follow-up.
+            if (!replyDelivered) await deliverFinal(ev.text);
             break;
           case "deferred":
             producedOutput = true;
