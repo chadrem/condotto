@@ -325,6 +325,19 @@ export class Store {
   }
 
   /**
+   * Atomically move a session to 'active' only if it is not stopped. Returns
+   * false if it was stopped — a stop that landed while a turn was starting must
+   * never be resurrected (DESIGN.md: stop is irreversible mid-flight).
+   */
+  tryActivate(id: string): boolean {
+    return (
+      this.db
+        .query(`UPDATE sessions SET status = 'active' WHERE id = $id AND status != 'stopped'`)
+        .run({ id }).changes > 0
+    );
+  }
+
+  /**
    * Startup reconciliation: 'active' means a turn is in flight, so any
    * 'active' row at boot is an orphan from a crash mid-turn. Park them so the
    * state machine starts clean.
@@ -435,6 +448,15 @@ export class Store {
     return this.roleOf(principal, channelId) === "architect";
   }
 
+  /**
+   * Remove all role mappings. Config is the source of truth for roles in M2, so
+   * the daemon clears and re-seeds at boot — removing a principal from config
+   * must actually revoke their authority, not leave a stale row behind.
+   */
+  clearRoles(): void {
+    this.db.run(`DELETE FROM roles`);
+  }
+
   // -- approvals ------------------------------------------------------------
 
   createApproval(a: {
@@ -503,5 +525,20 @@ export class Store {
       )
       .run({ id, d: decision, by: decidedBy, now: new Date().toISOString() }).changes;
     return changes > 0;
+  }
+
+  /**
+   * Expire every still-pending approval for a session. Used when the approval
+   * can't be delivered, and when a session is stopped or reactivated — so a
+   * stale 'pending' row never wedges the session (hasPendingApproval) or lets an
+   * abandoned action re-drive later.
+   */
+  expirePendingApprovals(sessionId: string): number {
+    return this.db
+      .query(
+        `UPDATE approvals SET decision = 'expired', decided_at = $now
+         WHERE session_id = $sid AND decision = 'pending'`,
+      )
+      .run({ sid: sessionId, now: new Date().toISOString() }).changes;
   }
 }

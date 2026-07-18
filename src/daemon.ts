@@ -27,6 +27,9 @@ async function main(): Promise<void> {
 
   const store = new Store(config.dbPath);
   for (const repo of config.repos) store.upsertRepo(repo);
+  // Config is the source of truth for roles: clear and re-seed so removing a
+  // principal from config actually revokes their authority.
+  store.clearRoles();
   for (const r of config.roles) store.setRole(r.principal, r.role, r.scope);
   const architects = config.roles.filter((r) => r.role === "architect").length;
   if (architects === 0) {

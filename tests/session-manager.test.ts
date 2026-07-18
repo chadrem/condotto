@@ -400,4 +400,36 @@ describe("gating & approval loop (M2)", () => {
     expect(w.surface.approvalRequests.length).toBe(0);
     expect(w.harness.executed.map((c) => c.name)).toEqual(["Bash"]);
   });
+
+  test("a failed approval post expires the pending row instead of wedging the session (review #3)", async () => {
+    const w = makeWorld();
+    w.surface.failApprovals = true;
+    await assignWithScript(w, "b80.000001", [writeCall]);
+    const session = w.store.getSessionByConversation("fake", "b80.000001")!;
+
+    expect(w.store.hasPendingApproval(session.id)).toBe(false); // expired, not stuck pending
+    expect(w.surface.posts.some((p) => p.text.includes("couldn't post the approval"))).toBe(true);
+
+    // The next message runs a normal turn (the session is not wedged).
+    w.surface.failApprovals = false;
+    w.harness.scriptTurn([{ id: "tu-read", name: "Read", input: { file_path: "README.md" } }]);
+    await w.manager.handleEvent({ kind: "message", conv: conv("b80.000001"), author: member, text: "try again", attachments: [] });
+    expect(w.harness.executed.map((c) => c.name)).toContain("Read");
+  });
+
+  test("stop expires a pending approval so a reassigned session is not wedged (review #7)", async () => {
+    const w = makeWorld();
+    await assignWithScript(w, "b90.000001", [writeCall]);
+    const session = w.store.getSessionByConversation("fake", "b90.000001")!;
+    expect(w.store.hasPendingApproval(session.id)).toBe(true);
+
+    await w.manager.handleEvent({ kind: "command", conv: conv("b90.000001"), author: architect, name: "stop", args: "" });
+    expect(w.store.hasPendingApproval(session.id)).toBe(false);
+
+    // Reassign, then a message runs a normal turn — no leftover pending block.
+    await w.manager.handleEvent({ kind: "command", conv: conv("b90.000001"), author: architect, name: "assign", args: "" });
+    w.harness.scriptTurn([{ id: "tu-read2", name: "Read", input: { file_path: "README.md" } }]);
+    await w.manager.handleEvent({ kind: "message", conv: conv("b90.000001"), author: member, text: "hello again", attachments: [] });
+    expect(w.harness.executed.map((c) => c.name)).toContain("Read");
+  });
 });

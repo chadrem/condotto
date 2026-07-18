@@ -147,4 +147,41 @@ describe("store approvals", () => {
     expect(store.getApprovalByToolUse("s1", "tu-1")?.id).toBe("req-2");
     expect(store.getApprovalByToolUse("s1", "tu-1")?.decision).toBe("pending");
   });
+
+  test("expirePendingApprovals clears the wedge and leaves decided ones alone", () => {
+    const store = withSession();
+    store.createApproval({ id: "p1", sessionId: "s1", toolUseId: "tu-1", toolName: "Write", toolInput: {} });
+    store.createApproval({ id: "d1", sessionId: "s1", toolUseId: "tu-2", toolName: "Bash", toolInput: {} });
+    store.decideApproval("d1", "slack:U_ARCH", "approved");
+    expect(store.hasPendingApproval("s1")).toBe(true);
+
+    expect(store.expirePendingApprovals("s1")).toBe(1);
+    expect(store.hasPendingApproval("s1")).toBe(false);
+    expect(store.getApproval("p1")!.decision).toBe("expired");
+    expect(store.getApproval("d1")!.decision).toBe("approved"); // untouched
+  });
+});
+
+describe("store session activation", () => {
+  test("tryActivate activates a parked session but never resurrects a stopped one (review #6)", () => {
+    const store = memoryStore();
+    store.createSession({ ...baseSession, id: "s1", conversation_id: "1.1", status: "parked" });
+    expect(store.tryActivate("s1")).toBe(true);
+    expect(store.getSession("s1")!.status).toBe("active");
+
+    store.updateSessionStatus("s1", "stopped");
+    expect(store.tryActivate("s1")).toBe(false);
+    expect(store.getSession("s1")!.status).toBe("stopped");
+  });
+});
+
+describe("store roles (revocation)", () => {
+  test("clearRoles removes all mappings so config can be authoritative (review #8)", () => {
+    const store = memoryStore();
+    store.setRole("slack:U1", "architect");
+    expect(store.isArchitect("slack:U1", "C1")).toBe(true);
+    store.clearRoles();
+    expect(store.isArchitect("slack:U1", "C1")).toBe(false);
+    expect(store.roleOf("slack:U1", "C1")).toBe("member");
+  });
 });

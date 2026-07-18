@@ -30,6 +30,8 @@ export class FakeSurface implements SurfaceAdapter {
   posts: { conv: ConversationRef; text: string; messageId: string }[] = [];
   updates: { messageId: string; text: string }[] = [];
   approvalRequests: { conv: ConversationRef; req: ApprovalPrompt }[] = [];
+  /** When true, requestApproval throws (simulates a Slack post failure). */
+  failApprovals = false;
   private nextId = 1;
 
   async start(_emit: (e: InboundEvent) => void): Promise<void> {}
@@ -46,6 +48,7 @@ export class FakeSurface implements SurfaceAdapter {
   }
 
   async requestApproval(conv: ConversationRef, req: ApprovalPrompt): Promise<void> {
+    if (this.failApprovals) throw new Error("fake: approval post failed");
     this.approvalRequests.push({ conv, req });
   }
 
@@ -92,23 +95,44 @@ class FakeHarnessSession implements HarnessSession {
     }
 
     // Resume path: re-drive a call deferred on a prior turn (the SDK re-runs it
-    // through the gate first, where an architect decision now resolves it).
+    // through the gate first, where a recorded decision now resolves it).
     if (this._handle.pending) {
       const call = this._handle.pending;
       this.gateCalls.push(call);
       const d = await gate(call);
-      let reply: string;
+      let note: string;
       if (d.decision === "allow") {
         this.parent.executed.push(call);
-        reply = `applied ${call.name}`;
+        note = `applied ${call.name}`;
       } else if (d.decision === "deny") {
-        reply = `did not run ${call.name} — ${d.reason}`;
+        note = `did not run ${call.name} — ${d.reason}`;
       } else {
-        reply = `still gated: ${call.name}`;
+        note = `still gated: ${call.name}`;
       }
       this._handle = { ...this._handle, pending: null };
       yield { kind: "handle_updated", handle: this._handle };
-      yield { kind: "reply", text: reply, costUsd: 0.01 };
+      // An empty-prompt resume (approval decision) is done here. A resume that
+      // also carries a fresh human instruction continues into its scripted work
+      // after the leftover call is resolved (models the agent moving on).
+      if (input.text.trim().length === 0) {
+        yield { kind: "reply", text: note, costUsd: 0.01 };
+        return;
+      }
+      const scripted = this.parent.nextScript();
+      if (scripted) {
+        for (const c of scripted) {
+          this.gateCalls.push(c);
+          const dd = await gate(c);
+          if (dd.decision === "gate") {
+            this._handle = { ...this._handle, pending: c };
+            yield { kind: "handle_updated", handle: this._handle };
+            yield { kind: "deferred", call: c };
+            return;
+          }
+          if (dd.decision === "allow") this.parent.executed.push(c);
+        }
+      }
+      yield { kind: "reply", text: `${note}${scripted ? ` (+ran ${scripted.length})` : ""}`, costUsd: 0.01 };
       return;
     }
 

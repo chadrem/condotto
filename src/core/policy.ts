@@ -81,9 +81,17 @@ export function evaluate(call: ToolCall, ctx: PolicyContext): PolicyDecision {
   if (READ_TOOLS.has(name)) {
     // Reading anything on the host + posting the answer in a thread is an
     // exfiltration channel — reads are confined like writes (DESIGN.md §4).
-    if (offender) {
+    // Glob's `pattern` is itself a path glob (it can be absolute or contain
+    // `..`) and drives enumeration on its own, so it must be confined too;
+    // Grep's `pattern` is a regex scoped by the (already-checked) `path`.
+    const globEscape =
+      name === "Glob"
+        ? offendingPath(ctx.worktree, { path: (call.input as Record<string, unknown> | null)?.pattern })
+        : null;
+    const escaped = offender ?? globEscape;
+    if (escaped) {
       return deny(
-        `"${offender}" is outside your worktree. You may only read files inside your own working tree.`,
+        `"${escaped}" is outside your worktree. You may only read files inside your own working tree.`,
       );
     }
     return allow(describeCall(call));
@@ -135,13 +143,20 @@ function evaluateBash(input: unknown, ctx: PolicyContext): PolicyDecision {
 export function bashHardDeny(command: string): string | null {
   // Recursive force-delete whose target escapes the worktree (absolute, home,
   // parent, variable-expanded, or wildcard). A relative `rm -rf build` is left
-  // to the gate; an `rm -rf /` or `rm -rf ~` is refused outright.
-  for (const seg of command.split(/(?:\|\||&&|;|\||&|\n)+/)) {
+  // to the gate; an `rm -rf /` or `rm -rf ~` is refused outright. Quotes are
+  // stripped first so `rm -rf "/"` / `rm -rf "$HOME"` can't hide the target.
+  for (const rawSeg of command.split(/(?:\|\||&&|;|\||&|\n)+/)) {
+    const seg = rawSeg.replace(/['"]/g, "");
     if (!/\brm\b/.test(seg)) continue;
     const hasR = /\s-\w*r/i.test(seg) || /\s--recursive\b/.test(seg);
     const hasF = /\s-\w*f/i.test(seg) || /\s--force\b/.test(seg);
-    if (hasR && hasF && /\s(\/|~|\.\.(?:\/|\s|$)|\$|\*)/.test(seg)) {
-      return "recursive force-delete with an out-of-worktree, home, root, or wildcard target is not allowed.";
+    if (!(hasR && hasF)) continue;
+    // A target is dangerous unless it is clearly an in-tree relative path.
+    const targets = seg.trim().split(/\s+/).slice(1).filter((t) => t && !t.startsWith("-"));
+    for (const t of targets) {
+      if (t.startsWith("/") || t.startsWith("~") || t.includes("..") || t.includes("$") || t.includes("*")) {
+        return "recursive force-delete with an out-of-worktree, home, root, or wildcard target is not allowed.";
+      }
     }
   }
   // Credential / secret material.
@@ -167,6 +182,10 @@ function bashFullyAllowlisted(command: string, allowlist: string[]): boolean {
     .filter(Boolean);
   if (segments.length === 0) return false;
   return segments.every((seg) => {
+    // A segment with command substitution ($(...) / backticks) or redirection
+    // (< > >>) can smuggle an arbitrary command or an out-of-worktree write in
+    // behind an allowlisted prefix — never auto-allow it; send it to the gate.
+    if (/[$`()<>]/.test(seg)) return false;
     const norm = seg.replace(/\s+/g, " ");
     return allowlist.some((entry) => {
       const e = entry.trim().replace(/\s+/g, " ");

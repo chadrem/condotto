@@ -221,7 +221,15 @@ class ClaudeCodeSession implements HarnessSession {
       // moved machine) would otherwise wedge the thread forever. Recover by
       // starting fresh once: context is lost but the conversation continues.
       const message = err instanceof Error ? err.message : String(err);
-      if (allowFreshRetry && this._handle.sessionId && /No conversation found/i.test(message)) {
+      // Recover a normal message turn by starting fresh — but NEVER an
+      // approval-resume (empty prompt): a fresh session would silently drop the
+      // just-approved action and wipe context (#10). Let that surface as error.
+      if (
+        allowFreshRetry &&
+        input.text.trim().length > 0 &&
+        this._handle.sessionId &&
+        /No conversation found/i.test(message)
+      ) {
         this._handle = { ...this._handle, sessionId: null };
         yield { kind: "handle_updated", handle: this._handle };
         yield {

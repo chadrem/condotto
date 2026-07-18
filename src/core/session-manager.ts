@@ -170,6 +170,9 @@ export class SessionManager {
       const entry = this.entryFor(existing.id);
       entry.chain = entry.chain.then(async () => {
         this.store.updateSessionStatus(existing.id, "parked");
+        // Drop any approval left pending from before the stop — it refers to an
+        // abandoned turn and would otherwise wedge the reactivated session (#7).
+        this.store.expirePendingApprovals(existing.id);
         this.store.audit({
           sessionId: existing.id,
           actor: principalKey(author),
@@ -262,6 +265,10 @@ export class SessionManager {
     // the live entry and its FIFO — deleting mid-turn would let a later
     // reactivation start a second concurrent turn on the same session.
     this.store.updateSessionStatus(session.id, "stopped");
+    // Expire any approval left pending — the session is gone; nothing should be
+    // resumable via a late click (#7). handleApprovalDecision also guards on
+    // status, but clearing the row keeps hasPendingApproval/audit honest.
+    this.store.expirePendingApprovals(session.id);
     const entry = this.live.get(session.id);
     if (entry) entry.harness = null;
     this.store.audit({
@@ -408,6 +415,20 @@ export class SessionManager {
     if (!session || session.status === "stopped") return;
     const surface = this.surfaceFor(conv);
 
+    // Execution-time guard (closes the enqueue-time TOCTOU in handleMessage): a
+    // human message queued behind a turn that has since deferred must not stack
+    // onto the pending approval. Re-check here, inside the FIFO, where the prior
+    // turn has finished and any approval row now exists. Resume turns (no
+    // inbound) are intentional and skip this.
+    if (inbound && this.store.hasPendingApproval(sessionId)) {
+      await surface
+        .post(conv, {
+          text: "⏳ I've got a pending approval request above — approve or deny it, then resend and I'll pick up from there.",
+        })
+        .catch(() => {});
+      return;
+    }
+
     const repo = this.store.getRepo(session.repo_id);
     const policyCtx: PolicyContext = {
       worktree: session.worktree_path,
@@ -432,6 +453,12 @@ export class SessionManager {
       } else if (prior?.decision === "denied") {
         decision = { decision: "deny", reason: "An architect denied this action." };
         auditDecision = "deny(architect-denied)";
+      } else if (prior?.decision === "expired") {
+        // The approval was abandoned (session stopped/reassigned, or it could
+        // not be delivered). Cleanly deny the re-driven call so it never
+        // re-gates into a new prompt or executes (#3, #7).
+        decision = { decision: "deny", reason: "That action was abandoned and is no longer approved; do not retry it." };
+        auditDecision = "deny(expired)";
       } else {
         const pd = evaluate(call, policyCtx);
         auditDecision = pd.action;
@@ -488,7 +515,10 @@ export class SessionManager {
       replyDelivered = true;
     };
 
-    this.store.updateSessionStatus(sessionId, "active");
+    // Atomically claim the turn — but only if a stop hasn't landed since the
+    // top-of-method check (e.g. during the placeholder post). Never resurrect a
+    // stopped session (#6).
+    if (!this.store.tryActivate(sessionId)) return;
     let producedOutput = false;
     try {
       const harnessSession = await this.getOrAttachHarness(session);
@@ -573,9 +603,12 @@ export class SessionManager {
     } catch (err) {
       this.log(`[session ${sessionId}] requestApproval failed: ${err}`);
       this.store.audit({ sessionId, actor: "system", event: "error", detail: { approvalPostFailed: String(err) } });
+      // Don't wedge the session on an approval we could never deliver — expire
+      // it so the thread isn't stuck rejecting every future message (#3).
+      this.store.expirePendingApprovals(sessionId);
       await surface
         .post(conv, {
-          text: `⚠️ I couldn't post the approval request (${err instanceof Error ? err.message : err}). Nothing has run.`,
+          text: `⚠️ I couldn't post the approval request (${err instanceof Error ? err.message : err}). Nothing has run — send another message to retry.`,
         })
         .catch(() => {});
     }
