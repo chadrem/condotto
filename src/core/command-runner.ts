@@ -50,16 +50,22 @@ export class CommandRunner implements CommandRunnerLike {
 
     const timeoutMs = this.opts.timeoutMs ?? 5 * 60_000;
     let timedOut = false;
+    let finished = false;
     const timer = setTimeout(() => {
+      if (finished) return; // don't kill / mismark a process that already exited
       timedOut = true;
       proc.kill();
     }, timeoutMs);
 
+    // NOTE (M3): output is read fully into memory then byte-bounded. Fine for the
+    // trusted, echo/no-op land/deploy commands here; a real deploy path (M4)
+    // should stream-bound to defend against an output flood.
     const [stdout, stderr] = await Promise.all([
       new Response(proc.stdout).text(),
       new Response(proc.stderr).text(),
     ]);
     const code = await proc.exited;
+    finished = true;
     clearTimeout(timer);
 
     let output = (stdout + stderr).trim();
