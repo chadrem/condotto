@@ -31,7 +31,14 @@ let workflowAgentReadAllowed = false;
 let workflowGatedDenied = false;
 
 // The REAL policy engine — subagents + workflows on, read-only (no write opt-in).
+// The main-agent Workflow LAUNCH gates (Tier 2: architect approves it); this smoke
+// tests confinement, not the approval loop, so it AUTO-APPROVES the launch (as if an
+// architect clicked Approve). Everything else follows the real policy verbatim.
 const gate: GateFn = async (call) => {
+  if (call.name === "Workflow" && !call.agentId && !call.escaped) {
+    console.log("[gate] main Workflow -> allow (auto-approved launch for the smoke)");
+    return { decision: "allow" };
+  }
   const d = evaluate(call, {
     worktree: worktree.path,
     safeBashAllowlist: [],

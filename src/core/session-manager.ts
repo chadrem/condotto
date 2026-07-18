@@ -24,6 +24,10 @@ const CONCERN_TEXT: Record<PolicyConcern, string> = {
     "This investigates production data. Approve only if appropriate, and remember: " +
     "results posted in this thread must be aggregates only (counts/rates/yes-no) — " +
     "never row-level data or PII.",
+  "workflow-launch":
+    "This launches a multi-agent workflow: it fans out several agents in parallel " +
+    "(read-only and confined to this worktree) and counts against this thread's cost " +
+    "budget, so it can spend faster than a single turn. Approve to run it.",
 };
 
 // The session manager routes on (surface_id, conversation_id) and Principal —
@@ -68,13 +72,18 @@ function conduitSystemPrompt(opts: {
       `subagents — those are gated and only you, the main agent, may do them so an architect can ` +
       `approve. Use subagents to gather findings; you make the edits yourself.`
     : null;
-  // M3.6: guidance when the architect has enabled multi-agent workflows.
+  // M3.6: guidance when the architect has enabled multi-agent workflows. Note the
+  // real toolset limit: workflow sub-agents reliably READ/analyze files in parallel,
+  // but can't Grep or run shell (an SDK background-task restriction), so do the
+  // grep/enumeration YOURSELF first, then fan the found files out to be read.
   const workflow = opts.workflows
-    ? `- For a big cross-cutting job (auditing a pattern across the whole codebase, researching every ` +
-      `call site), you can launch a multi-agent WORKFLOW (the Workflow tool) that fans out many ` +
-      `read-only agents in parallel and synthesizes their findings. Workflow agents are READ-ONLY ` +
-      `and confined to this worktree — they cannot write, run shell, or reach the network. Use a ` +
-      `workflow for parallel investigation/analysis; you (the main agent) make any edits yourself, gated.`
+    ? `- For a big cross-cutting job (auditing a pattern across the codebase, reviewing many files), ` +
+      `you can launch a multi-agent WORKFLOW (the Workflow tool): it fans out read-only agents in ` +
+      `parallel and synthesizes their findings. Workflow agents are READ-ONLY and confined to this ` +
+      `worktree. Their reliable tools are Read and Glob — they CANNOT Grep or run shell — so when a ` +
+      `job needs search, YOU grep/enumerate first to find the files, then launch a workflow whose ` +
+      `agents each Read and analyze a slice in parallel. Launching a workflow needs an architect's ` +
+      `approval (it fans out and spends budget). You (the main agent) make any edits yourself, gated.`
     : null;
   return [
     `You are Conduit, an implementer agent bound to one chat thread. Humans in the`,
@@ -1332,8 +1341,16 @@ export class SessionManager {
                 costUsd: ev.costUsd,
                 resultSubtype: "success",
               });
-              this.store.audit({ sessionId, actor: "agent", event: "message_out", detail: { costUsd: ev.costUsd } });
-              await deliverFinal(ev.text);
+              this.store.audit({ sessionId, actor: "agent", event: "message_out", detail: { costUsd: ev.costUsd, ...(ev.workflow ? { workflow: true } : {}) } });
+              // M3.6 Tier 2: a workflow turn's reply is the synthesized summary;
+              // append a terse footer with the spend so "what ran + cost" is visible.
+              const footer =
+                ev.workflow && ev.costUsd !== undefined
+                  ? `\n\n_⚙︎ multi-agent workflow · $${ev.costUsd.toFixed(2)} this turn_`
+                  : ev.workflow
+                    ? `\n\n_⚙︎ multi-agent workflow_`
+                    : "";
+              await deliverFinal(ev.text + footer);
             }
             break;
           case "deferred":

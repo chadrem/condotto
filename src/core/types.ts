@@ -214,7 +214,12 @@ export type GateFn = (call: ToolCall) => Promise<GateDecision>;
 
 export type TurnEvent =
   | { kind: "progress"; text: string }
-  | { kind: "reply"; text: string; costUsd?: number }
+  /**
+   * The turn's final reply. `workflow` marks a turn that ran a multi-agent
+   * workflow (M3.6), so the surface can append a terse "what ran + cost" summary
+   * footer — the synthesized text is the agent's; the footer is Conduit's.
+   */
+  | { kind: "reply"; text: string; costUsd?: number; workflow?: boolean }
   /**
    * A turn that ended without a usable reply. `costUsd` is carried because an
    * error result (including the SDK's `error_max_budget_usd`) still reports the

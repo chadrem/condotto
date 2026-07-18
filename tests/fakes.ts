@@ -139,7 +139,9 @@ class FakeHarnessSession implements HarnessSession {
       // also carries a fresh human instruction continues into its scripted work
       // after the leftover call is resolved (models the agent moving on).
       if (input.text.trim().length === 0) {
-        yield { kind: "reply", text: note, costUsd: 0.01 };
+        // Model a workflow run: approving a Workflow launch "runs" the workflow,
+        // so its reply is a workflow-tagged summary (M3.6 Tier 2 cost footer).
+        yield { kind: "reply", text: note, costUsd: 0.01, workflow: call.name === "Workflow" };
         return;
       }
       const scripted = this.parent.nextScript();

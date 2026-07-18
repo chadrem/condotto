@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { evaluate, bashHardDeny, offendingPath, productionDataConcern } from "../src/core/policy";
+import { evaluate, bashHardDeny, offendingPath, productionDataConcern, parseWorkflowMeta, describeCall } from "../src/core/policy";
 import type { ToolCall } from "../src/core/types";
 
 const WORKTREE = "/tmp/conduit-wt/session-abc";
@@ -265,10 +265,48 @@ describe("policy: multi-agent tools (M3.5 Tier B)", () => {
     expect(evaluate(call("Task", {}), { ...ctx(), subagentsEnabled: true }).action).toBe("allow");
   });
 
-  test("the MAIN agent may run a workflow only when enabled", () => {
-    const wf = call("Workflow", { script: "export const meta = {}" });
-    expect(evaluate(wf, ctx()).action).toBe("gate");
-    expect(evaluate(wf, { ...ctx(), workflowsEnabled: true }).action).toBe("allow");
+  test("the MAIN agent's workflow LAUNCH is always gated (architect approves each launch, M3.6 Tier 2)", () => {
+    const wf = call("Workflow", { script: "export const meta = { name: 'audit', description: 'x' }" });
+    // Gated whether or not workflows are enabled (when off the tool is also absent
+    // from context; this is the deny-heavy backstop). The concern surfaces the fan-out.
+    const off = evaluate(wf, ctx());
+    expect(off.action).toBe("gate");
+    const on = evaluate(wf, { ...ctx(), workflowsEnabled: true });
+    expect(on.action).toBe("gate");
+    expect(on.concern).toBe("workflow-launch");
+    // The gate summary pulls the workflow name from the script's meta block.
+    expect(on.reason).toContain("audit");
+  });
+});
+
+describe("parseWorkflowMeta / describeCall for a Workflow launch (M3.6 Tier 2)", () => {
+  const script = `export const meta = {\n  name: 'auth-audit',\n  description: 'Audit auth across the codebase',\n  phases: [{ title: 'Scan' }],\n}\nphase('Scan')\nawait agent('look at "login"')`;
+
+  test("pulls name and description from the meta block", () => {
+    const meta = parseWorkflowMeta(script);
+    expect(meta?.name).toBe("auth-audit");
+    expect(meta?.description).toBe("Audit auth across the codebase");
+  });
+
+  test("a later string literal is not mistaken for the meta (scoped scan)", () => {
+    // The agent('look at "login"') call must not override the meta name.
+    expect(parseWorkflowMeta(script)?.name).toBe("auth-audit");
+  });
+
+  test("returns null when there is no script or no meta fields", () => {
+    expect(parseWorkflowMeta(undefined)).toBeNull();
+    expect(parseWorkflowMeta("")).toBeNull();
+    expect(parseWorkflowMeta("const x = 1")).toBeNull();
+  });
+
+  test("describeCall renders the workflow name + description for the approval prompt", () => {
+    const d = describeCall({ id: "t", name: "Workflow", input: { script } });
+    expect(d).toContain("auth-audit");
+    expect(d).toContain("Audit auth across the codebase");
+  });
+
+  test("describeCall falls back gracefully when the script has no meta", () => {
+    expect(describeCall({ id: "t", name: "Workflow", input: {} })).toBe("run a multi-agent workflow");
   });
 });
 
@@ -290,6 +328,13 @@ describe("policy: escaped (un-deferrable) calls — canUseTool backstop (M3.6)",
   test("an escaped out-of-worktree read is denied (confinement holds)", () => {
     expect(evaluate(escaped("Read", { file_path: "/etc/passwd" }), ctx()).action).toBe("deny");
     expect(evaluate(escaped("Glob", { pattern: "/Users/**/.ssh/*" }), ctx()).action).toBe("deny");
+  });
+
+  test("ToolSearch (schema discovery) is allowed for confined agents so they can reach Grep etc.", () => {
+    // A workflow agent loads non-default tools (Grep, …) via ToolSearch; the tools
+    // it then uses still hit the gate, so allowing discovery is safe.
+    expect(evaluate(escaped("ToolSearch", { query: "grep" }), ctx()).action).toBe("allow");
+    expect(evaluate({ id: "t", name: "ToolSearch", input: { query: "grep" }, agentId: "sub-1" }, ctx()).action).toBe("allow");
   });
 
   test("an escaped write/bash is DENIED (never gated — can't defer here) by default", () => {

@@ -9,6 +9,7 @@ import type {
   TurnEvent,
   TurnInput,
 } from "../../core/types";
+import { parseWorkflowMeta } from "../../core/policy";
 
 // Claude Code harness adapter over the Agent SDK.
 //
@@ -344,6 +345,10 @@ class ClaudeCodeSession implements HarnessSession {
     // success and deliver only it at turn end, so the human sees the real answer,
     // not "launched; waiting". A terminal deferred/error supersedes and clears it.
     let pendingReply: { text: string; costUsd?: number } | null = null;
+    // M3.6 Tier 2: track the background workflow so we can stream a live status
+    // line and tag the final reply for the summary footer.
+    let sawWorkflow = false;
+    let lastWorkflowDesc = "";
     try {
       const iterator = q[Symbol.asyncIterator]();
       while (true) {
@@ -368,6 +373,20 @@ class ClaudeCodeSession implements HarnessSession {
           if (m.session_id && m.session_id !== this._handle.sessionId) {
             this._handle = { ...this._handle, sessionId: m.session_id };
             yield { kind: "handle_updated", handle: this._handle };
+          }
+          continue;
+        }
+        // M3.6 Tier 2: a running workflow emits background-task lifecycle system
+        // messages (task_started/task_progress/task_updated, background_tasks_
+        // changed). Note the workflow ran, and stream a live status line — but only
+        // when the description changes (task_progress repeats per agent as tokens
+        // accumulate). Each such message also resets the inactivity watchdog above.
+        if (m.type === "system" && typeof m.subtype === "string" && (m.subtype.startsWith("task") || m.subtype === "background_tasks_changed")) {
+          sawWorkflow = true;
+          const desc = describeWorkflowEvent(m);
+          if (desc && desc !== lastWorkflowDesc) {
+            lastWorkflowDesc = desc;
+            yield { kind: "progress", text: desc };
           }
           continue;
         }
@@ -433,7 +452,9 @@ class ClaudeCodeSession implements HarnessSession {
         }
       }
       // Deliver the final buffered reply (the last success result of the turn).
-      if (pendingReply) yield { kind: "reply", text: pendingReply.text, costUsd: pendingReply.costUsd };
+      if (pendingReply) {
+        yield { kind: "reply", text: pendingReply.text, costUsd: pendingReply.costUsd, workflow: sawWorkflow };
+      }
     } catch (err) {
       // A persisted session id the runtime no longer knows (pruned storage,
       // moved machine) would otherwise wedge the thread forever. Recover by
@@ -501,23 +522,28 @@ function describeToolUse(name: string, input: unknown): string {
 }
 
 /**
- * Best-effort pull of `name`/`description` from a Workflow tool call's `script`
- * (a JS string beginning with `export const meta = { name: '…', description: '…' }`).
- * Used only to describe the launch for progress/approval — never executed. Returns
- * null if the script is absent or the fields can't be found.
+ * A live status line for a workflow background-task system message (M3.6 Tier 2).
+ * Returns null for events not worth surfacing. `task_progress.description` is the
+ * per-agent activity (e.g. "Read: read-readme"); `background_tasks_changed` marks
+ * the running set. Kept terse (Slack ergonomics) — the caller de-dups repeats.
  */
-export function parseWorkflowMeta(script: unknown): { name?: string; description?: string } | null {
-  if (typeof script !== "string" || script.length === 0) return null;
-  // Scan only the meta block so a later string literal can't be mistaken for it.
-  const metaStart = script.indexOf("meta");
-  const scope = metaStart >= 0 ? script.slice(metaStart, metaStart + 1200) : script.slice(0, 1200);
-  const grab = (key: string): string | undefined => {
-    const m = scope.match(new RegExp(`${key}\\s*:\\s*(['"\`])([^'"\`]{0,200})\\1`));
-    return m?.[2]?.trim() || undefined;
-  };
-  const name = grab("name");
-  const description = grab("description");
-  return name || description ? { name, description } : null;
+function describeWorkflowEvent(m: Record<string, any>): string | null {
+  switch (m.subtype) {
+    case "task_started":
+      return m.description ? `workflow started: ${String(m.description).slice(0, 100)}` : "workflow started";
+    case "task_progress":
+      return m.description ? `workflow · ${String(m.description).slice(0, 100)}` : null;
+    case "task_updated": {
+      const status = m.patch?.status;
+      return status ? `workflow ${String(status)}` : null;
+    }
+    case "background_tasks_changed": {
+      const n = Array.isArray(m.tasks) ? m.tasks.length : 0;
+      return n > 0 ? `workflow running (${n} background task${n === 1 ? "" : "s"})` : null;
+    }
+    default:
+      return null;
+  }
 }
 
 export class ClaudeCodeAdapter implements HarnessAdapter {

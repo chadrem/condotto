@@ -1122,6 +1122,32 @@ describe("harness capabilities — workflows (M3.6)", () => {
     await w.manager.handleEvent({ kind: "command", conv: c, author: architect, name: "help", args: "" });
     expect(w.surface.posts.at(-1)!.text).toContain("workflows *on*");
   });
+
+  test("a workflow LAUNCH gates → architect approves → the workflow runs (Tier 2)", async () => {
+    const w = makeWorld();
+    const c = conv("wf7.000001");
+    await assign(w, "wf7.000001");
+    await w.manager.handleEvent({ kind: "command", conv: c, author: architect, name: "workflows", args: "on" });
+    // A member asks; the agent proposes a workflow. The LAUNCH is a gated action.
+    const script = "export const meta = { name: 'auth-audit', description: 'Audit auth across the code' }";
+    w.harness.scriptTurn([{ id: "wf-1", name: "Workflow", input: { script } }]);
+    await w.manager.handleEvent({ kind: "message", conv: c, author: member, text: "audit our auth", attachments: [] });
+
+    // Launch gated: approval posted with the workflow name + the fan-out concern; nothing ran.
+    expect(w.surface.approvalRequests.length).toBe(1);
+    const req = w.surface.approvalRequests[0]!.req;
+    expect(req.toolName).toBe("Workflow");
+    expect(req.summary).toContain("auth-audit");
+    expect(req.concern).toContain("multi-agent workflow");
+    expect(w.harness.executed.length).toBe(0);
+
+    // Architect approves → the workflow runs (re-driven and executed).
+    const requestId = w.surface.lastApprovalRequestId()!;
+    await w.manager.handleEvent({ kind: "approval_decision", requestId, decider: architect, decision: "approved" });
+    expect(w.harness.executed.map((cl) => cl.name)).toContain("Workflow");
+    // The workflow-turn reply carries the summary cost footer.
+    expect(w.surface.transcript().some((t) => /multi-agent workflow · \$/.test(t))).toBe(true);
+  });
 });
 
 describe("trust-scoped project config (M3.5 Tier C)", () => {

@@ -38,7 +38,7 @@ export interface PolicyDecision {
   concern?: PolicyConcern;
 }
 
-export type PolicyConcern = "production-data";
+export type PolicyConcern = "production-data" | "workflow-launch";
 
 export interface PolicyContext {
   /** Absolute session worktree; filesystem access is confined to it. */
@@ -88,7 +88,13 @@ const SUBAGENT_SPAWN_TOOLS = new Set(["Agent", "Task"]);
 const WORKFLOW_SPAWN_TOOL = "Workflow";
 
 // Tool categories. A tool absent from all of these is unknown → gated.
-const NO_FS_TOOLS = new Set(["TodoWrite"]);
+// `ToolSearch` is side-effect-free: it loads tool SCHEMAS on demand. Allowing
+// discovery is safe because every actual tool USE it surfaces still flows through
+// this gate, and disallowedTools keeps out-of-scope tools out of context. (Note,
+// M3.6: this does NOT restore Grep/Bash for background WORKFLOW sub-agents — the
+// SDK blocks their non-default tool loads UPSTREAM of our gate, spike diag5. It
+// only helps the main agent / Agent-subagents, and is the correct classification.)
+const NO_FS_TOOLS = new Set(["TodoWrite", "ToolSearch"]);
 const READ_TOOLS = new Set(["Read", "Glob", "Grep"]);
 const WRITE_TOOLS = new Set(["Write", "Edit", "MultiEdit", "NotebookEdit"]);
 const NETWORK_TOOLS = new Set(["WebFetch", "WebSearch"]);
@@ -152,7 +158,12 @@ export function evaluate(call: ToolCall, ctx: PolicyContext): PolicyDecision {
     return ctx.subagentsEnabled ? allow("delegate to a subagent") : gate("delegate to a subagent");
   }
   if (name === WORKFLOW_SPAWN_TOOL) {
-    return ctx.workflowsEnabled ? allow("run a multi-agent workflow") : gate("run a multi-agent workflow");
+    // The workflow LAUNCH is a gated action (M3.6 Tier 2): even with workflows
+    // enabled, an architect approves each launch (it fans out many agents and
+    // spends the thread budget). The concern surfaces the fan-out on the approval;
+    // describeCall pulls the workflow's name/description from its script. Off =
+    // gate too (deny-heavy backstop; the tool is also absent from context).
+    return gate(describeCall(call), "workflow-launch");
   }
 
   return evaluateBase(call, ctx);
@@ -196,8 +207,8 @@ function evaluateConfined(call: ToolCall, ctx: PolicyContext): PolicyDecision {
 function evaluateBase(call: ToolCall, ctx: PolicyContext): PolicyDecision {
   const name = call.name;
 
-  // Side-effect-free planning tool: always fine, touches no filesystem.
-  if (NO_FS_TOOLS.has(name)) return allow("updates its task plan");
+  // Side-effect-free meta tools: always fine, touch no filesystem.
+  if (NO_FS_TOOLS.has(name)) return allow(name === "ToolSearch" ? "loads a tool definition" : "updates its task plan");
 
   const offender = offendingPath(ctx.worktree, call.input);
 
@@ -378,10 +389,39 @@ function truncate(s: string, max = 120): string {
   return oneLine.length > max ? oneLine.slice(0, max - 1) + "…" : oneLine;
 }
 
+/**
+ * Best-effort pull of `name`/`description` from a Workflow tool call's `script`
+ * (a JS string beginning with `export const meta = { name: '…', description: '…' }`).
+ * Used only to DESCRIBE a launch for the approval/progress — the script is never
+ * executed here. Returns null if absent or the fields can't be found. Scans only
+ * the meta block so a later string literal can't be mistaken for it.
+ */
+export function parseWorkflowMeta(script: unknown): { name?: string; description?: string } | null {
+  if (typeof script !== "string" || script.length === 0) return null;
+  const metaStart = script.indexOf("meta");
+  const scope = metaStart >= 0 ? script.slice(metaStart, metaStart + 1200) : script.slice(0, 1200);
+  const grab = (key: string): string | undefined => {
+    const m = scope.match(new RegExp(`${key}\\s*:\\s*(['"\`])([^'"\`]{0,200})\\1`));
+    return m?.[2]?.trim() || undefined;
+  };
+  const name = grab("name");
+  const description = grab("description");
+  return name || description ? { name, description } : null;
+}
+
 /** Short human-readable description of a tool call, for prompts and audit. */
 export function describeCall(call: ToolCall): string {
   const i = (call.input ?? {}) as Record<string, unknown>;
   switch (call.name) {
+    case "Workflow": {
+      const meta = parseWorkflowMeta(i.script ?? i.scriptPath);
+      if (meta?.name && meta.description) return `run the workflow \`${meta.name}\` — ${meta.description}`;
+      if (meta?.name) return `run the workflow \`${meta.name}\``;
+      return "run a multi-agent workflow";
+    }
+    case "Agent":
+    case "Task":
+      return "delegate to a subagent";
     case "Read":
       return `read ${i.file_path ?? "a file"}`;
     case "Glob":
