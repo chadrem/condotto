@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this repo is
 
-Conduit turns Slack threads into tickets that work themselves: each assigned thread gets a persistent Claude Code session running on a real dev machine, with humans (product + architect) and the AI implementer conversing in the thread. **There is no product code yet** (only the M0 spike scripts in `spikes/m0/`) — `DESIGN.md` is the authoritative, self-contained design document. Read it before doing anything; this file only orients you.
+Conduit turns Slack threads into tickets that work themselves: each assigned thread gets a persistent Claude Code session running on a real dev machine, with humans (product + architect) and the AI implementer conversing in the thread. The daemon is built through **Milestone 2**: a ports-and-adapters core in `src/core/` (types, `bun:sqlite` store, session manager, policy engine, worktrees, A1 framing) with Slack (`src/adapters/slack/`) and Claude Code (`src/adapters/claude-code/`) adapters — gating + the defer-based approval loop are live. M0 spike scripts remain in `spikes/m0/`. `DESIGN.md` is still the authoritative, self-contained design document — read it before doing anything; this file only orients you.
 
 ## Process rules (from DESIGN.md)
 
