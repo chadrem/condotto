@@ -896,7 +896,13 @@ export class SessionManager {
             break;
           case "error":
             producedOutput = true;
-            this.store.audit({ sessionId, actor: "system", event: "error", detail: { message: ev.message } });
+            // An error result (incl. error_max_budget_usd) still reports spend —
+            // record it so the runaway cap can't be evaded by turns that end in
+            // error (DESIGN §4). Guarded like reply, to avoid double-counting.
+            if (ev.costUsd !== undefined && !replyDelivered) {
+              this.store.insertTurn({ sessionId, direction: "out", text: "(turn error)", costUsd: ev.costUsd, resultSubtype: "error" });
+            }
+            this.store.audit({ sessionId, actor: "system", event: "error", detail: { message: ev.message, costUsd: ev.costUsd } });
             await deliverFinal(`⚠️ ${ev.message}`);
             break;
         }

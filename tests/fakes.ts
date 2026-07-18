@@ -89,6 +89,18 @@ class FakeHarnessSession implements HarnessSession {
     this.turns.push(input);
     this.parent.allTurns.push({ cwd: this.cwd, text: input.text, budgetUsd: input.budgetUsd });
     if (this.parent.beforeReply) await this.parent.beforeReply();
+    // Simulate a turn that ends in an error carrying a cost (e.g. the SDK's
+    // error_max_budget_usd), for cost-accounting tests.
+    if (this.parent.nextError) {
+      const e = this.parent.nextError;
+      this.parent.nextError = null;
+      if (this._handle.sessionId === null) {
+        this._handle = { ...this._handle, sessionId: `fake-session-${++this.parent.sessionSeq}` };
+        yield { kind: "handle_updated", handle: this._handle };
+      }
+      yield { kind: "error", message: e.message, costUsd: e.costUsd };
+      return;
+    }
     if (this._handle.sessionId === null) {
       this._handle = { ...this._handle, sessionId: `fake-session-${++this.parent.sessionSeq}` };
       yield { kind: "handle_updated", handle: this._handle };
@@ -205,6 +217,8 @@ export class FakeHarness implements HarnessAdapter {
   beforeReply: (() => Promise<void>) | null = null;
   /** Number of extra progress events the default turn emits (status-throttle tests). */
   progressBurst = 0;
+  /** If set, the next turn ends in an error carrying this cost (budget tests). */
+  nextError: { message: string; costUsd?: number } | null = null;
 
   /** Queue the tool calls the agent will attempt on its next fresh turn. */
   scriptTurn(calls: ToolCall[]): void {

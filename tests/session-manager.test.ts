@@ -599,6 +599,21 @@ describe("cost budgets & runaway cap (M3, DESIGN §4)", () => {
     expect(w.harness.allTurns.length).toBe(before + 1); // runs again
   });
 
+  test("a turn that ends in an error still records its cost (budget can't be evaded)", async () => {
+    const w = makeWorld(undefined, { costCap: 5 });
+    await w.manager.handleEvent({ kind: "command", conv: conv("e40.000001"), author: architect, name: "assign", args: "" });
+    const sid = w.store.getSessionByConversation("fake", "e40.000001")!.id;
+    w.harness.nextError = { message: "I hit this turn's cost budget ($6.00) and stopped.", costUsd: 6 };
+    await w.manager.handleEvent({ kind: "message", conv: conv("e40.000001"), author: architect, text: "spendy", attachments: [] });
+    // The error's cost was recorded — cumulative spend now reflects it.
+    expect(w.store.sessionCostUsd(sid)).toBe(6);
+    // ...so the very next turn is paused by the runaway cap.
+    const before = w.harness.allTurns.length;
+    await w.manager.handleEvent({ kind: "message", conv: conv("e40.000001"), author: architect, text: "again", attachments: [] });
+    expect(w.harness.allTurns.length).toBe(before);
+    expect(w.surface.posts.at(-1)?.text).toContain("cost budget");
+  });
+
   test("a member cannot change the budget", async () => {
     const w = makeWorld(undefined, { costCap: 5 });
     await assignAndSpend(w, "e30.000001", 1);
