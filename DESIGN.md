@@ -726,7 +726,13 @@ whole spike **under Bun** — it doubles as the SDK-on-Bun compatibility check
 (§6): spawn, streaming, hooks, and resume all via `bun run`. If Bun trips,
 record the exact failure in `DECISIONS.md` and pick a hedge from §6.
 
-**Milestone 1 — Slack echo session.** Set up the Slack app per **Appendix C**
+**Milestone 1 — Slack echo session. ✅ DONE 2026-07-18** (code-complete, live
+human demo run clean: `/invite` → `/conduit assign` → converse → daemon restart
+→ resume → `@Conduit stop`). Assignment uses two paths because Slack forbids
+slash commands inside threads (DECISIONS.md): `/conduit assign` posts an anchor
+message that roots the thread; `@Conduit assign` claims an existing thread.
+Original text follows for reference.
+Set up the Slack app per **Appendix C**
 (Socket Mode, scopes, `/conduit` command). Bolt over Socket Mode. `/conduit
 assign` in a thread starts a session in a fixed **throwaway** test repo; thread
 messages become turns; the session's text replies post back. No gating yet
@@ -738,7 +744,18 @@ core routes on `(surface, conversation_id)` and `Principal` — a Slack or SDK
 type outside its adapter directory is a review-blocking bug. **Demo: hold a
 real conversation with a repo-aware session entirely in a Slack thread.**
 
-**Milestone 2 — Gating & roles.** Add the policy engine and the approval loop
+**Milestone 2 — Gating & roles. ✅ DONE 2026-07-18** (full facts in DECISIONS.md;
+81 tests, real-harness smoke proves defer→approve→cross-process resume→execute;
+a six-dimension adversarial review confirmed and fixed 10 findings). The policy
+engine (`core/policy.ts`) classifies every tool call allow/gate/deny (hard-deny
+first, then auto-allow read-only+confined and allowlisted bash, else gate); a
+`gate` becomes the SDK `defer`, and the approval is driven by the actual
+`deferred_tool_use`. Architect-only for assign/stop/approvals, verified
+server-side; roles are config-authoritative (`CONDUIT_ARCHITECTS` /
+`conduit.roles.json`). `canUseTool` is the deny-by-default backstop for the
+batching caveat. **Set `CONDUIT_ARCHITECTS` before the live demo** or no one can
+approve. Original text follows for reference.
+Add the policy engine and the approval loop
 from M0, now over Slack buttons. Roles table; architect-only approvals verified
 by `user.id`; members get "architects only." Auto-allow read-only, gate
 writes/bash/push. Audit log every tool call and decision. **Demo: the session

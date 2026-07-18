@@ -221,3 +221,118 @@ to the agent; M1 sessions are read-only with reads confined to the worktree.
 Registered repos accumulate `conduit/*` branches + worktree registrations
 (clean with `git worktree prune` and branch deletion). The deploy/land
 no-op rule and M4 gating review still stand before any write access.
+
+## 2026-07-18 — M2 SDK re-verification: precedence, batch backstop, canUseTool
+
+Re-confirmed against the live docs (hooks.md, permissions.md, user-input.md)
+before building the approval loop. The single-call defer→resume handshake was
+already M0-proven; this settled the surrounding mechanics.
+
+**Confirmed:**
+- **Precedence:** hooks → deny rules → ask rules → permission mode → allow
+  rules → `canUseTool`. A hook `deny` **terminates** (beats `allowedTools`), so
+  read-only tools sit in `allowedTools` (auto-approve) while the `PreToolUse`
+  hook still DENIES an out-of-worktree read. This is the M1 confinement design,
+  now doc-confirmed.
+- **Batch caveat:** `defer` is ignored for parallel batched tool calls; the
+  gated call falls through toward `canUseTool`. `permissionMode: "default"`
+  routes unmatched tools to `canUseTool`, so a deny-by-default `canUseTool`
+  reliably catches a batched gated call regardless of the exact fallthrough
+  step.
+- **`canUseTool` contract:** `{behavior:"allow", updatedInput} | {behavior:
+  "deny", message}`; signature `(toolName, input, {signal, suggestions})` — it
+  receives **no** tool_use_id, so approval lookup keys off the hook path only.
+  `updatedInput` is ignored on `defer`, honored on `allow`.
+
+**Ambiguous in docs (handled defensively):** the exact batch-fallthrough step
+and the permissionMode×defer interaction are not spelled out. Our design
+(permissionMode `default` + matcher-less hook + `canUseTool` blanket-deny) is
+correct under every documented interpretation.
+
+**Empirical (M2 smoke, real SDK, two OS processes):** a `Write` gated →
+deferred (`deferred_tool_use = {id,name,input}`, `terminal_reason
+"tool_deferred"`), then a separate process resumed by handle, re-drove the same
+`tool_use_id`, allowed it, and the Write executed with exact content. Scripts:
+`scripts/smoke-gate.ts` / `smoke-gate-approve.ts` (`bun run smoke:gate` then
+`smoke:approve`).
+
+**Benign warning to expect:** every `query()` logs
+`CLAUDE_SDK_CAN_USE_TOOL_SHADOWED` ("canUseTool will not be invoked for
+Read/Glob/Grep/TodoWrite"). This is EXPECTED and *validates* the design: reads
+are auto-approved by `allowedTools` (and confined by the hook), so they never
+reach the blanket-deny `canUseTool`; only gated tools do. (Ops nit: it prints a
+stack each turn; quieting it is M3.)
+
+**Observed (not a bug):** an empty-prompt approval-resume can emit two
+`result`/`reply` messages; the daemon delivers both (a minor double-post).
+Collapsing multiple replies per turn is M3 polish.
+
+## 2026-07-18 — M2 complete: policy engine + defer-based approval loop
+
+**Implementation (DESIGN.md §8 Milestone 2):** every tool call flows through an
+approval-aware gate returning allow / gate / deny; a `gate` maps to the SDK
+`defer`.
+
+- **Policy engine** (`src/core/policy.ts`, pure `evaluate(call, ctx)`): hard-deny
+  first (out-of-worktree reads/writes incl. Glob `pattern`; `rm -rf` with
+  out-of-tree / home / root / `..` / `$` / `*` targets, dequoted; credential and
+  secret paths, daemon env-var names), then auto-allow (read-only + confined;
+  bash where every chained segment is allowlisted **and** free of command-
+  substitution/redirect metacharacters), else gate. Unknown tools gate
+  (deny-heavy default).
+- **Approval lifecycle** is driven by the SDK's actual `deferred_tool_use` (a
+  `deferred` TurnEvent), NOT by the hook firing — this sidesteps M0's
+  "hook can fire twice" caveat. The manager records a pending approval, asks the
+  surface to post Approve/Deny, and parks. An architect decision (re-verified
+  **server-side**) resumes the session (empty-prompt turn) to re-drive the call;
+  the gate answers allow/deny from the recorded approval. An **expired** approval
+  (stop / reassign / undeliverable) re-drives as a clean deny — an abandoned
+  gated action never re-gates or executes.
+- **`canUseTool`** is a blanket deny-by-default backstop for the batching caveat
+  (reads are shadowed from it, which is exactly why blanket-deny is safe).
+- **Roles**: architect-only for assign / stop / approvals (DESIGN §2);
+  conversing is open. Config is authoritative — `clearRoles` + reseed at boot
+  from `CONDUIT_ARCHITECTS` / `conduit.roles.json`, so removing a principal
+  actually revokes.
+- **Deviation from DESIGN §4 examples (logged):** the DEFAULT safe-bash
+  allowlist omits `cat`/`ls`. Auto-allowing them via Bash would bypass worktree
+  read-confinement (Bash arg confinement is only heuristic in M2), so file reads
+  go through the confined Read/Grep tools; a repo may opt cat/ls back in per
+  repo. Positive Bash-arg confinement is M3/M4.
+
+**Before the live M2 demo:** set `CONDUIT_ARCHITECTS=slack:U…` (or
+`conduit.roles.json`). With no architect configured, assign/stop/approvals are
+refused for everyone — the daemon logs a WARNING at boot.
+
+**Verification:** 81 tests green, `tsc` clean, `check-ports` clean; the
+real-harness smoke proves defer → approve → cross-process resume → execute.
+
+## 2026-07-18 — M2 adversarial review: 10 confirmed findings, fixes applied
+
+A six-dimension multi-agent review (authority/approval, policy, SDK,
+concurrency, store, ports) with refute-by-default adversarial verification
+confirmed 10 findings (9 refuted). Fixed same day (commit 11a37f7); regression
+tests added. Load-bearing ones:
+
+- **(high)** Bash auto-allow bypass via `$(...)`, backticks, and redirects
+  (`git log $(curl …)` auto-allowed exfiltration): a segment with those
+  metacharacters now never auto-allows — it goes to the gate.
+- **(high)** Pending-approval TOCTOU: a message queued while a turn was still
+  running (before it deferred) could stack a spurious turn onto the deferred
+  session and duplicate the approval. Re-checked at **execution** time inside
+  the per-session FIFO, not just at enqueue.
+- **(med)** Failed approval post / stop / reassign left an approval `pending`
+  forever (wedging the session): expire them; a re-driven expired approval
+  cleanly denies.
+- **(med)** `rm -rf` quoted/embedded targets degraded deny→gate; Glob `pattern`
+  escaped read confinement; a stop landing during the placeholder post could
+  resurrect the session (fixed with atomic `tryActivate`); roles were
+  seed-only, so removing an architect never revoked (config-authoritative now).
+- **(low)** Fresh-retry on a failed empty-prompt approval-resume would silently
+  drop the approved action — disabled for empty prompts.
+
+**Deliberately deferred** (documented, not a bug): a batched gated call is
+audited as `tool_call decision=gate` although `canUseTool` then denies it — the
+adapter has no store handle to audit the backstop denial, and the case is rare
+(the model must batch a gated call); revisit when auditing moves behind the
+harness port in M3.
