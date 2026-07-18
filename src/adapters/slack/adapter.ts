@@ -240,6 +240,8 @@ export class SlackAdapter implements SurfaceAdapter {
             "Usage: `/conduit assign [repo]` (new session in this channel), `/conduit status`.\n" +
             "Inside a session thread (mention me): `@Conduit stop`, `@Conduit status`, " +
             "`@Conduit land`/`deploy` (gated), `@Conduit budget <usd>`.\n" +
+            "Tune the implementer: `@Conduit model <opus|sonnet|fable>`, `@Conduit effort <low…max>`, " +
+            "`@Conduit subagents on|off`, `@Conduit ultra on|off`.\n" +
             "To assign an existing thread: `@Conduit assign` in that thread.",
         });
       }
