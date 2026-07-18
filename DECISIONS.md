@@ -108,6 +108,23 @@ community reports (checked 2026-07-18).
 `ConversationRef` flow is unchanged — the core never knew about slash-command
 mechanics.
 
+## 2026-07-18 — Bun blocker in @slack/bolt v5: pinned to Bolt 4.x
+
+**Failure (exact, per §6's record-the-failure rule):** `@slack/bolt@5.0.0` →
+`@slack/socket-mode@3.0.0` sends its keepalive via undici's non-standard
+`ping()` export; under Bun 1.3.14 the `undici` compat shim has no `ping`, so
+every client ping throws `TypeError: (0, undici_1.ping) is not a function` and
+socket-mode's catch handler calls `disconnect()` — a connect/disconnect loop.
+Observed live on first daemon boot (2026-07-18).
+
+**Decision:** pin `@slack/bolt@^4` (4.7.3 → `@slack/socket-mode@2.0.7`, which
+uses the `ws` package; Bun supports `ws` natively). Verified: 35s live run,
+Socket Mode connected, zero ping errors, clean SIGTERM shutdown. The App API we
+use (command/event handlers, client, start/stop) is unchanged between v4/v5.
+Revisit when Bun's undici shim grows `ping` or socket-mode drops the
+undici-only path; the fallback hedge (Slack adapter in a Node child process
+behind the surface port) remains available per §6.
+
 ## 2026-07-18 — M1 implementation decisions (daemon skeleton)
 
 - **Read-only posture is enforced twice:** the harness adapter passes
