@@ -162,20 +162,28 @@ function evaluateBash(input: unknown, ctx: PolicyContext): PolicyDecision {
  * exhaustive: the human at the gate is the real net; this catches the sharpest,
  * most common shapes so they never slip through as auto-allowed.
  */
+const DIRECT_CLIENT_RE = /^(psql|mysql|mysqldump|mongo|mongosh|redis-cli|clickhouse-client|cqlsh|influx|mongoexport|pg_dump)$/;
+
 export function productionDataConcern(command: string): boolean {
+  const stripPath = (t: string) => t.replace(/^.*\//, "");
   for (const rawSeg of command.split(/(?:\|\||&&|;|\||&|\n)+/)) {
     const seg = rawSeg.trim();
     // Find the invoked program: skip leading env-var assignments (`PGPASSWORD=x`)
-    // and common wrappers (`sudo`, `env`, `nice`, `time`, `command`) so a prefix
-    // can't hide the program from the match. Then allow a path prefix.
+    // and common wrappers (`sudo`, `env`, `nice`, `time`, `timeout`, `command`)
+    // so a prefix can't hide the program from the match. Then allow a path prefix.
     const tokens = seg.split(/\s+/);
     let idx = 0;
-    while (idx < tokens.length && (/^\w+=/.test(tokens[idx]!) || /^(sudo|env|nice|time|command)$/.test(tokens[idx]!))) idx++;
+    while (idx < tokens.length && (/^\w+=/.test(tokens[idx]!) || /^(sudo|env|nice|time|timeout|command|doas|nohup|stdbuf)$/.test(tokens[idx]!))) idx++;
+    // Fallback for wrappers that take their own options (`sudo -u pg psql`,
+    // `timeout 5 psql`): if we skipped a prefix, a direct client appearing as any
+    // later token still counts. `echo psql` is NOT caught — echo isn't a prefix,
+    // so idx stays 0 and this scan is skipped.
+    if (idx > 0 && tokens.slice(idx).some((t) => DIRECT_CLIENT_RE.test(stripPath(t)))) return true;
     const first = tokens[idx] ?? "";
-    const prog = first.replace(/^.*\//, ""); // strip any path prefix
+    const prog = stripPath(first);
     const rest = " " + tokens.slice(idx + 1).join(" ");
     // Direct database / cache / search clients.
-    if (/^(psql|mysql|mysqldump|mongo|mongosh|redis-cli|clickhouse-client|cqlsh|influx|mongoexport|pg_dump)$/.test(prog)) return true;
+    if (DIRECT_CLIENT_RE.test(prog)) return true;
     // App consoles / runners that reach the live datastore.
     if (/^(rails)$/.test(prog) && /\b(c|console|dbconsole|runner)\b/.test(rest)) return true;
     if (/^(rails)$/.test(prog) && rest.trim() === "") return true;

@@ -8,9 +8,9 @@
 // worktrees.ts. It stays free of Slack/SDK types.
 
 export interface CommandResult {
-  /** Process exit code (0 = success); null if killed by the timeout. */
+  /** Process exit code (0 = success); null if killed by the timeout or overflow. */
   code: number | null;
-  /** Combined stdout+stderr, trimmed and byte-bounded. */
+  /** Combined stdout+stderr, byte-bounded (streamed, never fully buffered). */
   output: string;
   timedOut: boolean;
 }
@@ -32,6 +32,46 @@ export const DEFAULT_SCRUB_ENV = [
   "AWS_SECRET_ACCESS_KEY",
 ];
 
+/**
+ * Read a stream up to `maxBytes`, decoding incrementally and STOPPING once the
+ * cap is reached (peak memory is bounded, never the full output — a runaway
+ * command can't OOM the daemon). Returns whether it overflowed.
+ */
+async function drainBounded(
+  stream: ReadableStream<Uint8Array>,
+  maxBytes: number,
+): Promise<{ text: string; overflow: boolean }> {
+  const reader = stream.getReader();
+  const decoder = new TextDecoder();
+  const parts: string[] = [];
+  let total = 0;
+  let overflow = false;
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (!value) continue;
+      if (total + value.byteLength <= maxBytes) {
+        total += value.byteLength;
+        parts.push(decoder.decode(value, { stream: true }));
+      } else {
+        parts.push(decoder.decode(value.slice(0, maxBytes - total)));
+        overflow = true;
+        break; // stop reading; the caller kills the process
+      }
+    }
+  } catch {
+    /* stream errored (e.g. process killed) — return what we have */
+  } finally {
+    try {
+      reader.releaseLock();
+    } catch {
+      /* already released */
+    }
+  }
+  return { text: parts.join(""), overflow };
+}
+
 export class CommandRunner implements CommandRunnerLike {
   constructor(
     private opts: { timeoutMs?: number; maxOutputBytes?: number; scrubEnv?: string[] } = {},
@@ -49,31 +89,19 @@ export class CommandRunner implements CommandRunnerLike {
     });
 
     const timeoutMs = this.opts.timeoutMs ?? 5 * 60_000;
-    // NOTE (M3): output is read fully into memory then byte-bounded. Fine for the
-    // trusted, echo/no-op land/deploy commands here; a real deploy path (M4)
-    // should stream-bound to defend against an output flood.
-    const readAll = Promise.all([
-      new Response(proc.stdout).text().catch(() => ""),
-      new Response(proc.stderr).text().catch(() => ""),
-    ]).then(([o, e]) => o + e);
+    const maxOut = this.opts.maxOutputBytes ?? 16_000;
 
-    // Race the read against a hard deadline. run() MUST always settle within the
-    // timeout — if a killed shell's surviving child kept the pipe open, awaiting
-    // stream EOF would hang forever, and the caller (runShip) would hold its
-    // concurrency slot and wedge the session. On timeout we SIGKILL and return
-    // whatever was buffered.
+    // Read both streams with per-stream byte caps, and race the whole read
+    // against a hard deadline — run() MUST always settle within the timeout, or a
+    // killed shell's surviving child holding the pipe would hang the caller
+    // (runShip) forever, leaking its concurrency slot and wedging the session.
     let timer: ReturnType<typeof setTimeout> | undefined;
     const deadline = new Promise<"timeout">((resolve) => {
       timer = setTimeout(() => resolve("timeout"), timeoutMs);
     });
+    const collect = Promise.all([drainBounded(proc.stdout, maxOut), drainBounded(proc.stderr, maxOut)]);
 
-    const bound = (s: string): string => {
-      const trimmed = s.trim();
-      const max = this.opts.maxOutputBytes ?? 16_000;
-      return trimmed.length > max ? trimmed.slice(0, max) + "\n… (truncated)" : trimmed;
-    };
-
-    const outcome = await Promise.race([readAll.then((o) => ({ o }) as const), deadline]);
+    const outcome = await Promise.race([collect.then((v) => ({ kind: "done" as const, v })), deadline]);
     clearTimeout(timer);
 
     if (outcome === "timeout") {
@@ -82,15 +110,25 @@ export class CommandRunner implements CommandRunnerLike {
       } catch {
         /* already gone */
       }
-      // Grab anything already buffered, but never wait indefinitely for EOF.
       const partial = await Promise.race([
-        readAll,
-        new Promise<string>((r) => setTimeout(() => r(""), 500)),
+        collect.then(([o, e]) => (o.text + "\n" + e.text).trim()),
+        new Promise<string>((r) => setTimeout(() => r("(timed out)"), 500)),
       ]);
-      return { code: null, output: bound(partial), timedOut: true };
+      return { code: null, output: partial.slice(0, maxOut + 32), timedOut: true };
     }
 
-    const code = await proc.exited;
-    return { code, output: bound(outcome.o), timedOut: false };
+    const [out, err] = outcome.v;
+    const overflow = out.overflow || err.overflow;
+    if (overflow) {
+      try {
+        proc.kill(9);
+      } catch {
+        /* already gone */
+      }
+    }
+    const code = overflow ? null : await proc.exited;
+    let output = (out.text + err.text).trim();
+    if (overflow) output += "\n… (truncated: output limit exceeded, process killed)";
+    return { code, output, timedOut: false };
   }
 }

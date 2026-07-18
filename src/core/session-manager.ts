@@ -853,16 +853,18 @@ export class SessionManager {
       replyDelivered = true;
     };
 
-    // Atomically claim the turn — but only if a stop hasn't landed since the
-    // top-of-method check (e.g. during the placeholder post). Never resurrect a
-    // stopped session (#6).
-    if (!this.store.tryActivate(sessionId)) return;
     let producedOutput = false;
     // Bound concurrent harness turns box-wide (the FIFO already serializes per
-    // session). Acquired only for the actual turn execution, released in finally.
+    // session). Acquire a slot BEFORE claiming the turn — the wait can last
+    // minutes when all slots are busy, and a stop can land during it.
     await this.turnSlots.acquire();
     let slotHeld = true;
     try {
+      // Atomically claim the turn only now, once we actually have a slot and are
+      // about to run. If a stop landed since the top-of-method check OR while we
+      // waited for a slot, tryActivate returns false — never run a turn on a
+      // stopped session (#6), and the finally releases the slot.
+      if (!this.store.tryActivate(sessionId)) return;
       const harnessSession = await this.getOrAttachHarness(session);
 
       for await (const ev of harnessSession.turn({ text: framedText, budgetUsd: turnBudgetUsd }, gate)) {

@@ -693,4 +693,29 @@ describe("concurrency (M3, DESIGN §7)", () => {
     expect(peak).toBe(2); // never exceeded the cap across the whole run
     expect(w.harness.allTurns.length).toBe(4); // all four eventually ran
   });
+
+  test("a stop landing while a turn waits for a concurrency slot aborts that turn (review)", async () => {
+    const w = makeWorld(undefined, { maxConcurrentTurns: 1 });
+    for (const id of ["f10.000001", "f11.000001"]) {
+      await w.manager.handleEvent({ kind: "command", conv: conv(id), author: architect, name: "assign", args: "" });
+    }
+    // Session A holds the single slot open; B's turn will block on acquire.
+    let releaseA!: () => void;
+    const heldA = new Promise<void>((r) => (releaseA = r));
+    let first = true;
+    w.harness.beforeReply = () => (first ? ((first = false), heldA) : Promise.resolve());
+
+    const aTurn = w.manager.handleEvent({ kind: "message", conv: conv("f10.000001"), author: architect, text: "aaa", attachments: [] });
+    await Bun.sleep(20); // A acquires the slot and holds it
+    const bTurn = w.manager.handleEvent({ kind: "message", conv: conv("f11.000001"), author: architect, text: "bbb", attachments: [] });
+    await Bun.sleep(20); // B is now blocked waiting for the slot
+    await w.manager.handleEvent({ kind: "command", conv: conv("f11.000001"), author: architect, name: "stop", args: "" });
+    releaseA(); // A finishes, frees the slot; B resumes past acquire
+    await Promise.all([aTurn, bTurn]);
+
+    // B's turn never ran on the stopped session.
+    expect(w.harness.allTurns.some((t) => t.text.includes("bbb"))).toBe(false);
+    expect(w.harness.allTurns.some((t) => t.text.includes("aaa"))).toBe(true);
+    expect(w.store.getSessionByConversation("fake", "f11.000001")!.status).toBe("stopped");
+  });
 });

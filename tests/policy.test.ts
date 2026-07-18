@@ -155,6 +155,8 @@ describe("policy: production-data gate (M3, DESIGN §4)", () => {
     for (const c of [
       "PGPASSWORD=secret psql -h prod -c 'select 1'",
       "sudo psql -c 'select 1'",
+      "sudo -u postgres psql -c 'select 1'",
+      "timeout 5 psql prod",
       "env REDIS_URL=x redis-cli GET k",
       "PGPASSWORD=x /usr/bin/psql prod",
     ]) {
