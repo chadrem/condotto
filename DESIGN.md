@@ -122,8 +122,11 @@ web UI. The journeys themselves are surface-agnostic.)
    resumes exactly where it paused; on denial the reason is fed back to the
    session so it adapts.
 
-4. **Ship.** On an architect's explicit go-ahead, the session runs the repo's
-   land/deploy path (whatever the repo defines) — again behind the gate.
+4. **Ship.** On an architect's explicit go-ahead (`@Conduit land`/`deploy`,
+   M3), the **daemon** runs the repo's configured land/deploy command (whatever
+   the repo defines) in the worktree — never the agent's shell, so exactly the
+   authoritative command runs — and still behind the Approve/Deny gate. The
+   agent may propose that it's time to land, but cannot run the path itself.
 
 5. **Park & resume.** A thread can go quiet for hours or days. The daemon holds
    no process open; the session lives on disk, keyed by its worktree. The
@@ -762,7 +765,24 @@ writes/bash/push. Audit log every tool call and decision. **Demo: the session
 proposes an edit, posts Approve/Deny, applies it only on an architect's click,
 and a member's click is rejected.**
 
-**Milestone 3 — Real work end-to-end.** Wire a real repo's test/land/deploy
+**Milestone 3 — Real work end-to-end. ✅ DONE 2026-07-18** (full facts in
+DECISIONS.md; 115 tests, real-harness smokes prove gate→approve→resume and 4
+concurrent in-process sessions; a four-lens framing red-team confirmed the model
+holds and its findings were fixed). Per-repo test/land/deploy commands
+(`repos.test_cmd`/`land_cmd`/`deploy_cmd`); land/deploy are architect-ordered
+(`@Conduit land`/`deploy`) and run by the **daemon** through the Approve/Deny gate
+via a core `CommandRunner` in the worktree — never the agent's shell — echo/no-op
+on `testrepo` until M4. The repo's test command auto-runs (folded into the
+effective allowlist). Streaming progress is one throttled, trailing-flushed status
+message. Concurrency is a daemon-wide turn semaphore over the per-session FIFO
+(in-process `query()` verified under load). Cost governance is two-layer:
+cumulative `total_cost_usd` pauses a runaway thread and pings the architect
+(recovery via `@Conduit budget <usd>`), and the SDK `maxBudgetUsd` brakes a single
+turn with `error_max_budget_usd` surfaced as a notice. The production-data gate
+gates prod-data access like a build (never auto-allowlistable, aggregates-only in
+the prompt + audit). Injection framing hardened with an unforgeable random-nonce
+fence + protocol-sentinel defang. Original text follows for reference.
+Wire a real repo's test/land/deploy
 commands. Streaming progress into an edited status message. Multiple concurrent
 threads/sessions. Cost budgets and the runaway cap. Harden the injection
 framing (Appendix A) and add the production-data gate (§4). **Demo: a PM

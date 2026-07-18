@@ -370,3 +370,83 @@ demoed against the **throwaway `testrepo`**, not a real registered repo like
 until M4 hardening + gating review." Gated writes land in an isolated
 `conduit/*` worktree branch, but the guardrail is deliberately conservative —
 use `/conduit assign` (defaults to `testrepo`) for the write demo.
+
+## 2026-07-18 — M3 SDK re-verification (budget, result subtypes, terminal reasons)
+
+Re-confirmed against the installed `@anthropic-ai/claude-agent-sdk` types
+(`sdk.d.ts`) before wiring cost governance:
+
+- **`maxBudgetUsd?: number`** is a real `query()` option: "the query will stop
+  if this budget is exceeded, returning an `error_max_budget_usd` result."
+- **`SDKResultMessage = SDKResultSuccess | SDKResultError`.** *Success* carries
+  `result`, `total_cost_usd`, `deferred_tool_use?`, `terminal_reason?`. *Error*
+  subtypes are `error_during_execution | error_max_turns | error_max_budget_usd
+  | error_max_structured_output_retries` and STILL carry `total_cost_usd` (and
+  `errors: string[]`) but no `result`/`deferred_tool_use`. So a budget-exhausted
+  turn reports its spend — the cost ledger must count error results, not only
+  successes.
+- **`TerminalReason`** includes `budget_exhausted`, `tool_deferred`, and
+  `tool_deferred_unavailable` (the batching caveat has its own terminal reason).
+
+Consequence: the adapter records `total_cost_usd` on every result (success,
+deferred, error) and maps `error_max_budget_usd`/`budget_exhausted` to a clear
+in-thread notice, never a silent stall.
+
+## 2026-07-18 — M3 complete: real work end-to-end
+
+**Implementation (DESIGN.md §8 Milestone 3).** Six workstreams, each independently
+demoable; 115 tests green, `tsc` + `check-ports` clean; real-harness smokes pass
+(gate→approve→resume; 4 concurrent in-process sessions in ~8s).
+
+1. **Per-repo test/land/deploy + cost cap.** `RepoConfig`/store/config carry
+   `testCmd`, `landCmd`, `deployCmd`, `costCapUsd`; sessions carry
+   `budget_limit_usd`. testrepo ships `bun test` and **echo/no-op** land/deploy
+   (build-time safety — real deploy path is M4).
+2. **Land/deploy = daemon-owned, gated action.** `@Conduit land`/`deploy`
+   (architect-only) records a `conduit:land`/`conduit:deploy` approval and posts
+   Approve/Deny (§4: the deploy path is a gated action, so an explicit click is
+   required even though the ordering architect is verified). On approval the
+   **daemon** runs exactly the repo's configured command via a core
+   `CommandRunner` in the worktree — NEVER the agent's shell, so the command is
+   authoritative config, not agent-chosen — audited as a `deploy` event, with the
+   daemon's own secrets scrubbed from the child env. The agent may *propose*
+   landing but cannot run it.
+3. **Test command auto-allowed.** The repo's `testCmd` is folded into the
+   effective bash allowlist at turn time (NOT into the stored allowlist, so config
+   stays pristine and cost/prod checks still apply to everything else), so the
+   agent verifies its own work without approval; it's surfaced in the system
+   prompt.
+4. **Cost budgets + runaway cap (two layers).** (a) The manager blocks a new
+   human turn once cumulative `total_cost_usd` reaches the thread budget, pauses,
+   and pings the architect; recovery is `@Conduit budget <usd>` (architect-only).
+   (b) The SDK `maxBudgetUsd` is set to the remaining headroom per turn as an
+   intra-turn brake; `error_max_budget_usd` surfaces as a clear notice.
+   Approval-resume turns are NOT budget-blocked (never strand an approved action).
+5. **Concurrency (§7).** A daemon-wide semaphore bounds concurrent harness turns
+   (default 6; the per-session FIFO still serializes each thread). In-process
+   `query()` concurrency verified under real load — child-process isolation
+   stays a later (M4+) call, not needed here.
+6. **Injection framing hardening (Appendix A1).** A four-lens adversarial
+   red-team confirmed the three layers hold (header-only authority + unforgeable
+   random-nonce body fence + line quoting) and net authority-forge is backstopped.
+   Closed the gaps it surfaced: defang the literal `[conduit:` protocol sentinel
+   in body content (kills the one residual quoting-layer escape — a model
+   un-escaping a literal `\n`); fold info separators FS/GS/RS/US into line-break
+   normalization; add bidi MARKS ALM/LRM/RLM to the strip set. Emoji ZWJ
+   preserved.
+7. **Production-data gate (§4, Appendix A3).** The policy engine recognizes
+   production-data access (prod DB clients, app consoles, cloud data/log CLIs),
+   gates it like a build even when read-only, and — crucially — it can **never be
+   auto-allowlisted away** (the check sits above the allowlist, below hard-deny).
+   The `production-data` concern threads to the gate audit and the approval prompt
+   (Slack renders a warning); the system prompt adds the **aggregates-only** rule.
+   Real prod creds are M4; M3 is policy + prompt + audit.
+
+**New commands:** `@Conduit land`, `@Conduit deploy`, `@Conduit budget <usd>`
+(all architect-only, thread-scoped mentions).
+
+**Deviation / notes.** Land/deploy require an explicit Approve click even though
+an architect issued the command — deliberate belt-and-braces for the most
+dangerous action, matching §4's "the deploy path ... posts Approve/Deny." The
+`@`-mention ping of specific architects on a budget stall is a plain in-thread
+notice for now (surface-specific mention rendering is a later refinement).
