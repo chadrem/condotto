@@ -21,9 +21,18 @@ import type {
 //    context (it invents paths) — always use the preset + append.
 //  - `session_id` arrives on the `system`/`init` message.
 //
-// M1 scope: create/resume/converse with read-only tools. No `defer` gating yet
-// (M2); the PreToolUse hook routes every call through the core's GateFn with
-// instant allow/deny so the port's contract is real from day one.
+// M2 scope: the core GateFn now answers allow/deny/gate for every tool call.
+//  - allow  -> PreToolUse `allow` (reads stay auto-approved; the hook still
+//              confines them, which beats allowedTools per the SDK precedence).
+//  - deny   -> PreToolUse `deny` with a reason fed back to the agent.
+//  - gate   -> PreToolUse `defer`: the turn ends un-executed with the pending
+//              call preserved (M0-verified); the core records an approval, and a
+//              later architect decision resumes the session to re-drive it.
+// `canUseTool` is the deny-by-default backstop for the one batching caveat:
+// when the model issues several tool calls in one batch, `defer` is ignored and
+// the gated call falls through the permission flow to canUseTool, which denies
+// it (verified doc precedence: hooks -> deny/ask rules -> permission mode ->
+// allow rules -> canUseTool).
 
 /** Opaque to the core. Owned entirely by this adapter. */
 interface ClaudeCodeHandle {
@@ -33,25 +42,19 @@ interface ClaudeCodeHandle {
   system: string;
 }
 
-// Read-only surface for M1. `allowedTools` auto-approves these. The denylist
-// removes the known dangerous built-ins from context by bare name, but it is
-// NOT assumed exhaustive (the SDK grows tools) — the core's GateFn sees every
-// tool call via the PreToolUse hook below and denies anything outside the
-// read-only set, so an unlisted tool is still blocked, just later.
+// `allowedTools` auto-approves reads (the hook still denies out-of-worktree
+// reads — a hook `deny` beats an allow rule). Write/Edit/Bash are deliberately
+// NEITHER allowed (they must gate) NOR disallowed (they must be reachable so the
+// agent can propose them). `disallowedTools` removes only tools out of scope for
+// M2 — agent-meta and network — from context entirely; the policy engine still
+// classifies them as a backstop if the set ever drifts.
 const ALLOWED_TOOLS = ["Read", "Glob", "Grep", "TodoWrite"];
-const DISALLOWED_TOOLS = [
-  "Write",
-  "Edit",
-  "NotebookEdit",
-  "Bash",
-  "BashOutput",
-  "KillShell",
-  "WebFetch",
-  "WebSearch",
-  "Task",
-  "ExitPlanMode",
-  "SlashCommand",
-];
+const DISALLOWED_TOOLS = ["Task", "ExitPlanMode", "SlashCommand", "WebFetch", "WebSearch"];
+
+/** Deny message for a gated call that arrived batched (defer unavailable). */
+const BATCH_GATE_DENY =
+  "This action needs an architect's approval, but it came in a parallel batch of tool calls, " +
+  "which can't be paused for approval. Re-issue it on its own and I'll request approval.";
 
 /** Abort a turn if the SDK produces nothing at all for this long. */
 const TURN_INACTIVITY_MS = 10 * 60_000;
@@ -103,17 +106,22 @@ class ClaudeCodeSession implements HarnessSession {
       } catch (err) {
         decision = { decision: "deny", reason: `gate error (denied fail-closed): ${err}` };
       }
-      return {
-        hookSpecificOutput: {
-          hookEventName: "PreToolUse" as const,
-          permissionDecision: decision.decision,
-          permissionDecisionReason: decision.decision === "deny" ? decision.reason : undefined,
-          updatedInput:
-            decision.decision === "allow" && decision.updatedInput !== undefined
-              ? (decision.updatedInput as Record<string, unknown>)
-              : undefined,
-        },
-      };
+      // Map the domain decision onto the SDK's PreToolUse contract. `gate`
+      // becomes `defer`, which ends the query with the pending call preserved
+      // (updatedInput is ignored on defer, per the docs).
+      const out =
+        decision.decision === "allow"
+          ? {
+              permissionDecision: "allow" as const,
+              updatedInput: decision.updatedInput as Record<string, unknown> | undefined,
+            }
+          : decision.decision === "deny"
+            ? { permissionDecision: "deny" as const, permissionDecisionReason: decision.reason }
+            : {
+                permissionDecision: "defer" as const,
+                permissionDecisionReason: "Gated by Conduit — awaiting an architect's approval.",
+              };
+      return { hookSpecificOutput: { hookEventName: "PreToolUse" as const, ...out } };
     };
 
     const q = query({
@@ -130,6 +138,13 @@ class ClaudeCodeSession implements HarnessSession {
         // register MCP servers or alter permissions (DESIGN.md §4).
         settingSources: [],
         hooks: { PreToolUse: [{ hooks: [gateHook] }] },
+        // Deny-by-default backstop. In the normal single-call flow the hook is
+        // terminal and this is never reached; it only fires when a gated call's
+        // `defer` was ignored because it was batched (see BATCH_GATE_DENY). The
+        // hook already audited the call as gated, so no allow ever needs to
+        // originate here — a blanket deny is correct and cannot starve reads
+        // (those are resolved by allowedTools before reaching canUseTool).
+        canUseTool: async () => ({ behavior: "deny" as const, message: BATCH_GATE_DENY }),
       },
     });
 
@@ -172,7 +187,25 @@ class ClaudeCodeSession implements HarnessSession {
         }
         if (m.type === "result") {
           sawResult = true;
-          if (m.subtype === "success") {
+          const deferred = m.deferred_tool_use as
+            | { id?: string; name?: string; input?: unknown }
+            | undefined;
+          if (m.terminal_reason === "tool_deferred" || deferred) {
+            // A gated tool call was deferred (M0-verified handshake). Hand the
+            // preserved pending call to the core to record an approval; the turn
+            // is over until an architect decides and the session is resumed.
+            if (deferred?.id) {
+              yield {
+                kind: "deferred",
+                call: { id: deferred.id, name: deferred.name ?? "unknown", input: deferred.input },
+              };
+            } else {
+              yield {
+                kind: "error",
+                message: "a tool call was deferred but no pending call was preserved",
+              };
+            }
+          } else if (m.subtype === "success") {
             yield {
               kind: "reply",
               text: typeof m.result === "string" && m.result.length > 0 ? m.result : "(no reply)",
@@ -221,6 +254,13 @@ function describeToolUse(name: string, input: unknown): string {
       return `searching for ${i.pattern ?? "a pattern"}`;
     case "TodoWrite":
       return "updating its plan";
+    case "Write":
+      return `preparing to write ${i.file_path ?? "a file"}`;
+    case "Edit":
+    case "MultiEdit":
+      return `preparing to edit ${i.file_path ?? "a file"}`;
+    case "Bash":
+      return `preparing to run a command`;
     default:
       return `using ${name}`;
   }
@@ -229,7 +269,7 @@ function describeToolUse(name: string, input: unknown): string {
 export class ClaudeCodeAdapter implements HarnessAdapter {
   readonly id = "claude-code";
   readonly capabilities: HarnessCapabilities = {
-    mechanicalGating: true, // verified by the M0 spike (defer); M1 uses instant decisions
+    mechanicalGating: true, // defer-based gating (M0-verified), wired live in M2
     resumeAfterRestart: true,
     costReporting: true, // notional API pricing on subscription auth — usage governance only
     imageInput: true, // the runtime accepts images; the TurnInput image path arrives with M3 attachments

@@ -2,6 +2,8 @@
 // GitHub markdown: bold is *text*, links are <url|text>, headers don't exist.
 // Escaping happens BEFORE link/mention markup is substituted (Appendix A4).
 
+import type { ApprovalPrompt } from "../../core/types";
+
 const MAX_MESSAGE_CHARS = 12_000; // chat-scale ceiling well under Slack's 40k hard cap
 
 function escapeSlack(text: string): string {
@@ -37,4 +39,102 @@ export function renderMrkdwn(markdown: string): string {
     text = `${text.slice(0, MAX_MESSAGE_CHARS)}\n… _(truncated)_`;
   }
   return text;
+}
+
+// -- approval rendering (Block Kit) -----------------------------------------
+
+export const APPROVE_ACTION = "conduit_approve";
+export const DENY_ACTION = "conduit_deny";
+
+const MAX_DETAIL_CHARS = 2_500; // well under Slack's 3000-char section text limit
+
+/** A safe fenced code block: no NULs, no fence-breaking backticks, bounded. */
+function codeBlock(raw: string): string {
+  // Strip NULs and defuse any ``` in the content (insert a zero-width space) so
+  // it can't terminate our fence early.
+  let s = raw.replace(/\u0000/g, "").replace(/```/g, "``\u200b`");
+  if (s.length > MAX_DETAIL_CHARS) s = s.slice(0, MAX_DETAIL_CHARS) + "\n... (truncated)";
+  return "```\n" + s + "\n```";
+}
+
+/** The consequential detail an architect needs to judge a gated call. */
+function approvalDetail(toolName: string, input: unknown): string | null {
+  const i = (input ?? {}) as Record<string, unknown>;
+  const str = (v: unknown): string =>
+    typeof v === "string" ? v : v === undefined ? "" : JSON.stringify(v);
+  switch (toolName) {
+    case "Bash":
+      return str(i.command) || null;
+    case "Write":
+      return `${str(i.file_path)}\n\n${str(i.content)}`.trim() || null;
+    case "Edit":
+      return `${str(i.file_path)}\n\n- ${str(i.old_string)}\n+ ${str(i.new_string)}`.trim() || null;
+    case "MultiEdit":
+    case "NotebookEdit":
+      return str(i.file_path || i.notebook_path) || null;
+    case "WebFetch":
+      return str(i.url) || null;
+    default: {
+      const j = str(i);
+      return j && j !== "{}" ? j : null;
+    }
+  }
+}
+
+/**
+ * The approval message: a headline, the exact action detail, and Approve/Deny
+ * buttons carrying the requestId. The buttons are the only authoritative signal
+ * — the daemon re-checks the clicker's role server-side (never trusts this).
+ */
+export function approvalBlocks(req: ApprovalPrompt): { text: string; blocks: unknown[] } {
+  const detail = approvalDetail(req.toolName, req.toolInput);
+  const blocks: unknown[] = [
+    {
+      type: "section",
+      text: { type: "mrkdwn", text: `:lock: *Approval needed* — I want to ${renderMrkdwn(req.summary)}` },
+    },
+  ];
+  if (detail) {
+    blocks.push({ type: "section", text: { type: "mrkdwn", text: codeBlock(detail) } });
+  }
+  blocks.push({
+    type: "actions",
+    block_id: `conduit_approval:${req.requestId}`,
+    elements: [
+      {
+        type: "button",
+        action_id: APPROVE_ACTION,
+        text: { type: "plain_text", text: "Approve" },
+        style: "primary",
+        value: req.requestId,
+      },
+      {
+        type: "button",
+        action_id: DENY_ACTION,
+        text: { type: "plain_text", text: "Deny" },
+        style: "danger",
+        value: req.requestId,
+      },
+    ],
+  });
+  return { text: `Approval needed: ${req.summary}`, blocks };
+}
+
+/**
+ * Given the blocks of a posted approval message, produce the resolved version:
+ * the original detail preserved, the Approve/Deny actions removed, and a context
+ * line recording who decided. Falls back to a single line if blocks are absent.
+ */
+export function resolveApprovalMessage(
+  originalBlocks: unknown[] | undefined,
+  outcome: "approved" | "denied",
+  deciderUserId: string,
+): { text: string; blocks: unknown[] } {
+  const mark = outcome === "approved" ? ":white_check_mark:" : ":no_entry:";
+  const verb = outcome === "approved" ? "Approved" : "Denied";
+  const kept = (Array.isArray(originalBlocks) ? originalBlocks : []).filter(
+    (b) => !(b && typeof b === "object" && (b as { type?: string }).type === "actions"),
+  );
+  kept.push({ type: "context", elements: [{ type: "mrkdwn", text: `${mark} *${verb}* by <@${deciderUserId}>` }] });
+  return { text: `${verb} by <@${deciderUserId}>`, blocks: kept };
 }

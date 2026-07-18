@@ -1,5 +1,5 @@
 import { Database } from "bun:sqlite";
-import type { SessionHandle } from "./types";
+import type { Role, SessionHandle } from "./types";
 
 // SQLite store (DESIGN.md §5). One process, one file, WAL mode.
 // Invariants enforced here in code, not just schema:
@@ -38,6 +38,45 @@ function inflate(row: RawSessionRow | null): SessionRow | null {
     harness_session_handle:
       row.harness_session_handle === null ? null : JSON.parse(row.harness_session_handle),
   };
+}
+
+function parseJsonArray(json: string | null): string[] {
+  if (!json) return [];
+  try {
+    const v = JSON.parse(json);
+    return Array.isArray(v) ? v.filter((x) => typeof x === "string") : [];
+  } catch {
+    return [];
+  }
+}
+
+export type ApprovalDecision = "pending" | "approved" | "denied" | "expired";
+
+export interface ApprovalRow {
+  id: string; // == requestId, carried in the surface's approval control
+  session_id: string;
+  tool_use_id: string | null;
+  tool_name: string;
+  tool_input: unknown;
+  requested_at: string;
+  decided_by: string | null;
+  decision: ApprovalDecision;
+  decided_at: string | null;
+}
+
+interface RawApprovalRow extends Omit<ApprovalRow, "tool_input"> {
+  tool_input: string;
+}
+
+function inflateApproval(row: RawApprovalRow | null): ApprovalRow | null {
+  if (!row) return null;
+  let toolInput: unknown = {};
+  try {
+    toolInput = JSON.parse(row.tool_input);
+  } catch {
+    toolInput = {};
+  }
+  return { ...row, tool_input: toolInput };
 }
 
 export class Store {
@@ -105,6 +144,7 @@ export class Store {
       CREATE TABLE IF NOT EXISTS approvals (
         id TEXT PRIMARY KEY,
         session_id TEXT NOT NULL REFERENCES sessions(id),
+        tool_use_id TEXT,
         tool_name TEXT NOT NULL,
         tool_input TEXT NOT NULL,
         requested_at TEXT NOT NULL,
@@ -136,6 +176,24 @@ export class Store {
         result_subtype TEXT
       );
     `);
+
+    // Idempotent column adds for DBs created by an earlier milestone (the M1
+    // approvals table predates tool_use_id). CREATE TABLE IF NOT EXISTS never
+    // alters an existing table, so evolve columns explicitly, then build any
+    // index that references them.
+    this.ensureColumn("approvals", "tool_use_id", "TEXT");
+    this.db.run(
+      `CREATE INDEX IF NOT EXISTS idx_approvals_tooluse ON approvals (session_id, tool_use_id);`,
+    );
+  }
+
+  private ensureColumn(table: string, column: string, ddl: string): void {
+    const cols = this.db
+      .query<{ name: string }, []>(`PRAGMA table_info(${table})`)
+      .all();
+    if (!cols.some((c) => c.name === column)) {
+      this.db.run(`ALTER TABLE ${table} ADD COLUMN ${column} ${ddl}`);
+    }
   }
 
   close(): void {
@@ -144,21 +202,39 @@ export class Store {
 
   // -- repos ----------------------------------------------------------------
 
-  upsertRepo(repo: { name: string; path: string; defaultBranch: string }): void {
+  upsertRepo(repo: {
+    name: string;
+    path: string;
+    defaultBranch: string;
+    safeBashAllowlist?: string[];
+  }): void {
     this.db
       .query(
-        `INSERT INTO repos (id, name, path, default_branch) VALUES ($id, $name, $path, $branch)
-         ON CONFLICT(name) DO UPDATE SET path = $path, default_branch = $branch`,
+        `INSERT INTO repos (id, name, path, default_branch, safe_bash_allowlist)
+         VALUES ($id, $name, $path, $branch, $allow)
+         ON CONFLICT(name) DO UPDATE SET
+           path = $path, default_branch = $branch, safe_bash_allowlist = $allow`,
       )
-      .run({ id: repo.name, name: repo.name, path: repo.path, branch: repo.defaultBranch });
+      .run({
+        id: repo.name,
+        name: repo.name,
+        path: repo.path,
+        branch: repo.defaultBranch,
+        allow: JSON.stringify(repo.safeBashAllowlist ?? []),
+      });
   }
 
-  getRepo(name: string): { id: string; name: string; path: string; default_branch: string } | null {
-    return this.db
-      .query<{ id: string; name: string; path: string; default_branch: string }, { name: string }>(
-        `SELECT id, name, path, default_branch FROM repos WHERE name = $name`,
-      )
+  getRepo(
+    name: string,
+  ): { id: string; name: string; path: string; default_branch: string; safe_bash_allowlist: string[] } | null {
+    const row = this.db
+      .query<
+        { id: string; name: string; path: string; default_branch: string; safe_bash_allowlist: string },
+        { name: string }
+      >(`SELECT id, name, path, default_branch, safe_bash_allowlist FROM repos WHERE name = $name`)
       .get({ name });
+    if (!row) return null;
+    return { ...row, safe_bash_allowlist: parseJsonArray(row.safe_bash_allowlist) };
   }
 
   listRepos(): { name: string; path: string; default_branch: string }[] {
@@ -306,5 +382,126 @@ export class Store {
         event: entry.event,
         detail: JSON.stringify(entry.detail ?? {}),
       });
+  }
+
+  /** Audit entries for a session, oldest first. */
+  listAudit(sessionId: string): { actor: string; event: string; detail: unknown }[] {
+    return this.db
+      .query<{ actor: string; event: string; detail: string }, { sid: string }>(
+        `SELECT actor, event, detail FROM audit_log WHERE session_id = $sid ORDER BY id ASC`,
+      )
+      .all({ sid: sessionId })
+      .map((r) => {
+        let detail: unknown = {};
+        try {
+          detail = JSON.parse(r.detail);
+        } catch {
+          detail = {};
+        }
+        return { actor: r.actor, event: r.event, detail };
+      });
+  }
+
+  // -- roles ----------------------------------------------------------------
+
+  /** Upsert a role mapping. scope is a channel_id or '*' (all channels). */
+  setRole(principal: string, role: Role, scope = "*"): void {
+    this.db
+      .query(
+        `INSERT INTO roles (principal, scope, role) VALUES ($p, $s, $r)
+         ON CONFLICT(principal, scope) DO UPDATE SET role = $r`,
+      )
+      .run({ p: principal, s: scope, r: role });
+  }
+
+  /**
+   * The effective role of a principal in a channel. A channel-scoped mapping
+   * wins over a '*' mapping; absent any mapping, everyone is a `member`
+   * (they can converse; only architects hold command authority — DESIGN.md §2).
+   */
+  roleOf(principal: string, channelId: string): Role {
+    const rows = this.db
+      .query<{ scope: string; role: Role }, { p: string; c: string }>(
+        `SELECT scope, role FROM roles WHERE principal = $p AND scope IN ($c, '*')`,
+      )
+      .all({ p: principal, c: channelId });
+    const scoped = rows.find((r) => r.scope === channelId);
+    if (scoped) return scoped.role;
+    const global = rows.find((r) => r.scope === "*");
+    return global ? global.role : "member";
+  }
+
+  isArchitect(principal: string, channelId: string): boolean {
+    return this.roleOf(principal, channelId) === "architect";
+  }
+
+  // -- approvals ------------------------------------------------------------
+
+  createApproval(a: {
+    id: string;
+    sessionId: string;
+    toolUseId: string | null;
+    toolName: string;
+    toolInput: unknown;
+  }): void {
+    this.db
+      .query(
+        `INSERT INTO approvals (id, session_id, tool_use_id, tool_name, tool_input, requested_at, decision)
+         VALUES ($id, $sid, $tuid, $name, $input, $now, 'pending')`,
+      )
+      .run({
+        id: a.id,
+        sid: a.sessionId,
+        tuid: a.toolUseId,
+        name: a.toolName,
+        input: JSON.stringify(a.toolInput ?? {}),
+        now: new Date().toISOString(),
+      });
+  }
+
+  getApproval(id: string): ApprovalRow | null {
+    const row = this.db
+      .query<RawApprovalRow, { id: string }>(`SELECT * FROM approvals WHERE id = $id`)
+      .get({ id });
+    return inflateApproval(row);
+  }
+
+  /** True if the session is currently blocked on an undecided approval. */
+  hasPendingApproval(sessionId: string): boolean {
+    const row = this.db
+      .query<{ one: number }, { sid: string }>(
+        `SELECT 1 AS one FROM approvals WHERE session_id = $sid AND decision = 'pending' LIMIT 1`,
+      )
+      .get({ sid: sessionId });
+    return row !== null;
+  }
+
+  /** Most recent approval for a re-driven tool call, keyed by tool_use_id. */
+  getApprovalByToolUse(sessionId: string, toolUseId: string): ApprovalRow | null {
+    const row = this.db
+      .query<RawApprovalRow, { sid: string; tuid: string }>(
+        // rowid is monotonic with insertion — deterministic even when two
+        // approvals for the same tool_use_id land in the same millisecond.
+        `SELECT * FROM approvals WHERE session_id = $sid AND tool_use_id = $tuid
+         ORDER BY rowid DESC LIMIT 1`,
+      )
+      .get({ sid: sessionId, tuid: toolUseId });
+    return inflateApproval(row);
+  }
+
+  /**
+   * Transition a pending approval to approved/denied. Returns true iff this
+   * call actually made the transition — a second click (Slack delivers actions
+   * at-least-once, and buttons can be double-clicked) returns false so the
+   * caller resumes the session exactly once.
+   */
+  decideApproval(id: string, decidedBy: string, decision: "approved" | "denied"): boolean {
+    const changes = this.db
+      .query(
+        `UPDATE approvals SET decision = $d, decided_by = $by, decided_at = $now
+         WHERE id = $id AND decision = 'pending'`,
+      )
+      .run({ id, d: decision, by: decidedBy, now: new Date().toISOString() }).changes;
+    return changes > 0;
   }
 }

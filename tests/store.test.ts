@@ -67,4 +67,84 @@ describe("store sessions", () => {
     store.insertTurn({ sessionId: "s1", direction: "out", text: "hello", costUsd: 0.1 });
     store.audit({ sessionId: "s1", actor: "agent", event: "tool_call", detail: { tool: "Read" } });
   });
+
+  test("repo safe_bash_allowlist round-trips", () => {
+    const store = memoryStore();
+    store.upsertRepo({ name: "r", path: "/tmp/r", defaultBranch: "main", safeBashAllowlist: ["git status", "ls"] });
+    expect(store.getRepo("r")?.safe_bash_allowlist).toEqual(["git status", "ls"]);
+    // Default when omitted is an empty allowlist (nothing auto-allowed).
+    store.upsertRepo({ name: "r2", path: "/tmp/r2", defaultBranch: "main" });
+    expect(store.getRepo("r2")?.safe_bash_allowlist).toEqual([]);
+  });
+});
+
+describe("store roles", () => {
+  test("unmapped principals are members; architects are explicit", () => {
+    const store = memoryStore();
+    expect(store.roleOf("slack:U_ANY", "C1")).toBe("member");
+    expect(store.isArchitect("slack:U_ANY", "C1")).toBe(false);
+    store.setRole("slack:U_ARCH", "architect");
+    expect(store.isArchitect("slack:U_ARCH", "C1")).toBe(true);
+    expect(store.isArchitect("slack:U_ARCH", "C_OTHER")).toBe(true); // '*' scope spans channels
+  });
+
+  test("a channel-scoped mapping overrides the '*' mapping", () => {
+    const store = memoryStore();
+    store.setRole("slack:U1", "architect", "*");
+    store.setRole("slack:U1", "member", "C_LOCKED"); // demoted in one channel
+    expect(store.isArchitect("slack:U1", "C_OPEN")).toBe(true);
+    expect(store.isArchitect("slack:U1", "C_LOCKED")).toBe(false);
+    expect(store.roleOf("slack:U1", "C_LOCKED")).toBe("member");
+  });
+
+  test("setRole upserts (no duplicate rows, last write wins)", () => {
+    const store = memoryStore();
+    store.setRole("slack:U1", "member");
+    store.setRole("slack:U1", "architect");
+    expect(store.roleOf("slack:U1", "C1")).toBe("architect");
+  });
+});
+
+describe("store approvals", () => {
+  function withSession(): Store {
+    const store = memoryStore();
+    store.createSession({ ...baseSession, id: "s1", conversation_id: "1.1" });
+    return store;
+  }
+
+  test("create → lookup by id and by tool_use_id; opaque input round-trips", () => {
+    const store = withSession();
+    const input = { file_path: "src/x.ts", content: "hi", nested: { a: [1, 2] } };
+    store.createApproval({ id: "req-1", sessionId: "s1", toolUseId: "tu-1", toolName: "Write", toolInput: input });
+
+    const byId = store.getApproval("req-1");
+    expect(byId?.decision).toBe("pending");
+    expect(byId?.tool_use_id).toBe("tu-1");
+    expect(byId?.tool_input).toEqual(input);
+
+    const byTool = store.getApprovalByToolUse("s1", "tu-1");
+    expect(byTool?.id).toBe("req-1");
+    expect(store.getApprovalByToolUse("s1", "nope")).toBeNull();
+  });
+
+  test("decideApproval transitions once; a second decision is a no-op", () => {
+    const store = withSession();
+    store.createApproval({ id: "req-1", sessionId: "s1", toolUseId: "tu-1", toolName: "Write", toolInput: {} });
+
+    expect(store.decideApproval("req-1", "slack:U_ARCH", "approved")).toBe(true);
+    expect(store.getApproval("req-1")?.decision).toBe("approved");
+    expect(store.getApproval("req-1")?.decided_by).toBe("slack:U_ARCH");
+    // Second click (Slack at-least-once / double-click) does not re-transition.
+    expect(store.decideApproval("req-1", "slack:U_OTHER", "denied")).toBe(false);
+    expect(store.getApproval("req-1")?.decision).toBe("approved");
+  });
+
+  test("getApprovalByToolUse returns the most recent when a tool_use_id repeats", () => {
+    const store = withSession();
+    store.createApproval({ id: "req-1", sessionId: "s1", toolUseId: "tu-1", toolName: "Write", toolInput: {} });
+    store.decideApproval("req-1", "slack:U_ARCH", "denied");
+    store.createApproval({ id: "req-2", sessionId: "s1", toolUseId: "tu-1", toolName: "Write", toolInput: {} });
+    expect(store.getApprovalByToolUse("s1", "tu-1")?.id).toBe("req-2");
+    expect(store.getApprovalByToolUse("s1", "tu-1")?.decision).toBe("pending");
+  });
 });

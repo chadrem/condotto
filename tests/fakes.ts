@@ -29,6 +29,7 @@ export class FakeSurface implements SurfaceAdapter {
 
   posts: { conv: ConversationRef; text: string; messageId: string }[] = [];
   updates: { messageId: string; text: string }[] = [];
+  approvalRequests: { conv: ConversationRef; req: ApprovalPrompt }[] = [];
   private nextId = 1;
 
   async start(_emit: (e: InboundEvent) => void): Promise<void> {}
@@ -44,7 +45,14 @@ export class FakeSurface implements SurfaceAdapter {
     this.updates.push({ messageId: ref.messageId, text: msg.text });
   }
 
-  async requestApproval(_conv: ConversationRef, _req: ApprovalPrompt): Promise<void> {}
+  async requestApproval(conv: ConversationRef, req: ApprovalPrompt): Promise<void> {
+    this.approvalRequests.push({ conv, req });
+  }
+
+  /** The requestId of the most recent approval prompt (for tests to decide). */
+  lastApprovalRequestId(): string | undefined {
+    return this.approvalRequests.at(-1)?.req.requestId;
+  }
 
   /** All texts a human in the conversation would have seen, in order. */
   transcript(): string[] {
@@ -56,6 +64,8 @@ interface FakeHandle {
   fake: true;
   sessionId: string | null;
   system: string;
+  /** A tool call deferred on a prior turn, awaiting re-drive on resume. */
+  pending?: ToolCall | null;
 }
 
 class FakeHarnessSession implements HarnessSession {
@@ -80,7 +90,54 @@ class FakeHarnessSession implements HarnessSession {
       this._handle = { ...this._handle, sessionId: `fake-session-${++this.parent.sessionSeq}` };
       yield { kind: "handle_updated", handle: this._handle };
     }
-    // Exercise the gate with one in-worktree read and one escape attempt.
+
+    // Resume path: re-drive a call deferred on a prior turn (the SDK re-runs it
+    // through the gate first, where an architect decision now resolves it).
+    if (this._handle.pending) {
+      const call = this._handle.pending;
+      this.gateCalls.push(call);
+      const d = await gate(call);
+      let reply: string;
+      if (d.decision === "allow") {
+        this.parent.executed.push(call);
+        reply = `applied ${call.name}`;
+      } else if (d.decision === "deny") {
+        reply = `did not run ${call.name} — ${d.reason}`;
+      } else {
+        reply = `still gated: ${call.name}`;
+      }
+      this._handle = { ...this._handle, pending: null };
+      yield { kind: "handle_updated", handle: this._handle };
+      yield { kind: "reply", text: reply, costUsd: 0.01 };
+      return;
+    }
+
+    // A scripted turn (M2 gating tests): run the queued tool calls in order.
+    const scripted = this.parent.nextScript();
+    if (scripted) {
+      const denials: string[] = [];
+      for (const call of scripted) {
+        this.gateCalls.push(call);
+        const d = await gate(call);
+        if (d.decision === "gate") {
+          // Deferred: end the turn with this call preserved for resume.
+          this._handle = { ...this._handle, pending: call };
+          yield { kind: "handle_updated", handle: this._handle };
+          yield { kind: "progress", text: `attempting ${call.name}` };
+          yield { kind: "deferred", call };
+          return;
+        }
+        if (d.decision === "allow") this.parent.executed.push(call);
+        // A deny is fed back to the agent, which adapts — reflect the reason.
+        if (d.decision === "deny") denials.push(d.reason);
+      }
+      const suffix = denials.length ? ` (denied: ${denials.join("; ")})` : "";
+      yield { kind: "reply", text: `echo(${this._handle.sessionId}) ran ${scripted.length} call(s)${suffix}`, costUsd: 0.01 };
+      return;
+    }
+
+    // Default (M1 echo) behavior: one in-worktree read (allowed) and one escape
+    // attempt (denied), then a reply that reports both gate decisions.
     const inside: ToolCall = { id: "t1", name: "Read", input: { file_path: "README.md" } };
     const outside: ToolCall = { id: "t2", name: "Read", input: { file_path: "/etc/hosts" } };
     this.gateCalls.push(inside, outside);
@@ -112,16 +169,25 @@ export class FakeHarness implements HarnessAdapter {
   created: { cwd: string; system: string }[] = [];
   resumed: { handle: SessionHandle; cwd: string }[] = [];
   allTurns: { cwd: string; text: string }[] = [];
+  /** Tool calls the gate allowed to run (approved or auto-allowed). */
+  executed: ToolCall[] = [];
+  /** Queue of scripted tool-call lists, one per upcoming fresh turn. */
+  private scripts: ToolCall[][] = [];
   /** Test hook: awaited at the start of every turn (lets tests hold a turn open). */
   beforeReply: (() => Promise<void>) | null = null;
 
+  /** Queue the tool calls the agent will attempt on its next fresh turn. */
+  scriptTurn(calls: ToolCall[]): void {
+    this.scripts.push(calls);
+  }
+
+  nextScript(): ToolCall[] | null {
+    return this.scripts.shift() ?? null;
+  }
+
   async create(opts: { cwd: string; system: string }): Promise<HarnessSession> {
     this.created.push(opts);
-    return new FakeHarnessSession(
-      { fake: true, sessionId: null, system: opts.system },
-      opts.cwd,
-      this,
-    );
+    return new FakeHarnessSession({ fake: true, sessionId: null, system: opts.system }, opts.cwd, this);
   }
 
   async resume(handle: SessionHandle, cwd: string): Promise<HarnessSession> {

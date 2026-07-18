@@ -4,6 +4,7 @@ import { loadConfig } from "./core/config";
 import { Store } from "./core/store";
 import { WorktreeManager } from "./core/worktrees";
 import { SessionManager } from "./core/session-manager";
+import { principalKey } from "./core/types";
 import { ClaudeCodeAdapter } from "./adapters/claude-code/adapter";
 import { SlackAdapter } from "./adapters/slack/adapter";
 
@@ -26,6 +27,16 @@ async function main(): Promise<void> {
 
   const store = new Store(config.dbPath);
   for (const repo of config.repos) store.upsertRepo(repo);
+  for (const r of config.roles) store.setRole(r.principal, r.role, r.scope);
+  const architects = config.roles.filter((r) => r.role === "architect").length;
+  if (architects === 0) {
+    log(
+      "[daemon] WARNING: no architects configured — gated actions (writes, bash, deploys) " +
+        "will have no one who can approve them. Set CONDUIT_ARCHITECTS or conduit.roles.json.",
+    );
+  } else {
+    log(`[daemon] seeded ${config.roles.length} role mapping(s), ${architects} architect(s)`);
+  }
   const orphans = store.parkOrphanedActiveSessions();
   if (orphans > 0) log(`[daemon] parked ${orphans} session(s) orphaned mid-turn by a previous crash`);
 
@@ -45,7 +56,11 @@ async function main(): Promise<void> {
     process.exit(1);
   }
 
-  const slack = new SlackAdapter({ botToken, appToken }, log);
+  const slack = new SlackAdapter(
+    { botToken, appToken },
+    { isArchitect: (p, channelId) => store.isArchitect(principalKey(p), channelId) },
+    log,
+  );
   manager.registerSurface(slack);
   await slack.start((event) => {
     void manager.handleEvent(event);

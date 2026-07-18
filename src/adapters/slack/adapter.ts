@@ -6,10 +6,27 @@ import type {
   InboundEvent,
   OutboundMessage,
   PostedRef,
+  Principal,
   SurfaceAdapter,
   SurfaceCapabilities,
 } from "../../core/types";
-import { renderMrkdwn } from "./render";
+import {
+  APPROVE_ACTION,
+  DENY_ACTION,
+  approvalBlocks,
+  renderMrkdwn,
+  resolveApprovalMessage,
+} from "./render";
+
+/**
+ * Authority the adapter consults for the ephemeral "architects only" response
+ * on a button click. Domain-typed and core-provided (composition root wires it
+ * to the roles table); the daemon ALSO re-checks server-side when it processes
+ * the emitted decision — this is UX, not the security boundary.
+ */
+export interface SurfaceAuthority {
+  isArchitect(principal: Principal, channelId: string): boolean;
+}
 
 // Slack surface adapter: Bolt over Socket Mode (outbound WebSocket, no public
 // URL — hard requirement, DESIGN.md §3). All Slack shapes (thread_ts, channel
@@ -83,6 +100,7 @@ export class SlackAdapter implements SurfaceAdapter {
 
   constructor(
     tokens: { botToken: string; appToken: string },
+    private authority: SurfaceAuthority,
     private log: (msg: string) => void = console.log,
   ) {
     this.app = new App({
@@ -119,6 +137,17 @@ export class SlackAdapter implements SurfaceAdapter {
     this.app.event("message", async ({ event }) => {
       this.handleMessage(event as Record<string, any>);
     });
+
+    const onDecision = async (args: any) => {
+      await args.ack();
+      try {
+        await this.handleApprovalAction(args);
+      } catch (err) {
+        this.log(`[slack] approval action failed: ${err}`);
+      }
+    };
+    this.app.action(APPROVE_ACTION, onDecision);
+    this.app.action(DENY_ACTION, onDecision);
 
     await this.app.start();
     this.log("[slack] Socket Mode connected");
@@ -310,7 +339,53 @@ export class SlackAdapter implements SurfaceAdapter {
   }
 
   async requestApproval(conv: ConversationRef, req: ApprovalPrompt): Promise<void> {
-    // M2 renders Approve/Deny buttons (block_actions verified server-side).
-    await this.post(conv, { text: `Approval needed (M2, not yet wired): ${req.summary}` });
+    const { text, blocks } = approvalBlocks(req);
+    await this.app.client.chat.postMessage({
+      channel: conv.channelId,
+      thread_ts: threadTsOf(conv),
+      text, // notification fallback; the blocks carry the interactive content
+      blocks: blocks as any[],
+    });
+  }
+
+  /**
+   * An Approve/Deny click. Bolt has already verified the request signature, so
+   * `body.user.id` is a genuine platform identity. We do the ephemeral
+   * "architects only" gate here for UX; the daemon re-verifies authority
+   * server-side before it acts on the emitted decision (DESIGN.md §4).
+   */
+  private async handleApprovalAction(args: {
+    body: Record<string, any>;
+    client: { chat: { update: (o: Record<string, any>) => Promise<unknown> } };
+    respond: RespondFn;
+  }): Promise<void> {
+    const { body, client, respond } = args;
+    const action = (body.actions ?? [])[0] ?? {};
+    const requestId = action.value ? String(action.value) : "";
+    if (!requestId) return;
+    // Slack delivers actions at-least-once; a click can also be double-fired.
+    if (action.action_ts && this.dedup.has(`act:${action.action_ts}`)) return;
+
+    const decider: Principal = { surface: SURFACE_ID, externalId: String(body.user?.id) };
+    const channelId = String(body.channel?.id ?? body.container?.channel_id ?? "");
+    const outcome: "approved" | "denied" = action.action_id === APPROVE_ACTION ? "approved" : "denied";
+
+    if (!this.authority.isArchitect(decider, channelId)) {
+      await respond({
+        response_type: "ephemeral",
+        text: "Only architects can approve or deny — ignoring.",
+      }).catch(() => {});
+      return;
+    }
+
+    // Resolve the message: keep the detail, drop the buttons, record who decided.
+    const resolved = resolveApprovalMessage(body.message?.blocks, outcome, decider.externalId);
+    if (body.message?.ts) {
+      await client.chat
+        .update({ channel: channelId, ts: String(body.message.ts), text: resolved.text, blocks: resolved.blocks as any[] })
+        .catch((err) => this.log(`[slack] could not update approval message: ${err}`));
+    }
+
+    this.emit({ kind: "approval_decision", requestId, decider, decision: outcome });
   }
 }

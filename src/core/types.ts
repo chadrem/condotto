@@ -15,6 +15,13 @@ export function principalKey(p: Principal): string {
   return `${p.surface}:${p.externalId}`;
 }
 
+/**
+ * Command authority (DESIGN.md §2). Only `architect` may approve gated actions,
+ * order landings/deploys, or stop sessions. `member` converses; `observer` is
+ * read-as-context only. Anyone not explicitly mapped defaults to `member`.
+ */
+export type Role = "architect" | "member" | "observer";
+
 // ---------------------------------------------------------------------------
 // Conversations
 
@@ -111,18 +118,30 @@ export interface ToolCall {
 
 /**
  * THE capability (DESIGN.md §3): called for every tool call; the adapter must
- * hold the call un-executed until this resolves. In M1 the answer is instant
- * (read-only allow / deny); the defer machinery arrives in M2.
+ * hold the call un-executed until this resolves.
+ *  - `allow` — run it now (optionally with rewritten input).
+ *  - `deny`  — refuse; the reason is fed back to the agent so it adapts.
+ *  - `gate`  — pause for out-of-band human approval. The adapter maps this to
+ *    the SDK's `defer`: the turn ends with the pending call preserved, and a
+ *    later `approval_decision` resumes the session (M0-verified handshake).
  */
-export type GateFn = (call: ToolCall) => Promise<
+export type GateDecision =
   | { decision: "allow"; updatedInput?: unknown }
   | { decision: "deny"; reason: string }
->;
+  | { decision: "gate" };
+
+export type GateFn = (call: ToolCall) => Promise<GateDecision>;
 
 export type TurnEvent =
   | { kind: "progress"; text: string }
   | { kind: "reply"; text: string; costUsd?: number }
   | { kind: "error"; message: string }
+  /**
+   * A gated tool call was deferred: the turn ended un-executed with this call
+   * preserved. The core records an approval and posts it to the surface; a
+   * later architect decision resumes the session and re-drives `call`.
+   */
+  | { kind: "deferred"; call: ToolCall }
   /**
    * The adapter's opaque handle changed (e.g. the underlying session id became
    * known). The core persists it immediately and never inspects it.
@@ -163,4 +182,6 @@ export interface RepoConfig {
   name: string;
   path: string; // absolute
   defaultBranch: string;
+  /** Commands that run without approval (exact or word-boundary prefix match). */
+  safeBashAllowlist: string[];
 }

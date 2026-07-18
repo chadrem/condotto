@@ -52,13 +52,16 @@ interface World {
 
 function makeWorld(store?: Store): World {
   const s = store ?? new Store(":memory:");
-  s.upsertRepo({ name: "testrepo", path: repoPath, defaultBranch: "main" });
+  s.upsertRepo({ name: "testrepo", path: repoPath, defaultBranch: "main", safeBashAllowlist: ["git status"] });
+  s.setRole("fake:U_ARCH", "architect"); // command authority (assign/stop/approve)
   const surface = new FakeSurface();
   const harness = new FakeHarness();
   const manager = new SessionManager(s, harness, new WorktreeManager(worktreesRoot), () => {});
   manager.registerSurface(surface);
   return { store: s, surface, harness, manager };
 }
+
+const member: Principal = { surface: "fake", externalId: "U_MEMBER" };
 
 describe("assign", () => {
   test("creates a session, provisions a worktree, posts the intro", async () => {
@@ -251,5 +254,150 @@ describe("stop & status", () => {
       args: "",
     });
     expect(w.surface.posts.at(-1)?.text).toContain("testrepo");
+  });
+});
+
+describe("roles: command authority (M2)", () => {
+  test("a member cannot assign a session", async () => {
+    const w = makeWorld();
+    await w.manager.handleEvent({ kind: "command", conv: conv("a00.000001"), author: member, name: "assign", args: "" });
+    expect(w.surface.posts.at(-1)?.text).toContain("Only architects can assign");
+    expect(w.store.getSessionByConversation("fake", "a00.000001")).toBeNull();
+  });
+
+  test("a member cannot stop an architect's session", async () => {
+    const w = makeWorld();
+    const c = conv("a10.000001");
+    await w.manager.handleEvent({ kind: "command", conv: c, author: architect, name: "assign", args: "" });
+    await w.manager.handleEvent({ kind: "command", conv: c, author: member, name: "stop", args: "" });
+    expect(w.surface.posts.at(-1)?.text).toContain("Only architects can stop");
+    expect(w.store.getSessionByConversation("fake", "a10.000001")!.status).not.toBe("stopped");
+  });
+});
+
+describe("gating & approval loop (M2)", () => {
+  const writeCall = { id: "tu-write", name: "Write", input: { file_path: "hello.txt", content: "hi" } };
+
+  async function assignWithScript(w: World, id: string, calls: any[]): Promise<void> {
+    await w.manager.handleEvent({ kind: "command", conv: conv(id), author: architect, name: "assign", args: "" });
+    w.harness.scriptTurn(calls);
+    await w.manager.handleEvent({
+      kind: "message",
+      conv: conv(id),
+      author: member,
+      text: "please add a hello file",
+      attachments: [],
+    });
+  }
+
+  test("a gated write defers: an approval is requested and the session parks", async () => {
+    const w = makeWorld();
+    await assignWithScript(w, "b00.000001", [writeCall]);
+
+    const session = w.store.getSessionByConversation("fake", "b00.000001")!;
+    expect(w.surface.approvalRequests.length).toBe(1);
+    expect(w.surface.approvalRequests[0]!.req.toolName).toBe("Write");
+    expect(w.store.hasPendingApproval(session.id)).toBe(true);
+    expect(w.harness.executed.length).toBe(0); // nothing ran yet
+    expect(w.surface.transcript().some((t) => t.includes("approval"))).toBe(true);
+    expect(session.status).toBe("parked");
+  });
+
+  test("architect approval resumes the session and the tool executes", async () => {
+    const w = makeWorld();
+    await assignWithScript(w, "b10.000001", [writeCall]);
+    const requestId = w.surface.lastApprovalRequestId()!;
+    const session = w.store.getSessionByConversation("fake", "b10.000001")!;
+
+    await w.manager.handleEvent({
+      kind: "approval_decision",
+      requestId,
+      decider: architect,
+      decision: "approved",
+    });
+
+    expect(w.harness.executed.map((c) => c.name)).toEqual(["Write"]);
+    expect(w.store.getApproval(requestId)!.decision).toBe("approved");
+    expect(w.store.hasPendingApproval(session.id)).toBe(false);
+    expect(w.surface.transcript().some((t) => t.includes("applied Write"))).toBe(true);
+
+    const events = w.store.listAudit(session.id).map((a) => a.event);
+    expect(events).toContain("approval_request");
+    expect(events).toContain("approval_decision");
+    // The gate was consulted twice: gated on the first pass, allowed on re-drive.
+    expect(w.store.listAudit(session.id).filter((a) => a.event === "tool_call").length).toBeGreaterThanOrEqual(2);
+  });
+
+  test("architect denial resumes with feedback and nothing executes", async () => {
+    const w = makeWorld();
+    await assignWithScript(w, "b20.000001", [writeCall]);
+    const requestId = w.surface.lastApprovalRequestId()!;
+
+    await w.manager.handleEvent({ kind: "approval_decision", requestId, decider: architect, decision: "denied" });
+
+    expect(w.harness.executed.length).toBe(0);
+    expect(w.store.getApproval(requestId)!.decision).toBe("denied");
+    expect(w.surface.transcript().some((t) => t.includes("did not run Write"))).toBe(true);
+  });
+
+  test("a member's approval click is rejected server-side; the session does not resume", async () => {
+    const w = makeWorld();
+    await assignWithScript(w, "b30.000001", [writeCall]);
+    const requestId = w.surface.lastApprovalRequestId()!;
+    const session = w.store.getSessionByConversation("fake", "b30.000001")!;
+
+    await w.manager.handleEvent({ kind: "approval_decision", requestId, decider: member, decision: "approved" });
+
+    expect(w.harness.executed.length).toBe(0);
+    expect(w.store.getApproval(requestId)!.decision).toBe("pending"); // not decided by a non-architect
+    expect(w.store.hasPendingApproval(session.id)).toBe(true);
+    expect(w.store.listAudit(session.id).some((a) => a.event === "approval_rejected")).toBe(true);
+  });
+
+  test("a hard-deny (write outside the worktree) is refused outright — no approval", async () => {
+    const w = makeWorld();
+    await assignWithScript(w, "b40.000001", [{ id: "tu-esc", name: "Write", input: { file_path: "/etc/evil", content: "x" } }]);
+    const session = w.store.getSessionByConversation("fake", "b40.000001")!;
+
+    expect(w.surface.approvalRequests.length).toBe(0);
+    expect(w.store.hasPendingApproval(session.id)).toBe(false);
+    expect(w.harness.executed.length).toBe(0);
+    expect(w.surface.transcript().some((t) => t.includes("outside your worktree"))).toBe(true);
+  });
+
+  test("a message during a pending approval is held, not stacked into a second turn", async () => {
+    const w = makeWorld();
+    await assignWithScript(w, "b50.000001", [writeCall]);
+    const turnsBefore = w.harness.allTurns.length;
+
+    await w.manager.handleEvent({
+      kind: "message",
+      conv: conv("b50.000001"),
+      author: member,
+      text: "actually wait",
+      attachments: [],
+    });
+
+    expect(w.harness.allTurns.length).toBe(turnsBefore); // no new turn ran
+    expect(w.surface.posts.at(-1)?.text).toContain("pending approval request");
+  });
+
+  test("approval that arrives after stop does not resume", async () => {
+    const w = makeWorld();
+    await assignWithScript(w, "b60.000001", [writeCall]);
+    const requestId = w.surface.lastApprovalRequestId()!;
+    await w.manager.handleEvent({ kind: "command", conv: conv("b60.000001"), author: architect, name: "stop", args: "" });
+
+    await w.manager.handleEvent({ kind: "approval_decision", requestId, decider: architect, decision: "approved" });
+
+    expect(w.harness.executed.length).toBe(0);
+    expect(w.surface.transcript().some((t) => t.includes("after the session was stopped"))).toBe(true);
+  });
+
+  test("safe-allowlisted bash auto-runs without approval", async () => {
+    const w = makeWorld();
+    await assignWithScript(w, "b70.000001", [{ id: "tu-bash", name: "Bash", input: { command: "git status" } }]);
+    expect(w.surface.approvalRequests.length).toBe(0);
+    expect(w.harness.executed.map((c) => c.name)).toEqual(["Bash"]);
   });
 });
