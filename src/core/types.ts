@@ -238,7 +238,12 @@ export interface HarnessTurnOptions {
   effort?: string;
   /** Enable subagent tools (Agent/Task). Default off — Tier B, architect opt-in. */
   subagents?: boolean;
-  /** Enable the Workflow tool (multi-agent orchestration). Default off — Tier B. */
+  /**
+   * RESERVED, currently no effect (M3.5). The Workflow tool is disabled: a spike
+   * found its orchestrated agents bypass the PreToolUse gate (they carry no
+   * `agent_id`), so they can't be gated read-only. This flag is kept for a future
+   * gated Workflow integration (M4+); until then the adapter never enables the tool.
+   */
   workflows?: boolean;
   /** Load the repo's project settings + skills. Tier C, TRUSTED repos only. */
   projectConfig?: boolean;

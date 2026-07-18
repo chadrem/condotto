@@ -53,14 +53,22 @@ interface ClaudeCodeHandle {
 const ALLOWED_TOOLS = ["Read", "Glob", "Grep", "TodoWrite"];
 // Always removed from context, regardless of capability flags: plan-mode meta,
 // slash commands, and network reads are out of scope for the implementer.
-const BASE_DISALLOWED = ["ExitPlanMode", "SlashCommand", "WebFetch", "WebSearch"];
-// Multi-agent tools, disabled BY DEFAULT (M3.5 Tier B is architect opt-in). Both
-// the current `Agent` name and the legacy `Task` alias are listed so "subagents
-// off" is genuinely off regardless of which the runtime exposes. Un-disallowed
-// per-turn only when the session enables the capability; even then every tool
-// call a subagent makes still hits the PreToolUse gate (agent_id-tagged).
+//
+// `Workflow` is ALSO always disallowed (M3.5). A spike (2026-07-18, spikes/m3.5/
+// workflow-path.ts) showed the Workflow tool's orchestrated agents BYPASS our
+// PreToolUse gate — their tool calls carry no `agent_id`, so the read-only
+// subagent policy never sees them; they fall through to the `canUseTool`
+// blanket-deny backstop, which denies everything (even reads). So workflows are
+// both non-functional under our isolation AND not gated in principle. Re-enable
+// only once workflow agents can be routed through the gate (M4+). Subagents (the
+// `Agent` tool) are the working, gated read-only fan-out.
+const BASE_DISALLOWED = ["ExitPlanMode", "SlashCommand", "WebFetch", "WebSearch", "Workflow"];
+// Subagent tools, disabled BY DEFAULT (M3.5 Tier B is architect opt-in). Both the
+// current `Agent` name and the legacy `Task` alias are listed so "subagents off"
+// is genuinely off regardless of which the runtime exposes. Un-disallowed per-turn
+// only when the session enables the capability; even then every tool call a
+// subagent makes still hits the PreToolUse gate (agent_id-tagged).
 const SUBAGENT_TOOLS = ["Agent", "Task"];
-const WORKFLOW_TOOLS = ["Workflow"];
 
 // M3.5 Tier A. The core passes an opaque model token; the adapter is the only
 // place that knows SDK model IDs (keeps the port clean). Unrecognized tokens
@@ -118,7 +126,7 @@ function toolPosture(h: HarnessTurnOptions | undefined): {
 } {
   const disallowed = [...BASE_DISALLOWED];
   if (!h?.subagents) disallowed.push(...SUBAGENT_TOOLS);
-  if (!h?.workflows) disallowed.push(...WORKFLOW_TOOLS);
+  // Note: the Workflow tool stays in BASE_DISALLOWED unconditionally — see there.
   return { allowedTools: ALLOWED_TOOLS, disallowedTools: disallowed };
 }
 

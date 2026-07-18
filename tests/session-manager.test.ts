@@ -968,39 +968,40 @@ describe("harness capabilities — subagents & ultra (M3.5 Tier B)", () => {
     expect(w.store.getSessionByConversation("fake", "sb3.000001")!.subagents).toBe(0);
   });
 
-  test("ultra on sets xhigh + subagents + workflows; off restores the defaults", async () => {
+  test("ultra on sets xhigh + subagents (the preset); off restores the defaults", async () => {
     const w = makeWorld();
     const c = conv("sb4.000001");
     await assign(w, "sb4.000001");
     await w.manager.handleEvent({ kind: "command", conv: c, author: architect, name: "ultra", args: "on" });
     let s = w.store.getSessionByConversation("fake", "sb4.000001")!;
     expect(s.subagents).toBe(1);
-    expect(s.workflows).toBe(1);
     expect(s.effort).toBe("xhigh");
     expect(w.surface.posts.at(-1)!.text).toContain("Ultra on");
 
     await w.manager.handleEvent({ kind: "message", conv: c, author: architect, text: "go", attachments: [] });
     const t = w.harness.allTurns.at(-1)!;
     expect(t.harness?.subagents).toBe(true);
-    expect(t.harness?.workflows).toBe(true);
     expect(t.harness?.effort).toBe("xhigh");
 
     await w.manager.handleEvent({ kind: "command", conv: c, author: architect, name: "ultra", args: "off" });
     s = w.store.getSessionByConversation("fake", "sb4.000001")!;
     expect(s.subagents).toBe(0);
-    expect(s.workflows).toBe(0);
     expect(s.effort).toBeNull(); // back to the daemon default (high)
   });
 
-  test("turning subagents off also turns workflows off (workflows need subagents)", async () => {
+  test("dropping to a lower effort takes a session out of ultra (derived state)", async () => {
     const w = makeWorld();
     const c = conv("sb5.000001");
     await assign(w, "sb5.000001");
     await w.manager.handleEvent({ kind: "command", conv: c, author: architect, name: "ultra", args: "on" });
-    await w.manager.handleEvent({ kind: "command", conv: c, author: architect, name: "subagents", args: "off" });
-    const s = w.store.getSessionByConversation("fake", "sb5.000001")!;
-    expect(s.subagents).toBe(0);
-    expect(s.workflows).toBe(0);
+    await w.manager.handleEvent({ kind: "command", conv: c, author: architect, name: "status", args: "" });
+    expect(w.surface.posts.at(-1)!.text).toContain("ultra on");
+    // Lowering effort below xhigh means it's no longer the ultra preset (subagents stay on).
+    await w.manager.handleEvent({ kind: "command", conv: c, author: architect, name: "effort", args: "high" });
+    await w.manager.handleEvent({ kind: "command", conv: c, author: architect, name: "status", args: "" });
+    const msg = w.surface.posts.at(-1)!.text;
+    expect(msg).not.toContain("ultra on");
+    expect(msg).toContain("subagents on");
   });
 
   test("a subagent-initiated write is denied end-to-end — the main agent must do it", async () => {

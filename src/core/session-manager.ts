@@ -49,7 +49,6 @@ function conduitSystemPrompt(opts: {
   landAvailable?: boolean;
   deployAvailable?: boolean;
   subagents?: boolean;
-  workflows?: boolean;
 }): string {
   const ship =
     opts.landAvailable || opts.deployAvailable
@@ -61,10 +60,9 @@ function conduitSystemPrompt(opts: {
     ? `- You can run this repo's tests without approval: \`${opts.testCmd}\`. Run them ` +
       `to verify your changes before proposing to land.`
     : null;
-  // M3.5 Tier B: guidance when the architect has enabled multi-agent power.
+  // M3.5 Tier B: guidance when the architect has enabled subagents.
   const delegation = opts.subagents
-    ? `- You can delegate READ-ONLY exploration and analysis to subagents (the Agent tool` +
-      `${opts.workflows ? ", and orchestrate multi-step work with the Workflow tool" : ""}) so they ` +
+    ? `- You can delegate READ-ONLY exploration and analysis to subagents (the Agent tool) so they ` +
       `investigate in parallel. Subagents CANNOT write files, run shell commands, or spawn more ` +
       `subagents — those are gated and only you, the main agent, may do them so an architect can ` +
       `approve. Use subagents to gather findings; you make the edits yourself.`
@@ -220,13 +218,21 @@ export class SessionManager {
   private effectiveEffort(session: SessionRow): string {
     return session.effort ?? this.defaultEffort;
   }
+  /**
+   * "Ultra" is a preset, not stored state (M3.5): it means subagents on AND xhigh
+   * effort. (Its original Workflow-tool leg is disabled — see the adapter.) Derived
+   * so the label always reflects the effective posture, however it was reached.
+   */
+  private isUltra(session: SessionRow): boolean {
+    return session.subagents === 1 && this.effectiveEffort(session) === "xhigh";
+  }
   /** One-line human summary of a session's harness capabilities (M3.5). */
   private capabilitySummary(session: SessionRow): string {
     const parts = [
       `model \`${this.effectiveModel(session)}\``,
       `effort \`${this.effectiveEffort(session)}\``,
     ];
-    if (session.workflows === 1) parts.push("*ultra on* (subagents + workflows)");
+    if (this.isUltra(session)) parts.push("*ultra on* (xhigh + subagents)");
     else if (session.subagents === 1) parts.push("*subagents on*");
     return parts.join(", ");
   }
@@ -239,7 +245,7 @@ export class SessionManager {
    */
   private settingsBlock(session: SessionRow, repo: RepoRow | null): string {
     const subagents = session.subagents === 1;
-    const ultra = session.subagents === 1 && session.workflows === 1;
+    const ultra = this.isUltra(session);
     const budget = session.budget_limit_usd ?? this.defaultCostCapUsd;
     const lines = [
       `⚙️ *Session settings*`,
@@ -728,17 +734,17 @@ export class SessionManager {
     }
     const on = this.parseOnOff(args);
     if (on === null) {
-      const isOn = session.subagents === 1 && session.workflows === 1;
-      await surface.post(conv, { text: `Usage: \`@Conduit ultra on|off\`. Currently ${isOn ? "on" : "off"}.` });
+      await surface.post(conv, { text: `Usage: \`@Conduit ultra on|off\`. Currently ${this.isUltra(session) ? "on" : "off"}.` });
       return;
     }
     if (on) {
+      // Ultra = the "max it out" preset: xhigh reasoning + parallel subagents.
+      // (Workflows were part of the original preset but are disabled — their
+      // agents bypass the gate; see the adapter. Subagents are the gated fan-out.)
       this.store.setSessionSubagents(session.id, true);
-      this.store.setSessionWorkflows(session.id, true);
       if (this.supportsEffort("xhigh")) this.store.setSessionEffort(session.id, "xhigh");
     } else {
       this.store.setSessionSubagents(session.id, false);
-      this.store.setSessionWorkflows(session.id, false);
       this.store.setSessionEffort(session.id, null); // back to the daemon default
     }
     this.store.audit({ sessionId: session.id, actor: principalKey(author), event: "ultra_set", detail: { on } });
@@ -746,7 +752,7 @@ export class SessionManager {
     await surface.post(conv, {
       text:
         (on
-          ? "⚡ Ultra on — max reasoning + parallel subagents/workflows. This burns the rate limit fastest; dial down with `@Conduit ultra off`. "
+          ? "⚡ Ultra on — max reasoning (`xhigh`) + parallel read-only subagents. This burns the rate limit fastest; dial down with `@Conduit ultra off`. "
           : "Ultra off. ") +
         `(${this.capabilitySummary(fresh)}) Takes effect on your next message.`,
     });
@@ -1376,7 +1382,6 @@ export class SessionManager {
       landAvailable: !!repo?.land_cmd,
       deployAvailable: !!repo?.deploy_cmd,
       subagents: session.subagents === 1,
-      workflows: session.workflows === 1,
     });
     const harness =
       session.harness_session_handle !== null

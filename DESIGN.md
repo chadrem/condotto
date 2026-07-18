@@ -802,20 +802,24 @@ reports a bug in a thread; the session diagnoses, proposes a fix, gets
 architect approval, runs tests, lands on approval — all in Slack.**
 
 **Milestone 3.5 — Full Claude Code power in the thread (harness capabilities).
-✅ DONE 2026-07-18** (full facts in DECISIONS.md; 166 tests, `tsc` + `check-ports`
-clean; real-SDK smokes `smoke:model` and `smoke:subagents`, plus the two-phase
-subagent spike). Built in the three tiers below. Tier A ships per-session model +
-effort (opaque tokens the core validates by membership against
+✅ DONE 2026-07-18** (full facts in DECISIONS.md; 170 tests, `tsc` + `check-ports`
+clean; real-SDK smokes `smoke:model` and `smoke:subagents`, plus the M3.5 spikes).
+Built in the three tiers below. Tier A ships per-session model + effort (opaque
+tokens the core validates by membership against
 `HarnessCapabilities.supportedModels/supportedEfforts` and forwards via
 `TurnInput.harness`; the adapter maps to SDK ids; default Opus + high). Tier B ships
-subagents/workflows + the `ultra` preset (architect opt-in, default off) — but the
-spike found **`defer`/resume is main-thread-only**, so subagents fan out READ-ONLY
-and any subagent-initiated gated call or nested spawn is **denied** in the policy
-engine (`ToolCall.agentId` marks origin); the main agent does mutations via the
-proven defer→approve→resume path. Tier C ships trust-scoped project config
-(`trusted: true` → `settingSources:["project"]` + `skills`; untrusted stays
-isolated; the gate still applies). Dial-down is built in (cheaper model / lower
-effort / subagents off / ultra off). Original text follows for reference.
+subagents + the `ultra` preset (architect opt-in, default off) — the spike found
+**`defer`/resume is main-thread-only**, so subagents fan out READ-ONLY and any
+subagent-initiated gated call or nested spawn is **denied** in the policy engine
+(`ToolCall.agentId` marks origin); the main agent does mutations via the proven
+defer→approve→resume path. **Workflows were spiked and DEFERRED:** the Workflow
+tool's orchestrated agents bypass the PreToolUse gate (no `agent_id`) and are
+non-functional under our isolation, so the tool is disabled until it can be gated
+(M4+); `ultra` is therefore `xhigh` + subagents (not + Workflow). Tier C ships
+trust-scoped project config (`trusted: true` → `settingSources:["project"]` +
+`skills`; untrusted stays isolated; the gate still applies). Dial-down is built in
+(cheaper model / lower effort / subagents off / ultra off). Original text (the plan,
+which still lists workflows as a Tier B goal) follows for reference.
 The implementer must be a *first-class* Claude Code agent for the north-star (§1)
 to work: a product manager building a real feature needs the best model, high
 reasoning effort, and — for non-trivial work — subagents/workflows and the team's

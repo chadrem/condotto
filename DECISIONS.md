@@ -652,3 +652,43 @@ land — all in Slack, on the throwaway `testrepo`. Build-time safety intact: wr
 only on testrepo, land/deploy echo/no-ops, subagents/trusted opt-in default-off.
 
 **New smokes:** `smoke:model`, `smoke:subagents`; spikes in `spikes/m3.5/`.
+
+## 2026-07-18 — M3.5 follow-up: Workflow tool spiked and DISABLED (bypasses the gate)
+
+**Why.** The `ultra` preset was specced as `xhigh` + subagents + the **Workflow**
+tool (Claude Code's multi-agent orchestration; "ultracode" = xhigh + workflows).
+Subagents were spiked and shipped, but the Workflow tool had NOT been exercised
+end-to-end under Conduit's gate — so it got its own spike (`spikes/m3.5/
+workflow-path.ts`, real adapter + real policy engine, subscription auth).
+
+**SDK facts confirmed.** `enableWorkflows`/`disableWorkflows` live on the SDK
+**`Settings`** interface (loaded via `settingSources`), NOT on query `Options`.
+Conduit isolates with `settingSources: []`, yet the Workflow tool was still
+*available* to the model (plan default / not disabled).
+
+**Finding (the load-bearing one).** The Workflow tool ran, and the main agent's
+`Workflow` spawn correctly hit our PreToolUse gate → allowed. **But the workflow's
+orchestrated agents BYPASS our PreToolUse gate:** their tool calls carried no
+`agent_id` and never reached our `GateFn` at all. They fell through to the
+`canUseTool` blanket-deny backstop, which denied **everything** — the workflow's
+Read *and* Write were both refused; nothing was written. So workflows are:
+1. **Not gated in principle** — they route around the PreToolUse hook that is our
+   security boundary (unlike the `Agent` tool's subagents, which DO carry
+   `agent_id` and hit the gate — proven separately).
+2. **Non-functional under our isolation** — the backstop denies even reads, so a
+   launched workflow just fails (every sub-agent denied).
+
+**Decision.** **Disable the Workflow tool for M3.5.** It is now in the adapter's
+always-disallowed set (`BASE_DISALLOWED`), independent of any flag, with the spike
+cited. `ultra` becomes **`xhigh` + subagents** (the gated, working read-only
+fan-out); the "ultra on" label is derived state (subagents on AND xhigh effort), so
+it always reflects the effective posture. The `workflows` plumbing (session column,
+`HarnessTurnOptions.workflows`, `PolicyContext.workflowsEnabled`) is kept as a
+**reserved seam** — no command sets it — for a future gated Workflow integration
+(M4+, once workflow agents can be routed through the gate). This is exactly the
+kind of DESIGN-vs-reality correction the spike-first rule exists to catch; DESIGN
+§8 and CLAUDE.md updated. 170 tests, `tsc` + `check-ports` clean.
+
+**For M4:** investigate whether the Workflow runtime exposes a permission hook for
+its sub-agents (so their calls can be gated read-only like `Agent` subagents), or
+whether it must stay off. Until then, subagents cover the parallel-fan-out use case.
