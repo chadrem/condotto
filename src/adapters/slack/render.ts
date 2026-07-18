@@ -97,6 +97,12 @@ export function approvalBlocks(req: ApprovalPrompt): { text: string; blocks: unk
   if (detail) {
     blocks.push({ type: "section", text: { type: "mrkdwn", text: codeBlock(detail) } });
   }
+  if (req.concern) {
+    blocks.push({
+      type: "context",
+      elements: [{ type: "mrkdwn", text: `:warning: ${renderMrkdwn(req.concern)}` }],
+    });
+  }
   blocks.push({
     type: "actions",
     block_id: `conduit_approval:${req.requestId}`,

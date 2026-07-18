@@ -94,6 +94,13 @@ export interface ApprovalPrompt {
   toolName: string;
   toolInput: unknown;
   summary: string;
+  /**
+   * An optional human-facing warning that raises the stakes of this approval
+   * (M3), e.g. "investigating production data — in-thread results must be
+   * aggregates only." Surfaces render it prominently; it is decoration for the
+   * decider, never authority.
+   */
+  concern?: string;
 }
 
 export interface SurfaceAdapter {

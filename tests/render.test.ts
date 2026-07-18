@@ -64,6 +64,26 @@ describe("approvalBlocks", () => {
     expect(JSON.stringify(blocks)).toContain("npm install left-pad");
   });
 
+  test("a policy concern renders a warning context block (M3 production-data)", () => {
+    const { blocks } = approvalBlocks({
+      requestId: "req-p",
+      toolName: "Bash",
+      toolInput: { command: "psql -c 'select count(*) from users'" },
+      summary: "run `psql ...` (investigates production data)",
+      concern: "This investigates production data — results must be aggregates only.",
+    });
+    const warn = (blocks as any[]).find(
+      (b) => b.type === "context" && String(JSON.stringify(b)).includes("aggregates only"),
+    );
+    expect(warn).toBeDefined();
+    expect(JSON.stringify(warn)).toContain(":warning:");
+  });
+
+  test("no concern → no warning block", () => {
+    const { blocks } = approvalBlocks({ requestId: "r", toolName: "Bash", toolInput: { command: "ls" }, summary: "run `ls`" });
+    expect((blocks as any[]).some((b) => b.type === "context")).toBe(false);
+  });
+
   test("content that contains a code fence can't break out of the detail block", () => {
     const { blocks } = approvalBlocks({
       requestId: "req-2",

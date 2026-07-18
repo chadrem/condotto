@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { evaluate, bashHardDeny, offendingPath } from "../src/core/policy";
+import { evaluate, bashHardDeny, offendingPath, productionDataConcern } from "../src/core/policy";
 import type { ToolCall } from "../src/core/types";
 
 const WORKTREE = "/tmp/conduit-wt/session-abc";
@@ -126,6 +126,57 @@ describe("policy: bash", () => {
     for (const c of ['rm -rf "/"', "rm -rf '/'", 'rm -rf "$HOME"', "rm -rf foo/..", 'rm -rf "../x"']) {
       expect(evaluate(bash(c), ctx(allowlist)).action).toBe("deny");
     }
+  });
+});
+
+describe("policy: production-data gate (M3, DESIGN §4)", () => {
+  test("prod database clients and app consoles are flagged as a production-data concern", () => {
+    for (const c of [
+      "psql -h prod.db -c 'select count(*) from users'",
+      "mysql -e 'select 1'",
+      "redis-cli GET session:abc",
+      "mongosh --eval 'db.users.count()'",
+      "rails console",
+      "bin/rails c",
+      "rails runner 'puts User.count'",
+      "python manage.py shell",
+      "heroku run rails c",
+      "kubectl logs deploy/api",
+      "aws s3 ls s3://prod-bucket",
+      "aws logs tail /prod/api",
+      "gcloud sql connect prod",
+      "pg_dump prod > dump.sql",
+    ]) {
+      expect(productionDataConcern(c)).toBe(true);
+    }
+  });
+
+  test("ordinary dev commands are NOT flagged as production-data", () => {
+    for (const c of [
+      "git status",
+      "bun test",
+      "npm run build",
+      "ls src",
+      "grep -r foo src",
+      "cat README.md",
+      "echo psql", // mentions psql only as an argument, not the program
+      "node --version",
+    ]) {
+      expect(productionDataConcern(c)).toBe(false);
+    }
+  });
+
+  test("a production-data command GATES with a concern even if it would be allowlisted", () => {
+    // Even when a repo unwisely allowlists `psql`, prod-data access still gates.
+    const d = evaluate(bash("psql -c 'select count(*) from users'"), ctx(["psql"]));
+    expect(d.action).toBe("gate");
+    expect(d.concern).toBe("production-data");
+    expect(d.reason).toContain("production data");
+  });
+
+  test("prod-data gate sits below hard-deny (credentials still win)", () => {
+    // A prod client reaching for credentials is denied outright, not merely gated.
+    expect(evaluate(bash("psql < ~/.ssh/id_rsa"), ctx()).action).toBe("deny");
   });
 });
 

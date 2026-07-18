@@ -424,6 +424,33 @@ describe("gating & approval loop (M2)", () => {
     expect(w.harness.executed.map((c) => c.name)).toEqual(["Bash"]);
   });
 
+  test("a production-data bash call gates and surfaces the aggregates-only concern (M3)", async () => {
+    const w = makeWorld();
+    await assignWithScript(w, "b75.000001", [
+      { id: "tu-psql", name: "Bash", input: { command: "psql -c 'select count(*) from users'" } },
+    ]);
+    const session = w.store.getSessionByConversation("fake", "b75.000001")!;
+    expect(w.surface.approvalRequests.length).toBe(1);
+    const req = w.surface.approvalRequests[0]!.req;
+    expect(req.concern).toContain("aggregates only");
+    expect(w.harness.executed.length).toBe(0);
+    // The gate audited the production-data concern.
+    const gated = w.store.listAudit(session.id).find((a) => a.event === "tool_call");
+    expect((gated!.detail as any).concern).toBe("production-data");
+    // ...and the approval_request records it too.
+    const reqAudit = w.store.listAudit(session.id).find((a) => a.event === "approval_request");
+    expect((reqAudit!.detail as any).concern).toBe("production-data");
+  });
+
+  test("the repo's test command auto-runs without approval (M3)", async () => {
+    const w = makeWorld();
+    // makeWorld's testrepo has allowlist ["git status"]; give it a test command.
+    w.store.upsertRepo({ name: "testrepo", path: repoPath, defaultBranch: "main", safeBashAllowlist: ["git status"], testCmd: "bun test" });
+    await assignWithScript(w, "b76.000001", [{ id: "tu-test", name: "Bash", input: { command: "bun test tests/foo.test.ts" } }]);
+    expect(w.surface.approvalRequests.length).toBe(0);
+    expect(w.harness.executed.map((c) => c.name)).toEqual(["Bash"]);
+  });
+
   test("a failed approval post expires the pending row instead of wedging the session (review #3)", async () => {
     const w = makeWorld();
     w.surface.failApprovals = true;

@@ -13,7 +13,15 @@ import type { Store, SessionRow } from "./store";
 import { ConflictError } from "./store";
 import { WorktreeManager } from "./worktrees";
 import { frameMessage } from "./framing";
-import { evaluate, describeCall, type PolicyContext } from "./policy";
+import { evaluate, describeCall, type PolicyContext, type PolicyConcern } from "./policy";
+
+/** Human-facing warning text for a policy concern surfaced on an approval. */
+const CONCERN_TEXT: Record<PolicyConcern, string> = {
+  "production-data":
+    "This investigates production data. Approve only if appropriate, and remember: " +
+    "results posted in this thread must be aggregates only (counts/rates/yes-no) — " +
+    "never row-level data or PII.",
+};
 
 // The session manager routes on (surface_id, conversation_id) and Principal —
 // nothing platform-shaped crosses into here. One conversation maps to exactly
@@ -31,7 +39,23 @@ import { evaluate, describeCall, type PolicyContext } from "./policy";
 // Command authority (assign, stop, approvals) is architect-only (DESIGN.md §2);
 // conversing is open. Reads/analysis never need approval.
 
-function conduitSystemPrompt(opts: { repoName: string; branch: string }): string {
+function conduitSystemPrompt(opts: {
+  repoName: string;
+  branch: string;
+  testCmd?: string | null;
+  landAvailable?: boolean;
+  deployAvailable?: boolean;
+}): string {
+  const ship =
+    opts.landAvailable || opts.deployAvailable
+      ? `- Landing and deploying are architect-ordered: an architect runs \`@Conduit ` +
+        `land\` or \`@Conduit deploy\` and approves it — you never run the land/deploy ` +
+        `path yourself. You may say when you think it's ready to land.`
+      : `- Landing and deploying are not available for this repo.`;
+  const testing = opts.testCmd
+    ? `- You can run this repo's tests without approval: \`${opts.testCmd}\`. Run them ` +
+      `to verify your changes before proposing to land.`
+    : null;
   return [
     `You are Conduit, an implementer agent bound to one chat thread. Humans in the`,
     `thread converse with you; each message arrives as a [conduit:event ...] header`,
@@ -51,9 +75,15 @@ function conduitSystemPrompt(opts: { repoName: string; branch: string }): string
     `  approved it runs and your turn continues; if denied you are told and should`,
     `  adapt. Propose these actions normally; the gate handles the pause. Do not`,
     `  claim you have done something until it has actually run.`,
+    `- Investigating PRODUCTION data (prod database clients, cloud data/log CLIs,`,
+    `  app consoles) is gated like a build even when read-only, and anything you`,
+    `  post back into this thread from it must be AGGREGATES ONLY — counts, rates,`,
+    `  yes/no. Never paste row-level data, PII, or secrets into the thread; if the`,
+    `  architect needs detail, say it has to go out of band.`,
     `- You are confined to your worktree: you cannot read or write files outside it,`,
     `  and destructive or credential-touching commands are refused outright.`,
-    `- Landing and deploying are not available yet.`,
+    ship,
+    ...(testing ? [testing] : []),
     ``,
     `Context: repo "${opts.repoName}", working tree on branch "${opts.branch}" (your cwd).`,
     ``,
@@ -446,8 +476,16 @@ export class SessionManager {
     const repo = this.store.getRepo(session.repo_id);
     const policyCtx: PolicyContext = {
       worktree: session.worktree_path,
-      safeBashAllowlist: repo?.safe_bash_allowlist ?? [],
+      // The repo's real test command auto-runs (DESIGN §4 lists "the test
+      // command" as allowlisted) so the agent can verify its own work; it is
+      // folded in here, not into the repo's stored allowlist, so config stays
+      // pristine and cost/prod checks still apply to everything else.
+      safeBashAllowlist: [...(repo?.safe_bash_allowlist ?? []), ...(repo?.test_cmd ? [repo.test_cmd] : [])],
     };
+    // Remembers a policy concern (e.g. production-data) per gated tool_use_id so
+    // the later approval prompt can surface it (the gate and the defer are
+    // separate events).
+    const gateConcerns = new Map<string, PolicyConcern>();
 
     if (inbound) {
       this.store.insertTurn({ sessionId, direction: "in", principal: inbound.principal, text: inbound.text });
@@ -476,6 +514,7 @@ export class SessionManager {
       } else {
         const pd = evaluate(call, policyCtx);
         auditDecision = pd.action;
+        if (pd.action === "gate" && pd.concern && call.id) gateConcerns.set(call.id, pd.concern);
         decision =
           pd.action === "allow"
             ? { decision: "allow" }
@@ -487,7 +526,12 @@ export class SessionManager {
         sessionId,
         actor: "agent",
         event: "tool_call",
-        detail: { tool: call.name, toolUseId: call.id || undefined, decision: auditDecision },
+        detail: {
+          tool: call.name,
+          toolUseId: call.id || undefined,
+          decision: auditDecision,
+          ...(call.id && gateConcerns.has(call.id) ? { concern: gateConcerns.get(call.id) } : {}),
+        },
       });
       return decision;
     };
@@ -561,7 +605,17 @@ export class SessionManager {
             break;
           case "deferred":
             producedOutput = true;
-            await this.recordAndRequestApproval(sessionId, conv, surface, ev.call, deliverFinal);
+            if (ev.costUsd !== undefined && !replyDelivered) {
+              this.store.insertTurn({ sessionId, direction: "out", text: "(paused — awaiting approval)", costUsd: ev.costUsd, resultSubtype: "tool_deferred" });
+            }
+            await this.recordAndRequestApproval(
+              sessionId,
+              conv,
+              surface,
+              ev.call,
+              deliverFinal,
+              ev.call.id ? gateConcerns.get(ev.call.id) : undefined,
+            );
             break;
           case "error":
             producedOutput = true;
@@ -596,9 +650,11 @@ export class SessionManager {
     surface: SurfaceAdapter,
     call: { id: string; name: string; input: unknown },
     deliverFinal: (text: string) => Promise<void>,
+    concern?: PolicyConcern,
   ): Promise<void> {
     const requestId = crypto.randomUUID();
     const summary = describeCall(call);
+    const concernText = concern ? CONCERN_TEXT[concern] : undefined;
     this.store.createApproval({
       id: requestId,
       sessionId,
@@ -610,10 +666,10 @@ export class SessionManager {
       sessionId,
       actor: "agent",
       event: "approval_request",
-      detail: { requestId, tool: call.name, toolUseId: call.id, summary },
+      detail: { requestId, tool: call.name, toolUseId: call.id, summary, ...(concern ? { concern } : {}) },
     });
     await deliverFinal("⏳ I need an architect's approval before I can continue — see the request below.");
-    const prompt: ApprovalPrompt = { requestId, toolName: call.name, toolInput: call.input, summary };
+    const prompt: ApprovalPrompt = { requestId, toolName: call.name, toolInput: call.input, summary, concern: concernText };
     try {
       await surface.requestApproval(conv, prompt);
     } catch (err) {
@@ -637,7 +693,14 @@ export class SessionManager {
     // The system prompt is current Conduit policy, re-supplied on resume too —
     // never the stale one a session was created with (e.g. an M1 read-only
     // session reactivated under M2 must now know it can propose gated actions).
-    const system = conduitSystemPrompt({ repoName: session.repo_id, branch: session.branch });
+    const repo = this.store.getRepo(session.repo_id);
+    const system = conduitSystemPrompt({
+      repoName: session.repo_id,
+      branch: session.branch,
+      testCmd: repo?.test_cmd,
+      landAvailable: !!repo?.land_cmd,
+      deployAvailable: !!repo?.deploy_cmd,
+    });
     const harness =
       session.harness_session_handle !== null
         ? await this.harness.resume(session.harness_session_handle, session.worktree_path, system)
