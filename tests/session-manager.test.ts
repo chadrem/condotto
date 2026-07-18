@@ -1000,6 +1000,20 @@ describe("harness capabilities — subagents & ultra (M3.5 Tier B)", () => {
     await w.manager.handleEvent({ kind: "command", conv: c, author: architect, name: "status", args: "" });
     expect(w.surface.posts.at(-1)!.text).toContain("ultra on");
   });
+
+  test("toggling subagents rebuilds the system prompt on the next turn (review fix)", async () => {
+    const w = makeWorld();
+    const c = conv("sb8.000001");
+    await assign(w, "sb8.000001");
+    // Turn 1 (subagents off): the created harness prompt has no delegation guidance.
+    await w.manager.handleEvent({ kind: "message", conv: c, author: architect, text: "one", attachments: [] });
+    expect(w.harness.created.at(-1)!.system).not.toMatch(/delegate READ-ONLY/i);
+    // Toggle on, then turn 2: the harness is re-attached with a fresh prompt that
+    // DOES include the delegation guidance (promptKey mismatch forces a rebuild).
+    await w.manager.handleEvent({ kind: "command", conv: c, author: architect, name: "subagents", args: "on" });
+    await w.manager.handleEvent({ kind: "message", conv: c, author: architect, text: "two", attachments: [] });
+    expect(w.harness.resumed.at(-1)!.system).toMatch(/delegate READ-ONLY/i);
+  });
 });
 
 describe("trust-scoped project config (M3.5 Tier C)", () => {

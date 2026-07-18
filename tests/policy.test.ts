@@ -248,6 +248,16 @@ describe("policy: multi-agent tools (M3.5 Tier B)", () => {
     expect(d.action).toBe("deny");
   });
 
+  test("a subagent's ALLOWLISTED bash is still denied (allowlist ≠ read-only) — review fix", () => {
+    // The repo test command / safe allowlist auto-runs for the MAIN agent, but a
+    // subagent is read-only: allowlisted bash is still code execution.
+    const c = { ...ctx(["git status", "bun test"]), subagentsEnabled: true };
+    expect(evaluate(subCall("Bash", { command: "git status" }), c).action).toBe("deny");
+    expect(evaluate(subCall("Bash", { command: "bun test" }), c).action).toBe("deny");
+    // Sanity: the MAIN agent's allowlisted bash still auto-allows.
+    expect(evaluate(call("Bash", { command: "git status" }), c).action).toBe("allow");
+  });
+
   test("the MAIN agent may spawn subagents only when enabled", () => {
     const spawn = call("Agent", { subagent_type: "explorer", prompt: "look" });
     expect(evaluate(spawn, ctx()).action).toBe("gate"); // off by default

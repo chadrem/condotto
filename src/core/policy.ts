@@ -75,6 +75,13 @@ const NO_FS_TOOLS = new Set(["TodoWrite"]);
 const READ_TOOLS = new Set(["Read", "Glob", "Grep"]);
 const WRITE_TOOLS = new Set(["Write", "Edit", "MultiEdit", "NotebookEdit"]);
 const NETWORK_TOOLS = new Set(["WebFetch", "WebSearch"]);
+/**
+ * The ONLY tools a subagent may run (M3.5 Tier B): genuine confined reads plus the
+ * side-effect-free planning tool. Note Bash is excluded even when allowlisted —
+ * an allowlisted command (e.g. the repo test command) is still code execution, so
+ * it is not "read-only" for a subagent and must go to the main agent.
+ */
+const SUBAGENT_READ_TOOLS = new Set([...NO_FS_TOOLS, ...READ_TOOLS]);
 
 /** Fields across tool inputs that name a filesystem target. */
 const PATH_FIELDS = ["file_path", "path", "notebook_path"] as const;
@@ -114,12 +121,17 @@ export function evaluate(call: ToolCall, ctx: PolicyContext): PolicyDecision {
   const name = call.name;
   const isSpawn = SUBAGENT_SPAWN_TOOLS.has(name) || name === WORKFLOW_SPAWN_TOOL;
 
-  // Subagent-initiated call (M3.5 Tier B). Confined reads pass; anything gated —
-  // and any nested spawn — is denied (defer→resume is main-agent-only).
+  // Subagent-initiated call (M3.5 Tier B). Subagents are strictly READ-ONLY:
+  // only genuine confined reads pass. A hard-deny keeps its specific reason (e.g.
+  // out-of-worktree confinement); everything else — writes, network, unknown
+  // tools, nested spawns, AND allowlisted bash (still code execution) — is denied,
+  // because a subagent call can't be paused for approval (defer is main-agent-only).
   if (call.agentId) {
     if (isSpawn) return deny(SUBAGENT_GATED_MSG);
     const base = evaluateBase(call, ctx);
-    return base.action === "gate" ? deny(SUBAGENT_GATED_MSG) : base;
+    if (base.action === "deny") return base;
+    if (base.action === "allow" && SUBAGENT_READ_TOOLS.has(name)) return base;
+    return deny(SUBAGENT_GATED_MSG);
   }
 
   // Main agent spawning a subagent / workflow. Delegation is not itself a gated

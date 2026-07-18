@@ -125,6 +125,13 @@ function threadCommandHelp(): string {
 interface LiveEntry {
   harness: HarnessSession | null;
   chain: Promise<void>;
+  /**
+   * The `subagents:workflows` state the cached harness's system prompt was built
+   * with (M3.5). getOrAttachHarness re-attaches when it differs from the fresh
+   * session row, so a capability toggle always yields fresh delegation guidance —
+   * without an out-of-band cache invalidation that could race an in-flight attach.
+   */
+  promptKey?: string;
 }
 
 export interface SessionManagerOptions {
@@ -644,17 +651,6 @@ export class SessionManager {
   }
 
   /**
-   * Drop the cached live harness so the NEXT turn re-attaches with a fresh system
-   * prompt (M3.5 Tier B). Model/effort ride per-turn config, but the delegation
-   * guidance in the prompt is baked at attach time — invalidate on a capability
-   * toggle so it reflects the new posture. Cheap: re-attach resumes by session id.
-   */
-  private refreshHarnessPrompt(sessionId: string): void {
-    const entry = this.live.get(sessionId);
-    if (entry) entry.harness = null;
-  }
-
-  /**
    * `@Conduit subagents on|off` (M3.5 Tier B). Architect opt-in, default off.
    * On: the implementer may fan out READ-ONLY exploration to subagents; it still
    * makes edits itself (gated). Turning it off also turns workflows off (a
@@ -682,7 +678,6 @@ export class SessionManager {
     this.store.setSessionSubagents(session.id, on);
     if (!on) this.store.setSessionWorkflows(session.id, false); // workflows require subagents
     this.store.audit({ sessionId: session.id, actor: principalKey(author), event: "subagents_set", detail: { on } });
-    this.refreshHarnessPrompt(session.id);
     const fresh = this.store.getSession(session.id)!;
     await surface.post(conv, {
       text:
@@ -727,7 +722,6 @@ export class SessionManager {
       this.store.setSessionEffort(session.id, null); // back to the daemon default
     }
     this.store.audit({ sessionId: session.id, actor: principalKey(author), event: "ultra_set", detail: { on } });
-    this.refreshHarnessPrompt(session.id);
     const fresh = this.store.getSession(session.id)!;
     await surface.post(conv, {
       text:
@@ -1344,7 +1338,12 @@ export class SessionManager {
 
   private async getOrAttachHarness(session: SessionRow): Promise<HarnessSession> {
     const entry = this.entryFor(session.id);
-    if (entry.harness) return entry.harness;
+    // Re-attach when the prompt-affecting capability state changed since the
+    // cached harness was built (a subagents/ultra toggle). Reading the fresh row
+    // here makes this race-free — no reliance on out-of-band invalidation that a
+    // toggle landing mid-attach could miss (M3.5 review fix).
+    const promptKey = `${session.subagents}:${session.workflows}`;
+    if (entry.harness && entry.promptKey === promptKey) return entry.harness;
 
     // The system prompt is current Conduit policy, re-supplied on resume too —
     // never the stale one a session was created with (e.g. an M1 read-only
@@ -1365,6 +1364,7 @@ export class SessionManager {
         : await this.harness.create({ cwd: session.worktree_path, system });
 
     entry.harness = harness;
+    entry.promptKey = promptKey;
     return harness;
   }
 }
