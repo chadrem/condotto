@@ -692,3 +692,78 @@ kind of DESIGN-vs-reality correction the spike-first rule exists to catch; DESIG
 **For M4:** investigate whether the Workflow runtime exposes a permission hook for
 its sub-agents (so their calls can be gated read-only like `Agent` subagents), or
 whether it must stay off. Until then, subagents cover the parallel-fan-out use case.
+
+## 2026-07-18 — M3.6 spike: secure workflows ARE gateable — the lever is `permissionMode`, not `canUseTool` (INVERTS the M3.5 finding)
+
+**Why re-spiked.** M3.6 ("workflows in the thread") is premised on the M3.5 finding
+that the Workflow tool's orchestrated agents BYPASS our PreToolUse gate (no
+`agent_id`) and fall through to `canUseTool`. The kickoff plan was therefore "move
+the confinement policy into `canUseTool`." Per the spike-first rule, I re-ran the
+real Workflow tool on live subscription auth (same SDK 0.3.214) against the throwaway
+testrepo BEFORE building. Scripts in `spikes/m3.6/` (`canusetool-confine.ts`,
+`diag.ts`, `diag2.ts`, `diag3.ts`, `diag4.ts`).
+
+**What the Workflow tool actually does.** The Workflow tool runs the WHOLE workflow
+as a **background task** (`system:task_type: "local_workflow"`; the tool returns
+"Workflow launched in background. Task ID …" immediately). The launching `query()`
+generator does NOT end there — it streams the workflow's `task_progress`/
+`task_notification` system events and yields a SECOND, FINAL `result` once the
+workflow completes. So one `query()` call spans the entire workflow (good for our
+one-turn model), but a workflow turn produces **multiple `result` messages** (an
+intermediate "launched; waiting…" and the final synthesized one — the adapter must
+deliver the LAST, not the first).
+
+**The load-bearing finding — `permissionMode` decides whether the background
+workflow's sub-agent tool calls reach our hook:**
+- Under **`permissionMode: "default"`** (what M3.5's adapter used), the background
+  workflow's sub-agent tool calls do NOT reach our PreToolUse hook OR `canUseTool`
+  — they hit the SDK's background-task permission system, which with no interactive
+  approver **default-DENIES** ("The user doesn't want to take this action right
+  now"). That is why M3.5 saw workflows as ungateable + non-functional. (`diag.ts`:
+  blanket-allow hook fired only once — for the `Workflow` launch — and the workflow
+  agent's Read was denied by a source we don't control; `canUseTool` fired 0×.)
+- Under **`permissionMode: "bypassPermissions"`**, the background workflow's
+  sub-agent tool calls **DO route through our PreToolUse hook WITH `agent_id` set**
+  (like an `Agent` subagent), and our hook's decision is authoritative.
+  `bypassPermissions` here does NOT mean "un-gated" — it means "use the hook instead
+  of interactive prompts." Hooks outrank permission mode in SDK precedence, so a hook
+  `deny`/`defer` still wins. Proven end-to-end (`diag2`/`diag3`/`diag4`):
+  1. **Secure read-only workflows work** (`diag3` A): a workflow agent's `Read`
+     reached the hook (`sub(…) Read`) → allowed → returned the real file content
+     (`# tiny-ledger`, functional); a workflow agent's in-tree `Write` reached the
+     hook (`sub(…) Write`) → our `deny` was honored → no file written.
+  2. **Main-agent gating is preserved** (`diag3` B): a main-agent `Write` under
+     bypass still `defer`s — `terminal_reason: "tool_deferred"` with
+     `deferred_tool_use` preserved, file NOT written. The M0 approve→resume loop is
+     intact under bypass.
+  3. **Worktree confinement is defence-in-depth** (`diag2`): even with a blanket-
+     allow hook, the SDK's own worktree sandbox denied out-of-tree read/write
+     (`/etc/hosts`, `../escape.txt`). So out-of-worktree access is denied by BOTH our
+     hook and the SDK sandbox.
+  4. **The `canUseTool` batching backstop still holds under bypass** (`diag4`): a
+     hook `ask` fall-through reaches `canUseTool` (fired 1×) → our deny → write
+     blocked; a forced batch of writes with hook `defer` produced a clean
+     `tool_deferred` with zero files written. bypass does NOT auto-approve gated
+     calls ahead of `canUseTool`.
+
+**Decision (mechanism for M3.6).** Secure workflows are ACHIEVABLE — via
+`permissionMode: "bypassPermissions"` + our EXISTING PreToolUse gate, NOT via a new
+`canUseTool` confinement. When a session enables workflows: (a) set
+`permissionMode: "bypassPermissions"` (only for workflow sessions; non-workflow
+sessions stay `"default"`, unchanged), (b) drive reads through the hook
+(`allowedTools: []` for workflow sessions — in `allowedTools`, reads are
+"auto-approved before the callback is consulted" and for workflow sub-agents that
+shadow path silently denies them), (c) re-enable the `Workflow` tool. The workflow's
+sub-agent calls then hit the hook with `agent_id`, where the **M3.5 subagent policy
+already confines them read-only** (reads allowed+confined; writes/bash/nested-spawns
+denied). The main agent still mutates via defer→approve→resume. `canUseTool` stays as
+the deny-by-default batching backstop (kept, still reachable under bypass), optionally
+upgraded to the same confinement for defence-in-depth. This reuses the proven
+subagent gating rather than inventing a canUseTool policy — simpler and safer than the
+kickoff's plan, and it means Tier 3 (worktree-write opt-in) is just "let the subagent
+branch allow confined writes/bash when the architect opted in."
+
+**Consequence for docs:** the M3.5 follow-up entry and CLAUDE.md say workflows are
+disabled because they "bypass the PreToolUse gate." That was true ONLY under
+`permissionMode: "default"`; it is corrected here. DESIGN §8 / CLAUDE.md updated as
+M3.6 lands.
