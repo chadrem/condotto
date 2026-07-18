@@ -76,6 +76,29 @@ const SUPPORTED_MODELS = Object.keys(MODEL_IDS);
 // (our Opus default qualifies); the SDK silently falls back to `high` elsewhere.
 const SUPPORTED_EFFORTS = ["low", "medium", "high", "xhigh", "max"];
 
+/**
+ * Daemon-side subagent definitions (M3.5 Tier B). When the architect enables
+ * subagents, the implementer fans out to these for parallel READ-ONLY work; their
+ * tool calls still hit the gate (agent_id-tagged), and the restricted `tools` list
+ * is defense-in-depth. Subagents never write/run shell — the policy engine denies
+ * any subagent-initiated gated call (defer→resume is main-agent-only), so the main
+ * agent performs mutations through the approval loop. Daemon-defined (not from repo
+ * config), so enabling them needs no repo trust.
+ */
+const SUBAGENT_DEFS = {
+  explorer: {
+    description:
+      "Read-only exploration: reads, searches, and summarizes the codebase in parallel. " +
+      "Use to investigate before the main agent makes changes.",
+    prompt:
+      "You are a read-only exploration subagent for Conduit. Use Read/Glob/Grep to investigate " +
+      "the working tree and report concise, specific findings (files, symbols, line numbers). You " +
+      "cannot write files or run shell commands; if a change is needed, describe exactly what the " +
+      "main agent should do. Stay within the working tree.",
+    tools: ["Read", "Glob", "Grep", "TodoWrite"],
+  },
+};
+
 function resolveModel(token: string | undefined): string | undefined {
   if (!token) return undefined;
   return MODEL_IDS[token] ?? token;
@@ -181,13 +204,17 @@ class ClaudeCodeSession implements HarnessSession {
     // throws would otherwise fall through to the SDK permission system, where
     // allowedTools would silently auto-approve the call.
     const gateHook = async (hookInput: unknown, toolUseID: string | undefined) => {
-      const call = hookInput as { tool_name?: string; tool_input?: unknown };
+      const call = hookInput as { tool_name?: string; tool_input?: unknown; agent_id?: string };
       let decision: Awaited<ReturnType<GateFn>>;
       try {
         decision = await gate({
           id: toolUseID ?? "",
           name: call.tool_name ?? "unknown",
           input: call.tool_input,
+          // M3.5 Tier B: present ONLY inside a subagent. The core policy treats
+          // subagent-initiated calls read-only (gated actions denied) since a
+          // subagent call can't be paused for approval (defer is main-thread-only).
+          agentId: call.agent_id,
         });
       } catch (err) {
         decision = { decision: "deny", reason: `gate error (denied fail-closed): ${err}` };
@@ -243,6 +270,9 @@ class ClaudeCodeSession implements HarnessSession {
         ...(typeof input.budgetUsd === "number" && input.budgetUsd > 0
           ? { maxBudgetUsd: input.budgetUsd }
           : {}),
+        // Tier B: when subagents are enabled, offer the read-only `explorer`
+        // subagent (restricted toolset — defense-in-depth over the gate).
+        ...(h?.subagents ? { agents: SUBAGENT_DEFS } : {}),
         // Tier C: load the trusted repo's skills alongside its project settings.
         ...(h?.projectConfig ? { skills: "all" as const } : {}),
         // Untrusted (default): never load filesystem settings (CLAUDE.md,

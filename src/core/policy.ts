@@ -45,7 +45,30 @@ export interface PolicyContext {
   worktree: string;
   /** Repo-defined commands that run without approval (exact or prefix match). */
   safeBashAllowlist: string[];
+  /**
+   * Multi-agent capabilities enabled for this turn (M3.5 Tier B). When on, the
+   * MAIN agent may auto-spawn subagents / workflows (delegation itself is not a
+   * gated action — the real actions are gated downstream). Off = a spawn attempt
+   * gates (defensive default; the adapter also removes the tools from context).
+   */
+  subagentsEnabled?: boolean;
+  workflowsEnabled?: boolean;
 }
+
+/**
+ * Fed back to a subagent that reached for a gated action. defer→resume can't
+ * pause a subagent call (spike 2026-07-18), so subagents are read-only: any gated
+ * action must be performed by the main agent, where it can be approved.
+ */
+const SUBAGENT_GATED_MSG =
+  "Subagents can't run gated actions (writing/editing files, shell commands, deploys) or spawn " +
+  "further subagents. Report what's needed and let the main agent do it, so an architect can approve.";
+
+// Multi-agent meta-tools (M3.5 Tier B). Spawning is delegation, not a filesystem
+// or shell action; when the capability is enabled the spawn auto-allows and the
+// subagent's own tool calls are gated (agent_id-tagged) downstream.
+const SUBAGENT_SPAWN_TOOLS = new Set(["Agent", "Task"]);
+const WORKFLOW_SPAWN_TOOL = "Workflow";
 
 // Tool categories. A tool absent from all of these is unknown → gated.
 const NO_FS_TOOLS = new Set(["TodoWrite"]);
@@ -80,7 +103,41 @@ export function offendingPath(worktree: string, input: unknown): string | null {
   return null;
 }
 
+/**
+ * Classify a tool call (DESIGN §4). Dispatches on the call's ORIGIN first
+ * (M3.5 Tier B): a subagent-initiated call is read-only (gated actions and nested
+ * spawns are denied — a subagent call can't be paused for approval); the main
+ * agent may spawn subagents/workflows when enabled; everything else runs the base
+ * tool-semantics rules.
+ */
 export function evaluate(call: ToolCall, ctx: PolicyContext): PolicyDecision {
+  const name = call.name;
+  const isSpawn = SUBAGENT_SPAWN_TOOLS.has(name) || name === WORKFLOW_SPAWN_TOOL;
+
+  // Subagent-initiated call (M3.5 Tier B). Confined reads pass; anything gated —
+  // and any nested spawn — is denied (defer→resume is main-agent-only).
+  if (call.agentId) {
+    if (isSpawn) return deny(SUBAGENT_GATED_MSG);
+    const base = evaluateBase(call, ctx);
+    return base.action === "gate" ? deny(SUBAGENT_GATED_MSG) : base;
+  }
+
+  // Main agent spawning a subagent / workflow. Delegation is not itself a gated
+  // action when the architect enabled the capability; the disallowedTools set
+  // already removes these from context when it's off, so the gate branch is a
+  // deny-heavy backstop.
+  if (SUBAGENT_SPAWN_TOOLS.has(name)) {
+    return ctx.subagentsEnabled ? allow("delegate to a subagent") : gate("delegate to a subagent");
+  }
+  if (name === WORKFLOW_SPAWN_TOOL) {
+    return ctx.workflowsEnabled ? allow("run a multi-agent workflow") : gate("run a multi-agent workflow");
+  }
+
+  return evaluateBase(call, ctx);
+}
+
+/** Base tool-semantics rules (origin-agnostic): reads/writes/bash/network/unknown. */
+function evaluateBase(call: ToolCall, ctx: PolicyContext): PolicyDecision {
   const name = call.name;
 
   // Side-effect-free planning tool: always fine, touches no filesystem.

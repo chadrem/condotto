@@ -48,6 +48,8 @@ function conduitSystemPrompt(opts: {
   testCmd?: string | null;
   landAvailable?: boolean;
   deployAvailable?: boolean;
+  subagents?: boolean;
+  workflows?: boolean;
 }): string {
   const ship =
     opts.landAvailable || opts.deployAvailable
@@ -58,6 +60,14 @@ function conduitSystemPrompt(opts: {
   const testing = opts.testCmd
     ? `- You can run this repo's tests without approval: \`${opts.testCmd}\`. Run them ` +
       `to verify your changes before proposing to land.`
+    : null;
+  // M3.5 Tier B: guidance when the architect has enabled multi-agent power.
+  const delegation = opts.subagents
+    ? `- You can delegate READ-ONLY exploration and analysis to subagents (the Agent tool` +
+      `${opts.workflows ? ", and orchestrate multi-step work with the Workflow tool" : ""}) so they ` +
+      `investigate in parallel. Subagents CANNOT write files, run shell commands, or spawn more ` +
+      `subagents — those are gated and only you, the main agent, may do them so an architect can ` +
+      `approve. Use subagents to gather findings; you make the edits yourself.`
     : null;
   return [
     `You are Conduit, an implementer agent bound to one chat thread. Humans in the`,
@@ -87,6 +97,7 @@ function conduitSystemPrompt(opts: {
     `  and destructive or credential-touching commands are refused outright.`,
     ship,
     ...(testing ? [testing] : []),
+    ...(delegation ? [delegation] : []),
     ``,
     `Context: repo "${opts.repoName}", working tree on branch "${opts.branch}" (your cwd).`,
     ``,
@@ -298,6 +309,12 @@ export class SessionManager {
         break;
       case "effort":
         await this.setEffort(event.conv, event.author, event.args);
+        break;
+      case "subagents":
+        await this.setSubagents(event.conv, event.author, event.args);
+        break;
+      case "ultra":
+        await this.setUltra(event.conv, event.author, event.args);
         break;
       case "help":
         await this.guide(event.conv);
@@ -612,6 +629,108 @@ export class SessionManager {
     this.store.audit({ sessionId: session.id, actor: principalKey(author), event: "effort_set", detail: { effort: token } });
     await surface.post(conv, {
       text: `Effort set to \`${token}\` (model \`${this.effectiveModel(session)}\`). Takes effect on your next message.`,
+    });
+  }
+
+  private parseOnOff(args: string): boolean | null {
+    const t = args.trim().toLowerCase();
+    if (["on", "true", "yes", "enable", "enabled"].includes(t)) return true;
+    if (["off", "false", "no", "disable", "disabled"].includes(t)) return false;
+    return null;
+  }
+
+  /**
+   * Drop the cached live harness so the NEXT turn re-attaches with a fresh system
+   * prompt (M3.5 Tier B). Model/effort ride per-turn config, but the delegation
+   * guidance in the prompt is baked at attach time — invalidate on a capability
+   * toggle so it reflects the new posture. Cheap: re-attach resumes by session id.
+   */
+  private refreshHarnessPrompt(sessionId: string): void {
+    const entry = this.live.get(sessionId);
+    if (entry) entry.harness = null;
+  }
+
+  /**
+   * `@Conduit subagents on|off` (M3.5 Tier B). Architect opt-in, default off.
+   * On: the implementer may fan out READ-ONLY exploration to subagents; it still
+   * makes edits itself (gated). Turning it off also turns workflows off (a
+   * workflow orchestrates subagents, so it needs the base capability).
+   */
+  private async setSubagents(conv: ConversationRef, author: Principal, args: string): Promise<void> {
+    const surface = this.surfaceFor(conv);
+    const session = this.store.getSessionByConversation(conv.surfaceId, conv.conversationId);
+    if (!session || session.status === "stopped") {
+      await surface.post(conv, { text: "No active session in this thread." });
+      return;
+    }
+    if (!this.store.isArchitect(principalKey(author), conv.channelId)) {
+      this.store.audit({ sessionId: session.id, actor: principalKey(author), event: "authz_denied", detail: { action: "subagents" } });
+      await surface.post(conv, { text: "Only architects can change subagents." });
+      return;
+    }
+    const on = this.parseOnOff(args);
+    if (on === null) {
+      await surface.post(conv, {
+        text: `Usage: \`@Conduit subagents on|off\`. Currently ${session.subagents === 1 ? "on" : "off"}.`,
+      });
+      return;
+    }
+    this.store.setSessionSubagents(session.id, on);
+    if (!on) this.store.setSessionWorkflows(session.id, false); // workflows require subagents
+    this.store.audit({ sessionId: session.id, actor: principalKey(author), event: "subagents_set", detail: { on } });
+    this.refreshHarnessPrompt(session.id);
+    const fresh = this.store.getSession(session.id)!;
+    await surface.post(conv, {
+      text:
+        (on
+          ? "Subagents on — I can fan out read-only exploration in parallel; I still make edits myself (gated). "
+          : "Subagents off. ") +
+        `(${this.capabilitySummary(fresh)}) Takes effect on your next message.`,
+    });
+  }
+
+  /**
+   * `@Conduit ultra on|off` (M3.5 Tier B). The power preset: `xhigh` effort +
+   * subagents + the Workflow tool — the SDK analogue of CLI "ultracode". Off
+   * restores subagents/workflows off and effort to the daemon default. Burns the
+   * plan's rate limit fastest (§4), so it's an explicit, architect-only opt-in.
+   */
+  private async setUltra(conv: ConversationRef, author: Principal, args: string): Promise<void> {
+    const surface = this.surfaceFor(conv);
+    const session = this.store.getSessionByConversation(conv.surfaceId, conv.conversationId);
+    if (!session || session.status === "stopped") {
+      await surface.post(conv, { text: "No active session in this thread." });
+      return;
+    }
+    if (!this.store.isArchitect(principalKey(author), conv.channelId)) {
+      this.store.audit({ sessionId: session.id, actor: principalKey(author), event: "authz_denied", detail: { action: "ultra" } });
+      await surface.post(conv, { text: "Only architects can toggle ultra mode." });
+      return;
+    }
+    const on = this.parseOnOff(args);
+    if (on === null) {
+      const isOn = session.subagents === 1 && session.workflows === 1;
+      await surface.post(conv, { text: `Usage: \`@Conduit ultra on|off\`. Currently ${isOn ? "on" : "off"}.` });
+      return;
+    }
+    if (on) {
+      this.store.setSessionSubagents(session.id, true);
+      this.store.setSessionWorkflows(session.id, true);
+      if (this.supportsEffort("xhigh")) this.store.setSessionEffort(session.id, "xhigh");
+    } else {
+      this.store.setSessionSubagents(session.id, false);
+      this.store.setSessionWorkflows(session.id, false);
+      this.store.setSessionEffort(session.id, null); // back to the daemon default
+    }
+    this.store.audit({ sessionId: session.id, actor: principalKey(author), event: "ultra_set", detail: { on } });
+    this.refreshHarnessPrompt(session.id);
+    const fresh = this.store.getSession(session.id)!;
+    await surface.post(conv, {
+      text:
+        (on
+          ? "⚡ Ultra on — max reasoning + parallel subagents/workflows. This burns the rate limit fastest; dial down with `@Conduit ultra off`. "
+          : "Ultra off. ") +
+        `(${this.capabilitySummary(fresh)}) Takes effect on your next message.`,
     });
   }
 
@@ -948,6 +1067,11 @@ export class SessionManager {
       // folded in here, not into the repo's stored allowlist, so config stays
       // pristine and cost/prod checks still apply to everything else.
       safeBashAllowlist: [...(repo?.safe_bash_allowlist ?? []), ...(repo?.test_cmd ? [repo.test_cmd] : [])],
+      // M3.5 Tier B: let the MAIN agent spawn subagents/workflows when enabled
+      // (delegation itself isn't a gated action; subagent tool calls are gated
+      // downstream). Subagent-initiated gated calls are denied by the policy engine.
+      subagentsEnabled: session.subagents === 1,
+      workflowsEnabled: session.workflows === 1,
     };
     // Remembers a policy concern (e.g. production-data) per gated tool_use_id so
     // the later approval prompt can surface it (the gate and the defer are
@@ -997,6 +1121,8 @@ export class SessionManager {
           tool: call.name,
           toolUseId: call.id || undefined,
           decision: auditDecision,
+          // M3.5 Tier B: record which subagent originated the call, if any.
+          ...(call.agentId ? { agentId: call.agentId } : {}),
           ...(call.id && gateConcerns.has(call.id) ? { concern: gateConcerns.get(call.id) } : {}),
         },
       });
@@ -1226,6 +1352,8 @@ export class SessionManager {
       testCmd: repo?.test_cmd,
       landAvailable: !!repo?.land_cmd,
       deployAvailable: !!repo?.deploy_cmd,
+      subagents: session.subagents === 1,
+      workflows: session.workflows === 1,
     });
     const harness =
       session.harness_session_handle !== null

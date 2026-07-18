@@ -212,3 +212,52 @@ describe("offendingPath", () => {
     expect(offendingPath(WORKTREE, null)).toBeNull();
   });
 });
+
+describe("policy: multi-agent tools (M3.5 Tier B)", () => {
+  const subCall = (name: string, input: unknown): ToolCall => ({ id: "t1", name, input, agentId: "sub-abc123" });
+  const bashSub = (command: string): ToolCall => subCall("Bash", { command });
+
+  test("a subagent's confined read is allowed (read-only fan-out works)", () => {
+    expect(evaluate(subCall("Read", { file_path: "src/x.ts" }), ctx()).action).toBe("allow");
+    expect(evaluate(subCall("Grep", { pattern: "foo", path: "src" }), ctx()).action).toBe("allow");
+    expect(evaluate(subCall("Glob", { pattern: "**/*.ts" }), ctx()).action).toBe("allow");
+  });
+
+  test("a subagent's out-of-worktree read is still denied (confinement holds in subagents)", () => {
+    expect(evaluate(subCall("Read", { file_path: "/etc/passwd" }), ctx()).action).toBe("deny");
+    expect(evaluate(subCall("Glob", { pattern: "/Users/**/.ssh/*" }), ctx()).action).toBe("deny");
+  });
+
+  test("a subagent-initiated gated action is DENIED (defer can't pause a subagent call)", () => {
+    for (const c of [subCall("Write", { file_path: "src/x.ts" }), subCall("Edit", { file_path: "src/x.ts" }), bashSub("npm run build")]) {
+      const d = evaluate(c, ctx());
+      expect(d.action).toBe("deny");
+      expect(d.reason).toMatch(/subagent/i);
+    }
+  });
+
+  test("a subagent cannot spawn further subagents or workflows (no nesting)", () => {
+    for (const name of ["Agent", "Task", "Workflow"]) {
+      const d = evaluate(subCall(name, {}), { ...ctx(), subagentsEnabled: true, workflowsEnabled: true });
+      expect(d.action).toBe("deny");
+    }
+  });
+
+  test("subagent gated actions stay denied even with capabilities enabled", () => {
+    const d = evaluate(subCall("Write", { file_path: "src/x.ts" }), { ...ctx(), subagentsEnabled: true, workflowsEnabled: true });
+    expect(d.action).toBe("deny");
+  });
+
+  test("the MAIN agent may spawn subagents only when enabled", () => {
+    const spawn = call("Agent", { subagent_type: "explorer", prompt: "look" });
+    expect(evaluate(spawn, ctx()).action).toBe("gate"); // off by default
+    expect(evaluate(spawn, { ...ctx(), subagentsEnabled: true }).action).toBe("allow");
+    expect(evaluate(call("Task", {}), { ...ctx(), subagentsEnabled: true }).action).toBe("allow");
+  });
+
+  test("the MAIN agent may run a workflow only when enabled", () => {
+    const wf = call("Workflow", { script: "export const meta = {}" });
+    expect(evaluate(wf, ctx()).action).toBe("gate");
+    expect(evaluate(wf, { ...ctx(), workflowsEnabled: true }).action).toBe("allow");
+  });
+});

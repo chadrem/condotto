@@ -167,6 +167,16 @@ export interface ToolCall {
   id: string;
   name: string;
   input: unknown;
+  /**
+   * Set when the call was initiated by a SUBAGENT rather than the main agent
+   * (M3.5 Tier B). Opaque origin marker — the harness adapter fills it from the
+   * subagent id the runtime reports (Claude Code: the PreToolUse hook's
+   * `agent_id`, present only inside a subagent). The policy engine treats
+   * subagent-initiated calls more strictly: reads pass (confined), but any gated
+   * action or nested spawn is denied, because a subagent call cannot be paused
+   * for out-of-band approval the way a main-agent call can (spike 2026-07-18).
+   */
+  agentId?: string;
 }
 
 /**

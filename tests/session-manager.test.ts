@@ -902,3 +902,102 @@ describe("harness capabilities — model & effort (M3.5 Tier A)", () => {
     expect(last.harness?.projectConfig).toBe(false); // testrepo untrusted
   });
 });
+
+describe("harness capabilities — subagents & ultra (M3.5 Tier B)", () => {
+  async function assign(w: World, id: string): Promise<void> {
+    await w.manager.handleEvent({ kind: "command", conv: conv(id), author: architect, name: "assign", args: "" });
+  }
+
+  test("subagents default off, and the intro doesn't claim them", async () => {
+    const w = makeWorld();
+    await assign(w, "sb1.000001");
+    expect(w.store.getSessionByConversation("fake", "sb1.000001")!.subagents).toBe(0);
+    // The capability summary (not the command list) must not claim subagents are on.
+    expect(w.surface.posts.at(-1)!.text).not.toContain("*subagents on*");
+    expect(w.surface.posts.at(-1)!.text).not.toContain("*ultra on*");
+  });
+
+  test("architect turns subagents on; it persists, reaches the turn, and enters the prompt", async () => {
+    const w = makeWorld();
+    const c = conv("sb2.000001");
+    await assign(w, "sb2.000001");
+    await w.manager.handleEvent({ kind: "command", conv: c, author: architect, name: "subagents", args: "on" });
+    expect(w.store.getSessionByConversation("fake", "sb2.000001")!.subagents).toBe(1);
+    expect(w.surface.posts.at(-1)!.text).toContain("Subagents on");
+
+    await w.manager.handleEvent({ kind: "message", conv: c, author: architect, text: "hi", attachments: [] });
+    expect(w.harness.allTurns.at(-1)!.harness?.subagents).toBe(true);
+    // System prompt on attach carries the delegation guidance.
+    expect(w.harness.created.at(-1)!.system).toMatch(/subagent/i);
+  });
+
+  test("a member cannot toggle subagents; a bad arg shows usage", async () => {
+    const w = makeWorld();
+    const c = conv("sb3.000001");
+    await assign(w, "sb3.000001");
+    await w.manager.handleEvent({ kind: "command", conv: c, author: member, name: "subagents", args: "on" });
+    expect(w.surface.posts.at(-1)!.text).toContain("Only architects");
+    expect(w.store.getSessionByConversation("fake", "sb3.000001")!.subagents).toBe(0);
+    await w.manager.handleEvent({ kind: "command", conv: c, author: architect, name: "subagents", args: "maybe" });
+    expect(w.surface.posts.at(-1)!.text).toContain("Usage");
+    expect(w.store.getSessionByConversation("fake", "sb3.000001")!.subagents).toBe(0);
+  });
+
+  test("ultra on sets xhigh + subagents + workflows; off restores the defaults", async () => {
+    const w = makeWorld();
+    const c = conv("sb4.000001");
+    await assign(w, "sb4.000001");
+    await w.manager.handleEvent({ kind: "command", conv: c, author: architect, name: "ultra", args: "on" });
+    let s = w.store.getSessionByConversation("fake", "sb4.000001")!;
+    expect(s.subagents).toBe(1);
+    expect(s.workflows).toBe(1);
+    expect(s.effort).toBe("xhigh");
+    expect(w.surface.posts.at(-1)!.text).toContain("Ultra on");
+
+    await w.manager.handleEvent({ kind: "message", conv: c, author: architect, text: "go", attachments: [] });
+    const t = w.harness.allTurns.at(-1)!;
+    expect(t.harness?.subagents).toBe(true);
+    expect(t.harness?.workflows).toBe(true);
+    expect(t.harness?.effort).toBe("xhigh");
+
+    await w.manager.handleEvent({ kind: "command", conv: c, author: architect, name: "ultra", args: "off" });
+    s = w.store.getSessionByConversation("fake", "sb4.000001")!;
+    expect(s.subagents).toBe(0);
+    expect(s.workflows).toBe(0);
+    expect(s.effort).toBeNull(); // back to the daemon default (high)
+  });
+
+  test("turning subagents off also turns workflows off (workflows need subagents)", async () => {
+    const w = makeWorld();
+    const c = conv("sb5.000001");
+    await assign(w, "sb5.000001");
+    await w.manager.handleEvent({ kind: "command", conv: c, author: architect, name: "ultra", args: "on" });
+    await w.manager.handleEvent({ kind: "command", conv: c, author: architect, name: "subagents", args: "off" });
+    const s = w.store.getSessionByConversation("fake", "sb5.000001")!;
+    expect(s.subagents).toBe(0);
+    expect(s.workflows).toBe(0);
+  });
+
+  test("a subagent-initiated write is denied end-to-end — the main agent must do it", async () => {
+    const w = makeWorld();
+    const c = conv("sb6.000001");
+    await assign(w, "sb6.000001");
+    await w.manager.handleEvent({ kind: "command", conv: c, author: architect, name: "subagents", args: "on" });
+    // The next turn attempts a Write from a SUBAGENT (agentId set).
+    w.harness.scriptTurn([{ id: "sw1", name: "Write", input: { file_path: "x.ts" }, agentId: "sub-xyz" }]);
+    await w.manager.handleEvent({ kind: "message", conv: c, author: architect, text: "go", attachments: [] });
+    // Denied, not executed, and no approval was ever posted (subagents can't gate).
+    expect(w.harness.executed.find((cl) => cl.id === "sw1")).toBeUndefined();
+    expect(w.surface.approvalRequests.length).toBe(0);
+    expect(w.surface.transcript().join("\n")).toMatch(/denied|Subagents can't/i);
+  });
+
+  test("subagents/ultra state shows in the status listing", async () => {
+    const w = makeWorld();
+    const c = conv("sb7.000001");
+    await assign(w, "sb7.000001");
+    await w.manager.handleEvent({ kind: "command", conv: c, author: architect, name: "ultra", args: "on" });
+    await w.manager.handleEvent({ kind: "command", conv: c, author: architect, name: "status", args: "" });
+    expect(w.surface.posts.at(-1)!.text).toContain("ultra on");
+  });
+});
