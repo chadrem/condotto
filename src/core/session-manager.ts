@@ -5,6 +5,7 @@ import type {
   GateFn,
   HarnessAdapter,
   HarnessSession,
+  HarnessTurnOptions,
   InboundEvent,
   Principal,
   SurfaceAdapter,
@@ -102,6 +103,8 @@ function conduitSystemPrompt(opts: {
 function threadCommandHelp(): string {
   return [
     `Architect commands — mention me in this thread:`,
+    `• \`@Conduit model <opus|sonnet|fable>\` / \`@Conduit effort <low…max>\` — tune the implementer`,
+    `• \`@Conduit subagents on|off\` · \`@Conduit ultra on|off\` — multi-agent power (opt-in, gated)`,
     `• \`@Conduit land\` / \`@Conduit deploy\` — run the repo's ship path (gated)`,
     `• \`@Conduit budget <usd>\` — raise this thread's cost budget`,
     `• \`@Conduit status\` — list sessions · \`@Conduit stop\` — end this session`,
@@ -120,6 +123,13 @@ export interface SessionManagerOptions {
   maxConcurrentTurns?: number;
   /** Runs repo land/deploy commands (M3); injectable for tests. */
   commandRunner?: CommandRunnerLike;
+  /**
+   * Daemon-wide default model/effort tokens (M3.5 Tier A), used when a session
+   * (and its repo) sets none. Opaque — validated against the harness adapter's
+   * capabilities. Default Opus + high (DESIGN §1 north-star: a first-class agent).
+   */
+  defaultModel?: string;
+  defaultEffort?: string;
 }
 
 /** Prefix marking an approval whose action the daemon runs itself (land/deploy) */
@@ -158,6 +168,8 @@ export class SessionManager {
   /** Live harness sessions + a per-session FIFO so turns never interleave. */
   private live = new Map<string, LiveEntry>();
   private readonly defaultCostCapUsd: number;
+  private readonly defaultModel: string;
+  private readonly defaultEffort: string;
   private readonly turnSlots: Semaphore;
   private readonly commandRunner: CommandRunnerLike;
 
@@ -169,8 +181,46 @@ export class SessionManager {
     opts: SessionManagerOptions = {},
   ) {
     this.defaultCostCapUsd = opts.defaultCostCapUsd ?? 10;
+    this.defaultModel = opts.defaultModel ?? "opus";
+    this.defaultEffort = opts.defaultEffort ?? "high";
     this.turnSlots = new Semaphore(Math.max(1, opts.maxConcurrentTurns ?? 6));
     this.commandRunner = opts.commandRunner ?? new CommandRunner();
+  }
+
+  // -- harness capability helpers (M3.5) ------------------------------------
+
+  private supportsModel(token: string): boolean {
+    return this.harness.capabilities.supportedModels.includes(token);
+  }
+  private supportsEffort(token: string): boolean {
+    return this.harness.capabilities.supportedEfforts.includes(token);
+  }
+  /** Effective model/effort for a session: its own value, else the daemon default. */
+  private effectiveModel(session: SessionRow): string {
+    return session.model ?? this.defaultModel;
+  }
+  private effectiveEffort(session: SessionRow): string {
+    return session.effort ?? this.defaultEffort;
+  }
+  /** One-line human summary of a session's harness capabilities (M3.5). */
+  private capabilitySummary(session: SessionRow): string {
+    const parts = [
+      `model \`${this.effectiveModel(session)}\``,
+      `effort \`${this.effectiveEffort(session)}\``,
+    ];
+    if (session.workflows === 1) parts.push("*ultra on* (subagents + workflows)");
+    else if (session.subagents === 1) parts.push("*subagents on*");
+    return parts.join(", ");
+  }
+  /** The per-turn harness config for a session (opaque tokens + capability flags). */
+  private harnessOptionsFor(session: SessionRow, repoTrusted: boolean): HarnessTurnOptions {
+    return {
+      model: this.effectiveModel(session),
+      effort: this.effectiveEffort(session),
+      subagents: session.subagents === 1,
+      workflows: session.workflows === 1,
+      projectConfig: repoTrusted,
+    };
   }
 
   registerSurface(surface: SurfaceAdapter): void {
@@ -243,6 +293,12 @@ export class SessionManager {
       case "deploy":
         await this.shipCommand(event.conv, event.author, event.name);
         break;
+      case "model":
+        await this.setModel(event.conv, event.author, event.args);
+        break;
+      case "effort":
+        await this.setEffort(event.conv, event.author, event.args);
+        break;
       case "help":
         await this.guide(event.conv);
         break;
@@ -291,7 +347,8 @@ export class SessionManager {
         await surface.post(conv, {
           text:
             `Session reactivated — repo \`${existing.repo_id}\`, branch \`${existing.branch}\`. ` +
-            `I still have the prior context.\n\n` +
+            `I still have the prior context.\n` +
+            `Running ${this.capabilitySummary(existing)}.\n\n` +
             threadCommandHelp(),
         });
       });
@@ -305,6 +362,18 @@ export class SessionManager {
       defaultBranch: repo.default_branch,
       sessionId,
     });
+
+    // Seed model/effort from the repo default when supported, else leave null so
+    // the turn resolves to the daemon default. A configured-but-unsupported repo
+    // default is a config error — log and fall back rather than silently apply it.
+    const seedModel = repo.default_model && this.supportsModel(repo.default_model) ? repo.default_model : null;
+    if (repo.default_model && !this.supportsModel(repo.default_model)) {
+      this.log(`[assign] repo ${repo.name} default_model "${repo.default_model}" is unsupported — using daemon default`);
+    }
+    const seedEffort = repo.default_effort && this.supportsEffort(repo.default_effort) ? repo.default_effort : null;
+    if (repo.default_effort && !this.supportsEffort(repo.default_effort)) {
+      this.log(`[assign] repo ${repo.name} default_effort "${repo.default_effort}" is unsupported — using daemon default`);
+    }
 
     let session: SessionRow;
     try {
@@ -321,6 +390,9 @@ export class SessionManager {
         status: "parked",
         // Seed the per-thread cost ceiling: repo override, else daemon default.
         budget_limit_usd: repo.cost_cap_usd ?? this.defaultCostCapUsd,
+        // Seed model/effort (M3.5); null = fall back to the daemon default at turn time.
+        model: seedModel,
+        effort: seedEffort,
       });
     } catch (err) {
       if (err instanceof ConflictError) {
@@ -340,7 +412,8 @@ export class SessionManager {
     });
     await surface.post(conv, {
       text:
-        `I'm on it — repo \`${repo.name}\`, branch \`${worktree.branch}\`.\n\n` +
+        `I'm on it — repo \`${repo.name}\`, branch \`${worktree.branch}\`.\n` +
+        `Running ${this.capabilitySummary(session)}.\n\n` +
         `Reply in this thread to talk — reading and analysis are free. Edits, shell ` +
         `commands, and land/deploy pause for an architect's Approve/Deny.\n\n` +
         threadCommandHelp(),
@@ -361,7 +434,8 @@ export class SessionManager {
     if (session && session.status !== "stopped") {
       await surface.post(conv, {
         text:
-          `I'm working in this thread — repo \`${session.repo_id}\`, branch \`${session.branch}\`.\n\n` +
+          `I'm working in this thread — repo \`${session.repo_id}\`, branch \`${session.branch}\`.\n` +
+          `Running ${this.capabilitySummary(session)}.\n\n` +
           threadCommandHelp(),
       });
       return;
@@ -409,7 +483,7 @@ export class SessionManager {
       return;
     }
     const lines = sessions.map(
-      (s) => `• ${s.repo_id} @ ${s.branch} — ${s.status}, last active ${s.last_active_at}`,
+      (s) => `• ${s.repo_id} @ ${s.branch} — ${s.status}, ${this.capabilitySummary(s)}, last active ${s.last_active_at}`,
     );
     await surface.post(conv, { text: `Sessions in this channel:\n${lines.join("\n")}` });
   }
@@ -470,6 +544,74 @@ export class SessionManager {
     const spent = this.store.sessionCostUsd(session.id);
     await surface.post(conv, {
       text: `Cost budget set to $${amount.toFixed(2)} for this session (spent so far: $${spent.toFixed(2)}).`,
+    });
+  }
+
+  /**
+   * `@Conduit model <opus|sonnet|fable>` (M3.5 Tier A). Architect tunes the
+   * implementer's model per thread. The token is opaque to the core — it is only
+   * validated for membership in the harness adapter's advertised `supportedModels`
+   * (the adapter maps it to the concrete SDK id), so the core never learns SDK
+   * model names. Model×effort spend the plan's rate limit (§4), so this is also
+   * how an architect dials capability DOWN (cheaper model).
+   */
+  private async setModel(conv: ConversationRef, author: Principal, args: string): Promise<void> {
+    const surface = this.surfaceFor(conv);
+    const session = this.store.getSessionByConversation(conv.surfaceId, conv.conversationId);
+    if (!session || session.status === "stopped") {
+      await surface.post(conv, { text: "No active session in this thread." });
+      return;
+    }
+    if (!this.store.isArchitect(principalKey(author), conv.channelId)) {
+      this.store.audit({ sessionId: session.id, actor: principalKey(author), event: "authz_denied", detail: { action: "model" } });
+      await surface.post(conv, { text: "Only architects can change the model." });
+      return;
+    }
+    const token = args.trim().toLowerCase();
+    const supported = this.harness.capabilities.supportedModels;
+    if (!token || !this.supportsModel(token)) {
+      await surface.post(conv, {
+        text: `Usage: \`@Conduit model <${supported.join("|")}>\`. Currently \`${this.effectiveModel(session)}\`.`,
+      });
+      return;
+    }
+    this.store.setSessionModel(session.id, token);
+    this.store.audit({ sessionId: session.id, actor: principalKey(author), event: "model_set", detail: { model: token } });
+    await surface.post(conv, {
+      text: `Model set to \`${token}\` (effort \`${this.effectiveEffort(session)}\`). Takes effect on your next message.`,
+    });
+  }
+
+  /**
+   * `@Conduit effort <low|medium|high|xhigh|max>` (M3.5 Tier A). Architect tunes
+   * reasoning effort per thread. Opaque token, validated against the adapter's
+   * `supportedEfforts`. Higher effort burns more of the plan's rate limit (§4);
+   * lower effort is the dial-down.
+   */
+  private async setEffort(conv: ConversationRef, author: Principal, args: string): Promise<void> {
+    const surface = this.surfaceFor(conv);
+    const session = this.store.getSessionByConversation(conv.surfaceId, conv.conversationId);
+    if (!session || session.status === "stopped") {
+      await surface.post(conv, { text: "No active session in this thread." });
+      return;
+    }
+    if (!this.store.isArchitect(principalKey(author), conv.channelId)) {
+      this.store.audit({ sessionId: session.id, actor: principalKey(author), event: "authz_denied", detail: { action: "effort" } });
+      await surface.post(conv, { text: "Only architects can change the effort." });
+      return;
+    }
+    const token = args.trim().toLowerCase();
+    const supported = this.harness.capabilities.supportedEfforts;
+    if (!token || !this.supportsEffort(token)) {
+      await surface.post(conv, {
+        text: `Usage: \`@Conduit effort <${supported.join("|")}>\`. Currently \`${this.effectiveEffort(session)}\`.`,
+      });
+      return;
+    }
+    this.store.setSessionEffort(session.id, token);
+    this.store.audit({ sessionId: session.id, actor: principalKey(author), event: "effort_set", detail: { effort: token } });
+    await surface.post(conv, {
+      text: `Effort set to \`${token}\` (model \`${this.effectiveModel(session)}\`). Takes effect on your next message.`,
     });
   }
 
@@ -948,7 +1090,10 @@ export class SessionManager {
       if (!this.store.tryActivate(sessionId)) return;
       const harnessSession = await this.getOrAttachHarness(session);
 
-      for await (const ev of harnessSession.turn({ text: framedText, budgetUsd: turnBudgetUsd }, gate)) {
+      // M3.5: forward the session's harness capabilities (model/effort/subagents/
+      // workflows + repo trust) with the turn. Opaque config the adapter applies.
+      const harnessOpts = this.harnessOptionsFor(session, (repo?.trusted ?? 0) === 1);
+      for await (const ev of harnessSession.turn({ text: framedText, budgetUsd: turnBudgetUsd, harness: harnessOpts }, gate)) {
         switch (ev.kind) {
           case "handle_updated":
             this.store.updateSessionHandle(sessionId, ev.handle);

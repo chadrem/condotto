@@ -45,7 +45,20 @@ export interface Attachment {
 // ---------------------------------------------------------------------------
 // Surface port — how humans reach Conduit
 
-export type CommandName = "assign" | "status" | "stop" | "land" | "deploy" | "budget" | "help";
+export type CommandName =
+  | "assign"
+  | "status"
+  | "stop"
+  | "land"
+  | "deploy"
+  | "budget"
+  | "help"
+  // M3.5 — harness capability controls (architect-only). model/effort tune the
+  // implementer; subagents/ultra expose multi-agent power (opt-in, gated).
+  | "model"
+  | "effort"
+  | "subagents"
+  | "ultra";
 
 export type InboundEvent =
   | {
@@ -197,6 +210,30 @@ export type TurnEvent =
 /** Opaque JSON owned by the harness adapter. The core persists, never reads. */
 export type SessionHandle = unknown;
 
+/**
+ * Per-turn harness capability configuration (M3.5). Everything here is OPAQUE to
+ * the core: it persists these values and passes them through, never interpreting
+ * them as policy (DESIGN §1 north-star, §4 ports). The adapter maps `model`
+ * tokens to concrete SDK model IDs and validates `effort`; `subagents`/`workflows`
+ * toggle multi-agent tools (still behind the §4 gate — a PreToolUse hook fires
+ * inside subagents too, so their tool calls are gated exactly like the main
+ * agent's); `projectConfig` loads a TRUSTED repo's settings/skills. The core
+ * validates `model`/`effort` against `HarnessCapabilities` before they ever
+ * reach here (a bad value is rejected at the command, never silently applied).
+ */
+export interface HarnessTurnOptions {
+  /** Model token (e.g. "opus"); the adapter maps it to the SDK model ID. Omit = default. */
+  model?: string;
+  /** Reasoning effort (e.g. "high"|"xhigh"|"max"); passed through. Omit = default. */
+  effort?: string;
+  /** Enable subagent tools (Agent/Task). Default off — Tier B, architect opt-in. */
+  subagents?: boolean;
+  /** Enable the Workflow tool (multi-agent orchestration). Default off — Tier B. */
+  workflows?: boolean;
+  /** Load the repo's project settings + skills. Tier C, TRUSTED repos only. */
+  projectConfig?: boolean;
+}
+
 export interface TurnInput {
   text: string;
   /**
@@ -206,6 +243,11 @@ export interface TurnInput {
    * the session's remaining headroom; omitted = no per-turn limit.
    */
   budgetUsd?: number;
+  /**
+   * Per-turn harness capabilities (M3.5) — opaque config the core forwards, never
+   * core policy. Omitted = the adapter's own defaults.
+   */
+  harness?: HarnessTurnOptions;
 }
 
 export interface HarnessSession {
@@ -219,6 +261,14 @@ export interface HarnessCapabilities {
   resumeAfterRestart: boolean;
   costReporting: boolean;
   imageInput: boolean;
+  /**
+   * Model tokens the architect may select (M3.5), e.g. ["opus","sonnet","fable"].
+   * The core validates an architect's `@Conduit model <x>` against this list —
+   * membership only, so it never needs to know SDK model IDs (kept in the adapter).
+   */
+  supportedModels: string[];
+  /** Reasoning-effort levels the architect may select (M3.5), e.g. ["low",…,"max"]. */
+  supportedEfforts: string[];
 }
 
 export interface HarnessAdapter {
@@ -263,4 +313,21 @@ export interface RepoConfig {
    * back to the daemon-wide default.
    */
   costCapUsd?: number;
+  /**
+   * Per-repo default model/effort tokens (M3.5 Tier A). Seeded onto each new
+   * session (the architect can then change them per thread); opaque tokens
+   * validated by the harness adapter. `undefined` = fall back to the daemon-wide
+   * default (Opus + high).
+   */
+  defaultModel?: string;
+  defaultEffort?: string;
+  /**
+   * Trust flag (M3.5 Tier C). A trusted repo loads its own project config —
+   * `CLAUDE.md`, skills, `.claude/agents`, and daemon-configured MCP — while the
+   * §4 gate still applies. Default (false/undefined) keeps the untrusted-repo
+   * isolation (`settingSources: []`). Set ONLY for repos the admin vouches for:
+   * it also loads that repo's permissions/hooks/MCP. Build-time safety: the
+   * throwaway `testrepo` stays untrusted.
+   */
+  trusted?: boolean;
 }

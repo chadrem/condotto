@@ -104,6 +104,47 @@ describe("loadConfig repos", () => {
     expect(() => loadConfig({ CONDUIT_MAX_CONCURRENT_TURNS: "0", ...NO_ROLES })).toThrow(/positive integer/);
   });
 
+  test("per-repo default model/effort and the trust flag parse (M3.5)", () => {
+    const file = reposFile([
+      { name: "webapp", path: "/srv/webapp", defaultModel: "sonnet", defaultEffort: "xhigh", trusted: true },
+      { name: "bare", path: "/srv/bare" },
+      // A non-boolean `trusted` must NOT enable trust — it opens repo config/MCP.
+      { name: "sneaky", path: "/srv/sneaky", trusted: "yes" },
+    ]);
+    const cfg = loadConfig({ CONDUIT_REPOS_FILE: file, ...NO_ROLES });
+    const webapp = cfg.repos.find((r) => r.name === "webapp")!;
+    expect(webapp.defaultModel).toBe("sonnet");
+    expect(webapp.defaultEffort).toBe("xhigh");
+    expect(webapp.trusted).toBe(true);
+    const bare = cfg.repos.find((r) => r.name === "bare")!;
+    expect(bare.defaultModel).toBeUndefined();
+    expect(bare.defaultEffort).toBeUndefined();
+    expect(bare.trusted).toBe(false);
+    expect(cfg.repos.find((r) => r.name === "sneaky")!.trusted).toBe(false);
+  });
+
+  test("daemon-wide default model/effort defaults to Opus + high, overridable by env (M3.5)", () => {
+    const def = loadConfig({ CONDUIT_REPOS_FILE: "/nonexistent/repos.json", ...NO_ROLES });
+    expect(def.defaultModel).toBe("opus");
+    expect(def.defaultEffort).toBe("high");
+    const over = loadConfig({
+      CONDUIT_REPOS_FILE: "/nonexistent/repos.json",
+      CONDUIT_DEFAULT_MODEL: "sonnet",
+      CONDUIT_DEFAULT_EFFORT: "xhigh",
+      ...NO_ROLES,
+    });
+    expect(over.defaultModel).toBe("sonnet");
+    expect(over.defaultEffort).toBe("xhigh");
+  });
+
+  test("the throwaway testrepo is untrusted with no model/effort override (M3.5)", () => {
+    const config = loadConfig({ CONDUIT_REPOS_FILE: "/nonexistent/repos.json", ...NO_ROLES });
+    const testrepo = config.repos.find((r) => r.name === "testrepo")!;
+    expect(testrepo.trusted).toBe(false);
+    expect(testrepo.defaultModel).toBeUndefined();
+    expect(testrepo.defaultEffort).toBeUndefined();
+  });
+
   test("safeBashAllowlist defaults to the conservative set and can be overridden", () => {
     const def = loadConfig({ CONDUIT_REPOS_FILE: "/nonexistent/repos.json", ...NO_ROLES });
     expect(def.repos[0]!.safeBashAllowlist).toContain("git status");

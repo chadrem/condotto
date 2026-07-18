@@ -789,3 +789,116 @@ describe("concurrency (M3, DESIGN §7)", () => {
     expect(w.store.getSessionByConversation("fake", "f11.000001")!.status).toBe("stopped");
   });
 });
+
+describe("harness capabilities — model & effort (M3.5 Tier A)", () => {
+  async function assign(w: World, id: string): Promise<void> {
+    await w.manager.handleEvent({ kind: "command", conv: conv(id), author: architect, name: "assign", args: "" });
+  }
+
+  test("assign advertises the default model & effort (Opus + high)", async () => {
+    const w = makeWorld();
+    await assign(w, "cap1.000001");
+    const intro = w.surface.posts.at(-1)!.text;
+    expect(intro).toContain("model `opus`");
+    expect(intro).toContain("effort `high`");
+  });
+
+  test("architect sets the model; it persists and reaches the next turn", async () => {
+    const w = makeWorld();
+    const c = conv("cap2.000001");
+    await assign(w, "cap2.000001");
+    await w.manager.handleEvent({ kind: "command", conv: c, author: architect, name: "model", args: "sonnet" });
+    expect(w.store.getSessionByConversation("fake", "cap2.000001")!.model).toBe("sonnet");
+    expect(w.surface.posts.at(-1)!.text).toContain("Model set to `sonnet`");
+
+    await w.manager.handleEvent({ kind: "message", conv: c, author: architect, text: "hi", attachments: [] });
+    const last = w.harness.allTurns.at(-1)!;
+    expect(last.harness?.model).toBe("sonnet");
+    expect(last.harness?.effort).toBe("high"); // unchanged default
+    expect(last.harness?.subagents).toBe(false); // Tier B off by default
+    expect(last.harness?.workflows).toBe(false);
+  });
+
+  test("architect sets the effort; it persists and reaches the next turn", async () => {
+    const w = makeWorld();
+    const c = conv("cap3.000001");
+    await assign(w, "cap3.000001");
+    await w.manager.handleEvent({ kind: "command", conv: c, author: architect, name: "effort", args: "xhigh" });
+    expect(w.store.getSessionByConversation("fake", "cap3.000001")!.effort).toBe("xhigh");
+    await w.manager.handleEvent({ kind: "message", conv: c, author: architect, text: "hi", attachments: [] });
+    expect(w.harness.allTurns.at(-1)!.harness?.effort).toBe("xhigh");
+  });
+
+  test("a member cannot change model or effort", async () => {
+    const w = makeWorld();
+    const c = conv("cap4.000001");
+    await assign(w, "cap4.000001");
+    await w.manager.handleEvent({ kind: "command", conv: c, author: member, name: "model", args: "sonnet" });
+    expect(w.surface.posts.at(-1)!.text).toContain("Only architects");
+    expect(w.store.getSessionByConversation("fake", "cap4.000001")!.model).toBeNull();
+    await w.manager.handleEvent({ kind: "command", conv: c, author: member, name: "effort", args: "max" });
+    expect(w.surface.posts.at(-1)!.text).toContain("Only architects");
+    expect(w.store.getSessionByConversation("fake", "cap4.000001")!.effort).toBeNull();
+  });
+
+  test("an unsupported model/effort is rejected with usage, leaving the session unchanged", async () => {
+    const w = makeWorld();
+    const c = conv("cap5.000001");
+    await assign(w, "cap5.000001");
+    await w.manager.handleEvent({ kind: "command", conv: c, author: architect, name: "model", args: "gpt-9" });
+    const msg = w.surface.posts.at(-1)!.text;
+    expect(msg).toContain("Usage");
+    expect(msg).toContain("opus"); // lists the supported set
+    expect(w.store.getSessionByConversation("fake", "cap5.000001")!.model).toBeNull();
+    await w.manager.handleEvent({ kind: "command", conv: c, author: architect, name: "effort", args: "ludicrous" });
+    expect(w.surface.posts.at(-1)!.text).toContain("Usage");
+    expect(w.store.getSessionByConversation("fake", "cap5.000001")!.effort).toBeNull();
+  });
+
+  test("a repo default_model/effort seeds the session at assign", async () => {
+    const w = makeWorld();
+    w.store.upsertRepo({
+      name: "testrepo",
+      path: repoPath,
+      defaultBranch: "main",
+      safeBashAllowlist: ["git status"],
+      landCmd: "echo land-ran",
+      deployCmd: "echo deploy-ran",
+      defaultModel: "fable",
+      defaultEffort: "xhigh",
+    });
+    await assign(w, "cap6.000001");
+    const s = w.store.getSessionByConversation("fake", "cap6.000001")!;
+    expect(s.model).toBe("fable");
+    expect(s.effort).toBe("xhigh");
+    expect(w.surface.posts.at(-1)!.text).toContain("model `fable`");
+  });
+
+  test("an unsupported repo default falls back to the daemon default (Opus)", async () => {
+    const w = makeWorld();
+    w.store.upsertRepo({
+      name: "testrepo",
+      path: repoPath,
+      defaultBranch: "main",
+      safeBashAllowlist: ["git status"],
+      landCmd: "echo land-ran",
+      deployCmd: "echo deploy-ran",
+      defaultModel: "bogus-model",
+    });
+    await assign(w, "cap7.000001");
+    const s = w.store.getSessionByConversation("fake", "cap7.000001")!;
+    expect(s.model).toBeNull(); // not applied
+    expect(w.surface.posts.at(-1)!.text).toContain("model `opus`"); // effective default
+  });
+
+  test("a default session forwards Opus + high to the harness on a normal turn", async () => {
+    const w = makeWorld();
+    const c = conv("cap8.000001");
+    await assign(w, "cap8.000001");
+    await w.manager.handleEvent({ kind: "message", conv: c, author: architect, text: "hello", attachments: [] });
+    const last = w.harness.allTurns.at(-1)!;
+    expect(last.harness?.model).toBe("opus");
+    expect(last.harness?.effort).toBe("high");
+    expect(last.harness?.projectConfig).toBe(false); // testrepo untrusted
+  });
+});

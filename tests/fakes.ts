@@ -7,6 +7,7 @@ import type {
   HarnessAdapter,
   HarnessCapabilities,
   HarnessSession,
+  HarnessTurnOptions,
   InboundEvent,
   OutboundMessage,
   PostedRef,
@@ -98,7 +99,7 @@ class FakeHarnessSession implements HarnessSession {
 
   async *turn(input: TurnInput, gate: GateFn): AsyncIterable<TurnEvent> {
     this.turns.push(input);
-    this.parent.allTurns.push({ cwd: this.cwd, text: input.text, budgetUsd: input.budgetUsd });
+    this.parent.allTurns.push({ cwd: this.cwd, text: input.text, budgetUsd: input.budgetUsd, harness: input.harness });
     if (this.parent.beforeReply) await this.parent.beforeReply();
     // Simulate a turn that ends in an error carrying a cost (e.g. the SDK's
     // error_max_budget_usd), for cost-accounting tests.
@@ -214,12 +215,14 @@ export class FakeHarness implements HarnessAdapter {
     resumeAfterRestart: true,
     costReporting: true,
     imageInput: false,
+    supportedModels: ["opus", "sonnet", "fable"],
+    supportedEfforts: ["low", "medium", "high", "xhigh", "max"],
   };
 
   sessionSeq = 0;
   created: { cwd: string; system: string }[] = [];
   resumed: { handle: SessionHandle; cwd: string; system: string }[] = [];
-  allTurns: { cwd: string; text: string; budgetUsd?: number }[] = [];
+  allTurns: { cwd: string; text: string; budgetUsd?: number; harness?: HarnessTurnOptions }[] = [];
   /** Tool calls the gate allowed to run (approved or auto-allowed). */
   executed: ToolCall[] = [];
   /** Queue of scripted tool-call lists, one per upcoming fresh turn. */

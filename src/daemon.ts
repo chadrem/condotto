@@ -48,10 +48,21 @@ async function main(): Promise<void> {
   const manager = new SessionManager(store, harness, worktrees, log, {
     defaultCostCapUsd: config.defaultCostCapUsd,
     maxConcurrentTurns: config.maxConcurrentTurns,
+    defaultModel: config.defaultModel,
+    defaultEffort: config.defaultEffort,
   });
+  // Warn loudly if the configured default model/effort isn't one the harness
+  // accepts — better a boot-time warning than a silent per-turn fallback (M3.5).
+  if (!harness.capabilities.supportedModels.includes(config.defaultModel)) {
+    log(`[daemon] WARNING: default model "${config.defaultModel}" not in harness models [${harness.capabilities.supportedModels.join(", ")}] — turns fall back to the SDK default`);
+  }
+  if (!harness.capabilities.supportedEfforts.includes(config.defaultEffort)) {
+    log(`[daemon] WARNING: default effort "${config.defaultEffort}" not in harness efforts [${harness.capabilities.supportedEfforts.join(", ")}]`);
+  }
   log(
     `[daemon] cost cap $${config.defaultCostCapUsd}/thread (default), ` +
-      `max ${config.maxConcurrentTurns} concurrent turns`,
+      `max ${config.maxConcurrentTurns} concurrent turns, ` +
+      `default model ${config.defaultModel} @ ${config.defaultEffort} effort`,
   );
 
   // Surface credentials belong to the adapter, not core config — the

@@ -4,6 +4,7 @@ import type {
   HarnessAdapter,
   HarnessCapabilities,
   HarnessSession,
+  HarnessTurnOptions,
   SessionHandle,
   TurnEvent,
   TurnInput,
@@ -48,11 +49,55 @@ interface ClaudeCodeHandle {
 // `allowedTools` auto-approves reads (the hook still denies out-of-worktree
 // reads — a hook `deny` beats an allow rule). Write/Edit/Bash are deliberately
 // NEITHER allowed (they must gate) NOR disallowed (they must be reachable so the
-// agent can propose them). `disallowedTools` removes only tools out of scope for
-// M2 — agent-meta and network — from context entirely; the policy engine still
-// classifies them as a backstop if the set ever drifts.
+// agent can propose them).
 const ALLOWED_TOOLS = ["Read", "Glob", "Grep", "TodoWrite"];
-const DISALLOWED_TOOLS = ["Task", "ExitPlanMode", "SlashCommand", "WebFetch", "WebSearch"];
+// Always removed from context, regardless of capability flags: plan-mode meta,
+// slash commands, and network reads are out of scope for the implementer.
+const BASE_DISALLOWED = ["ExitPlanMode", "SlashCommand", "WebFetch", "WebSearch"];
+// Multi-agent tools, disabled BY DEFAULT (M3.5 Tier B is architect opt-in). Both
+// the current `Agent` name and the legacy `Task` alias are listed so "subagents
+// off" is genuinely off regardless of which the runtime exposes. Un-disallowed
+// per-turn only when the session enables the capability; even then every tool
+// call a subagent makes still hits the PreToolUse gate (agent_id-tagged).
+const SUBAGENT_TOOLS = ["Agent", "Task"];
+const WORKFLOW_TOOLS = ["Workflow"];
+
+// M3.5 Tier A. The core passes an opaque model token; the adapter is the only
+// place that knows SDK model IDs (keeps the port clean). Unrecognized tokens
+// pass through (the SDK also accepts bare aliases / full IDs), but the core has
+// already validated against `supportedModels`, so that path is belt-and-braces.
+const MODEL_IDS: Record<string, string> = {
+  opus: "claude-opus-4-8",
+  sonnet: "claude-sonnet-5",
+  fable: "claude-fable-5",
+};
+const SUPPORTED_MODELS = Object.keys(MODEL_IDS);
+// Independent of extended thinking. xhigh needs Fable 5 / Opus 4.7+ / Sonnet 5
+// (our Opus default qualifies); the SDK silently falls back to `high` elsewhere.
+const SUPPORTED_EFFORTS = ["low", "medium", "high", "xhigh", "max"];
+
+function resolveModel(token: string | undefined): string | undefined {
+  if (!token) return undefined;
+  return MODEL_IDS[token] ?? token;
+}
+function resolveEffort(token: string | undefined): string | undefined {
+  return token && SUPPORTED_EFFORTS.includes(token) ? token : undefined;
+}
+
+/**
+ * Build the per-turn tool posture from the session's harness capabilities. Reads
+ * stay auto-allowed; write/bash stay gated (absent from both lists). Subagent /
+ * workflow tools are removed from context unless the architect opted in.
+ */
+function toolPosture(h: HarnessTurnOptions | undefined): {
+  allowedTools: string[];
+  disallowedTools: string[];
+} {
+  const disallowed = [...BASE_DISALLOWED];
+  if (!h?.subagents) disallowed.push(...SUBAGENT_TOOLS);
+  if (!h?.workflows) disallowed.push(...WORKFLOW_TOOLS);
+  return { allowedTools: ALLOWED_TOOLS, disallowedTools: disallowed };
+}
 
 /** Deny message for a gated call that arrived batched (defer unavailable). */
 const BATCH_GATE_DENY =
@@ -165,15 +210,32 @@ class ClaudeCodeSession implements HarnessSession {
       return { hookSpecificOutput: { hookEventName: "PreToolUse" as const, ...out } };
     };
 
+    // M3.5: per-turn harness capabilities (opaque config from the core). model/
+    // effort tune the implementer; subagents/workflows toggle multi-agent tools;
+    // projectConfig loads a trusted repo's settings (Tier C).
+    const h = input.harness;
+    const { allowedTools, disallowedTools } = toolPosture(h);
+    const model = resolveModel(h?.model);
+    const effort = resolveEffort(h?.effort);
+    // Tier C: a trusted repo loads its own project settings + skills; the §4 gate
+    // still applies (the PreToolUse hook fires regardless of settingSources, and a
+    // hook deny/defer beats any repo allow-rule per SDK precedence). Untrusted
+    // (default) stays isolated: no repo CLAUDE.md/.mcp.json/.claude/, no skills.
+    const settingSources: ("user" | "project" | "local")[] = h?.projectConfig ? ["project"] : [];
+
     const q = query({
       prompt: input.text,
       options: {
         cwd: this.cwd,
         resume: this._handle.sessionId ?? undefined,
         systemPrompt: { type: "preset", preset: "claude_code", append: this.system },
-        allowedTools: ALLOWED_TOOLS,
-        disallowedTools: DISALLOWED_TOOLS,
+        allowedTools,
+        disallowedTools,
         permissionMode: "default",
+        // M3.5 Tier A: exact SDK model id + reasoning effort. Omitted = SDK
+        // defaults; the core always supplies them (default Opus + high).
+        ...(model ? { model } : {}),
+        ...(effort ? { effort: effort as "low" | "medium" | "high" | "xhigh" | "max" } : {}),
         // Intra-turn runaway brake (M3, DESIGN §4). The SDK stops the turn if it
         // exceeds this, returning an `error_max_budget_usd` result we surface as
         // a clear Slack notice (never a silent stall). The core passes the
@@ -181,10 +243,12 @@ class ClaudeCodeSession implements HarnessSession {
         ...(typeof input.budgetUsd === "number" && input.budgetUsd > 0
           ? { maxBudgetUsd: input.budgetUsd }
           : {}),
-        // Never load filesystem settings (CLAUDE.md, .mcp.json, .claude/) from
-        // the worktree: repo content is untrusted input and must not be able to
-        // register MCP servers or alter permissions (DESIGN.md §4).
-        settingSources: [],
+        // Tier C: load the trusted repo's skills alongside its project settings.
+        ...(h?.projectConfig ? { skills: "all" as const } : {}),
+        // Untrusted (default): never load filesystem settings (CLAUDE.md,
+        // .mcp.json, .claude/) from the worktree — repo content is untrusted
+        // input and must not register MCP servers or alter permissions (§4).
+        settingSources,
         hooks: { PreToolUse: [{ hooks: [gateHook] }] },
         // Deny-by-default backstop. In the normal single-call flow the hook is
         // terminal and this is never reached; it only fires when a gated call's
@@ -345,6 +409,9 @@ export class ClaudeCodeAdapter implements HarnessAdapter {
     resumeAfterRestart: true,
     costReporting: true, // notional API pricing on subscription auth — usage governance only
     imageInput: true, // the runtime accepts images; the TurnInput image path arrives with M3 attachments
+    // M3.5: the tokens the core validates an architect's model/effort against.
+    supportedModels: SUPPORTED_MODELS, // ["opus","sonnet","fable"]
+    supportedEfforts: SUPPORTED_EFFORTS, // ["low","medium","high","xhigh","max"]
   };
 
   async create(opts: { cwd: string; system: string }): Promise<HarnessSession> {

@@ -77,6 +77,57 @@ describe("store sessions", () => {
     expect(store.getRepo("r2")?.safe_bash_allowlist).toEqual([]);
   });
 
+  test("session model/effort/subagents/workflows seed on create and default off (M3.5)", () => {
+    const store = memoryStore();
+    // Omitted → model/effort null (daemon default), flags 0 (opt-in, off).
+    store.createSession({ ...baseSession, id: "s1", conversation_id: "1.1" });
+    const bare = store.getSession("s1")!;
+    expect(bare.model).toBeNull();
+    expect(bare.effort).toBeNull();
+    expect(bare.subagents).toBe(0);
+    expect(bare.workflows).toBe(0);
+    // Seeded from a repo default.
+    store.createSession({ ...baseSession, id: "s2", conversation_id: "1.2", model: "sonnet", effort: "xhigh" });
+    const seeded = store.getSession("s2")!;
+    expect(seeded.model).toBe("sonnet");
+    expect(seeded.effort).toBe("xhigh");
+  });
+
+  test("session model/effort/subagents/workflows setters (M3.5)", () => {
+    const store = memoryStore();
+    store.createSession({ ...baseSession, id: "s1", conversation_id: "1.1" });
+    store.setSessionModel("s1", "fable");
+    store.setSessionEffort("s1", "max");
+    store.setSessionSubagents("s1", true);
+    store.setSessionWorkflows("s1", true);
+    let row = store.getSession("s1")!;
+    expect(row.model).toBe("fable");
+    expect(row.effort).toBe("max");
+    expect(row.subagents).toBe(1);
+    expect(row.workflows).toBe(1);
+    // Toggling back off, and clearing model back to the daemon default (null).
+    store.setSessionSubagents("s1", false);
+    store.setSessionModel("s1", null);
+    row = store.getSession("s1")!;
+    expect(row.subagents).toBe(0);
+    expect(row.model).toBeNull();
+  });
+
+  test("repo default model/effort and trust flag round-trip (M3.5)", () => {
+    const store = memoryStore();
+    store.upsertRepo({ name: "r", path: "/tmp/r", defaultBranch: "main", defaultModel: "sonnet", defaultEffort: "xhigh", trusted: true });
+    const r = store.getRepo("r")!;
+    expect(r.default_model).toBe("sonnet");
+    expect(r.default_effort).toBe("xhigh");
+    expect(r.trusted).toBe(1);
+    // Upsert without them resets to null/untrusted (config stays authoritative).
+    store.upsertRepo({ name: "r", path: "/tmp/r", defaultBranch: "main" });
+    const r2 = store.getRepo("r")!;
+    expect(r2.default_model).toBeNull();
+    expect(r2.default_effort).toBeNull();
+    expect(r2.trusted).toBe(0);
+  });
+
   test("repo test/land/deploy commands and cost cap round-trip (M3)", () => {
     const store = memoryStore();
     store.upsertRepo({

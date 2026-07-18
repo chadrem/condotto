@@ -23,6 +23,15 @@ export interface SessionRow {
   status: SessionStatus;
   /** Per-thread cost ceiling in USD (M3); null = use the daemon-wide default. */
   budget_limit_usd: number | null;
+  /**
+   * Harness capability state (M3.5). model/effort are opaque tokens (null = fall
+   * back to the daemon-wide default); subagents/workflows are 0/1 flags gating
+   * the multi-agent tools (default 0 — architect opt-in, Tier B).
+   */
+  model: string | null;
+  effort: string | null;
+  subagents: number;
+  workflows: number;
   created_at: string;
   last_active_at: string;
 }
@@ -40,6 +49,11 @@ export interface RepoRow {
   land_cmd: string | null;
   deploy_cmd: string | null;
   cost_cap_usd: number | null;
+  /** Per-repo default model/effort tokens (M3.5); null = daemon-wide default. */
+  default_model: string | null;
+  default_effort: string | null;
+  /** Trust flag (M3.5 Tier C): 1 loads project config/skills/MCP; 0 stays isolated. */
+  trusted: number;
 }
 
 interface RawRepoRow extends Omit<RepoRow, "safe_bash_allowlist"> {
@@ -210,6 +224,17 @@ export class Store {
     this.ensureColumn("repos", "test_cmd", "TEXT");
     this.ensureColumn("repos", "cost_cap_usd", "REAL");
     this.ensureColumn("sessions", "budget_limit_usd", "REAL");
+
+    // M3.5: per-session harness capability state + per-repo defaults/trust. NOT
+    // NULL flags carry a DEFAULT so pre-M3.5 rows migrate cleanly (subagents/
+    // workflows/trusted default off — the conservative posture).
+    this.ensureColumn("sessions", "model", "TEXT");
+    this.ensureColumn("sessions", "effort", "TEXT");
+    this.ensureColumn("sessions", "subagents", "INTEGER NOT NULL DEFAULT 0");
+    this.ensureColumn("sessions", "workflows", "INTEGER NOT NULL DEFAULT 0");
+    this.ensureColumn("repos", "default_model", "TEXT");
+    this.ensureColumn("repos", "default_effort", "TEXT");
+    this.ensureColumn("repos", "trusted", "INTEGER NOT NULL DEFAULT 0");
   }
 
   private ensureColumn(table: string, column: string, ddl: string): void {
@@ -236,16 +261,22 @@ export class Store {
     landCmd?: string;
     deployCmd?: string;
     costCapUsd?: number;
+    defaultModel?: string;
+    defaultEffort?: string;
+    trusted?: boolean;
   }): void {
     this.db
       .query(
         `INSERT INTO repos
            (id, name, path, default_branch, safe_bash_allowlist,
-            test_cmd, land_cmd, deploy_cmd, cost_cap_usd)
-         VALUES ($id, $name, $path, $branch, $allow, $test, $land, $deploy, $cap)
+            test_cmd, land_cmd, deploy_cmd, cost_cap_usd,
+            default_model, default_effort, trusted)
+         VALUES ($id, $name, $path, $branch, $allow, $test, $land, $deploy, $cap,
+                 $model, $effort, $trusted)
          ON CONFLICT(name) DO UPDATE SET
            path = $path, default_branch = $branch, safe_bash_allowlist = $allow,
-           test_cmd = $test, land_cmd = $land, deploy_cmd = $deploy, cost_cap_usd = $cap`,
+           test_cmd = $test, land_cmd = $land, deploy_cmd = $deploy, cost_cap_usd = $cap,
+           default_model = $model, default_effort = $effort, trusted = $trusted`,
       )
       .run({
         id: repo.name,
@@ -257,6 +288,9 @@ export class Store {
         land: repo.landCmd ?? null,
         deploy: repo.deployCmd ?? null,
         cap: repo.costCapUsd ?? null,
+        model: repo.defaultModel ?? null,
+        effort: repo.defaultEffort ?? null,
+        trusted: repo.trusted ? 1 : 0,
       });
   }
 
@@ -264,7 +298,8 @@ export class Store {
     const row = this.db
       .query<RawRepoRow, { name: string }>(
         `SELECT id, name, path, default_branch, safe_bash_allowlist,
-                test_cmd, land_cmd, deploy_cmd, cost_cap_usd
+                test_cmd, land_cmd, deploy_cmd, cost_cap_usd,
+                default_model, default_effort, trusted
          FROM repos WHERE name = $name`,
       )
       .get({ name });
@@ -279,6 +314,9 @@ export class Store {
       land_cmd: row.land_cmd,
       deploy_cmd: row.deploy_cmd,
       cost_cap_usd: row.cost_cap_usd,
+      default_model: row.default_model,
+      default_effort: row.default_effort,
+      trusted: row.trusted,
     };
   }
 
@@ -293,21 +331,33 @@ export class Store {
   // -- sessions -------------------------------------------------------------
 
   createSession(
-    s: Omit<SessionRow, "created_at" | "last_active_at" | "budget_limit_usd"> & {
+    s: Omit<
+      SessionRow,
+      "created_at" | "last_active_at" | "budget_limit_usd" | "model" | "effort" | "subagents" | "workflows"
+    > & {
       budget_limit_usd?: number | null;
+      model?: string | null;
+      effort?: string | null;
+      subagents?: number;
+      workflows?: number;
     },
   ): SessionRow {
     const now = new Date().toISOString();
     const budget = s.budget_limit_usd ?? null;
+    const model = s.model ?? null;
+    const effort = s.effort ?? null;
+    const subagents = s.subagents ?? 0;
+    const workflows = s.workflows ?? 0;
     try {
       this.db
         .query(
           `INSERT INTO sessions
              (id, surface_id, conversation_id, channel_id, repo_id, worktree_path,
               harness_id, harness_session_handle, branch, status, budget_limit_usd,
-              created_at, last_active_at)
+              model, effort, subagents, workflows, created_at, last_active_at)
            VALUES ($id, $surface_id, $conversation_id, $channel_id, $repo_id, $worktree_path,
-                   $harness_id, $handle, $branch, $status, $budget, $now, $now)`,
+                   $harness_id, $handle, $branch, $status, $budget,
+                   $model, $effort, $subagents, $workflows, $now, $now)`,
         )
         .run({
           id: s.id,
@@ -321,6 +371,10 @@ export class Store {
           branch: s.branch,
           status: s.status,
           budget,
+          model,
+          effort,
+          subagents,
+          workflows,
           now,
         });
     } catch (err) {
@@ -331,7 +385,16 @@ export class Store {
       }
       throw err;
     }
-    return { ...s, budget_limit_usd: budget, created_at: now, last_active_at: now };
+    return {
+      ...s,
+      budget_limit_usd: budget,
+      model,
+      effort,
+      subagents,
+      workflows,
+      created_at: now,
+      last_active_at: now,
+    };
   }
 
   getSessionByConversation(surfaceId: string, conversationId: string): SessionRow | null {
@@ -408,6 +471,26 @@ export class Store {
   /** Raise/lower a session's cost ceiling (architect `@Conduit budget`, M3). */
   setSessionBudgetLimit(id: string, usd: number): void {
     this.db.query(`UPDATE sessions SET budget_limit_usd = $usd WHERE id = $id`).run({ id, usd });
+  }
+
+  /** Set a session's model token (M3.5, `@Conduit model`). null = daemon default. */
+  setSessionModel(id: string, model: string | null): void {
+    this.db.query(`UPDATE sessions SET model = $model WHERE id = $id`).run({ id, model });
+  }
+
+  /** Set a session's effort token (M3.5, `@Conduit effort`). null = daemon default. */
+  setSessionEffort(id: string, effort: string | null): void {
+    this.db.query(`UPDATE sessions SET effort = $effort WHERE id = $id`).run({ id, effort });
+  }
+
+  /** Toggle a session's subagent tools (M3.5 Tier B, `@Conduit subagents`). */
+  setSessionSubagents(id: string, on: boolean): void {
+    this.db.query(`UPDATE sessions SET subagents = $v WHERE id = $id`).run({ id, v: on ? 1 : 0 });
+  }
+
+  /** Toggle a session's Workflow tool (M3.5 Tier B, part of the `ultra` preset). */
+  setSessionWorkflows(id: string, on: boolean): void {
+    this.db.query(`UPDATE sessions SET workflows = $v WHERE id = $id`).run({ id, v: on ? 1 : 0 });
   }
 
   /**

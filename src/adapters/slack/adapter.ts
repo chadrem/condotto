@@ -253,7 +253,10 @@ export class SlackAdapter implements SurfaceAdapter {
    */
   private mentionCommand(
     text: string,
-  ): { name: "assign" | "stop" | "status" | "land" | "deploy" | "budget"; args: string } | null {
+  ): {
+    name: "assign" | "stop" | "status" | "land" | "deploy" | "budget" | "model" | "effort";
+    args: string;
+  } | null {
     if (!this.botUserId) return null;
     const m = text.match(new RegExp(`^\\s*<@${this.botUserId}(?:\\|[^>]*)?>\\s*(.*)$`, "s"));
     if (!m) return null;
@@ -271,6 +274,12 @@ export class SlackAdapter implements SurfaceAdapter {
     if (first === "deploy" && words.length === 1) return { name: "deploy", args: "" };
     // `@Conduit budget 20` — the amount is the one argument.
     if (first === "budget" && words.length === 2) return { name: "budget", args: words[1]! };
+    // M3.5 Tier A harness controls, each with exactly one argument:
+    // `@Conduit model opus`, `@Conduit effort xhigh`. The token is validated in
+    // the core against the harness capabilities, so the adapter just forwards it.
+    // (subagents/ultra land in Tier B, after the subagent-gate spike.)
+    if (first === "model" && words.length === 2) return { name: "model", args: words[1]! };
+    if (first === "effort" && words.length === 2) return { name: "effort", args: words[1]! };
     return null;
   }
 
