@@ -93,7 +93,12 @@ describe("assign", () => {
     expect(row!.branch).toStartWith("conduit/");
     expect(row!.worktree_path).toStartWith(worktreesRoot);
     expect(existsSync(join(row!.worktree_path, "README.md"))).toBe(true);
-    expect(w.surface.posts.at(-1)?.text).toContain("I'm on it");
+    const intro = w.surface.posts.at(-1)!.text;
+    expect(intro).toContain("I'm on it");
+    // The intro advertises the thread commands (discoverable in-thread, not just docs).
+    expect(intro).toContain("@Conduit land");
+    expect(intro).toContain("@Conduit budget");
+    expect(intro).toContain("@Conduit stop");
   });
 
   test("assigning an already-assigned conversation is refused", async () => {

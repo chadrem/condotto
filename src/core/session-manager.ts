@@ -93,6 +93,20 @@ function conduitSystemPrompt(opts: {
   ].join("\n");
 }
 
+/**
+ * A short, one-time summary of what people can do in an assigned thread. Posted
+ * when a session starts or reactivates so the commands are discoverable in the
+ * thread itself, not only in the docs. Kept terse (Slack ergonomics, Appendix A).
+ */
+function threadCommandHelp(): string {
+  return [
+    `Architect commands — mention me in this thread:`,
+    `• \`@Conduit land\` / \`@Conduit deploy\` — run the repo's ship path (gated)`,
+    `• \`@Conduit budget <usd>\` — raise this thread's cost budget`,
+    `• \`@Conduit status\` — list sessions · \`@Conduit stop\` — end this session`,
+  ].join("\n");
+}
+
 interface LiveEntry {
   harness: HarnessSession | null;
   chain: Promise<void>;
@@ -268,7 +282,10 @@ export class SessionManager {
           event: "session_reactivated",
         });
         await surface.post(conv, {
-          text: `Session reactivated — repo ${existing.repo_id}, branch ${existing.branch}. I still have the prior context.`,
+          text:
+            `Session reactivated — repo \`${existing.repo_id}\`, branch \`${existing.branch}\`. ` +
+            `I still have the prior context.\n\n` +
+            threadCommandHelp(),
         });
       });
       await entry.chain;
@@ -316,9 +333,10 @@ export class SessionManager {
     });
     await surface.post(conv, {
       text:
-        `I'm on it — repo \`${repo.name}\`, branch \`${worktree.branch}\`. ` +
-        `Reply in this thread and I'll respond. I can read and analyze freely; ` +
-        `changes (writes, commands) need an architect's approval.`,
+        `I'm on it — repo \`${repo.name}\`, branch \`${worktree.branch}\`.\n\n` +
+        `Reply in this thread to talk — reading and analysis are free. Edits, shell ` +
+        `commands, and land/deploy pause for an architect's Approve/Deny.\n\n` +
+        threadCommandHelp(),
     });
   }
 
