@@ -27,14 +27,21 @@ import { principalKey } from "./types";
 // authority is the header `user=` id; everything inside the fence is data.
 
 const FENCE_PREFIX = "CONDUIT_BODY_";
+// The literal protocol header sentinel. Defanged in body content so no message
+// text can present a line that parses as a [conduit:event ...] header — even a
+// model that mentally un-escapes a literal "\n" into a line break (red-team).
+const HEADER_SENTINEL_RE = new RegExp("\\[conduit:", "gi");
 
 // Regexes built from ASCII escape strings (no literal control chars in source).
-// Line breaks the model might render: CRLF, CR, VT, FF, NEL, LS, PS.
-const LINE_BREAKS_RE = new RegExp("\\r\\n|[\\r\\u000B\\u000C\\u0085\\u2028\\u2029]", "g");
+// Every code point the model might render as a line break: CRLF, CR, VT, FF,
+// the info separators FS/GS/RS/US (Bidi_Class B/S), NEL, LS, PS. Normalized to
+// \n BEFORE quoting so each becomes its own quoted line — never an escape.
+const LINE_BREAKS_RE = new RegExp("\\r\\n|[\\r\\u000B\\u000C\\u001C-\\u001F\\u0085\\u2028\\u2029]", "g");
 // C0 controls (0x00-0x1F excluding tab 0x09 and newline 0x0A), DEL, C1 controls.
 const CONTROLS_RE = new RegExp("[\\u0000-\\u0008\\u000B-\\u001F\\u007F-\\u009F]", "g");
-// Bidirectional overrides / embeddings / isolates that can visually reorder text.
-const BIDI_RE = new RegExp("[\\u202A-\\u202E\\u2066-\\u2069]", "g");
+// Bidirectional format chars that can visually reorder text: the directional
+// MARKS (ALM/LRM/RLM), embeddings/overrides, and isolates.
+const BIDI_RE = new RegExp("[\\u061C\\u200E\\u200F\\u202A-\\u202E\\u2066-\\u2069]", "g");
 
 /** A fresh, unguessable fence tag. Content cannot predict it to forge a fence. */
 function freshFence(): string {
@@ -66,11 +73,13 @@ export function frameMessage(opts: {
   const name = opts.displayName ? sanitizeDisplayName(opts.displayName) : "";
 
   // Normalize every line break to \n FIRST (so real breaks become separate
-  // quoted lines), then strip residual control/bidi chars.
+  // quoted lines), then strip residual control/bidi chars, then defang the
+  // protocol header sentinel so no body line can parse as a real header.
   const cleaned = opts.text
     .replace(LINE_BREAKS_RE, "\n")
     .replace(CONTROLS_RE, "")
-    .replace(BIDI_RE, "");
+    .replace(BIDI_RE, "")
+    .replace(HEADER_SENTINEL_RE, "[ conduit:"); // space breaks the header prefix
   // Defensive: an unguessable random fence can't collide, but never let a
   // literal fence marker survive inside the body region regardless.
   const safeBody = cleaned.split(fence).join("");
