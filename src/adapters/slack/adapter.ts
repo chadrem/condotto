@@ -241,7 +241,7 @@ export class SlackAdapter implements SurfaceAdapter {
             "Inside a session thread (mention me): `@Conduit stop`, `@Conduit status`, " +
             "`@Conduit land`/`deploy` (gated), `@Conduit budget <usd>`.\n" +
             "Tune the implementer: `@Conduit model <opus|sonnet|fable>`, `@Conduit effort <low…max>`, " +
-            "`@Conduit subagents on|off`, `@Conduit ultra on|off`.\n" +
+            "`@Conduit subagents on|off`, `@Conduit workflows on|off`, `@Conduit ultra on|off`.\n" +
             "To assign an existing thread: `@Conduit assign` in that thread.",
         });
       }
@@ -256,7 +256,7 @@ export class SlackAdapter implements SurfaceAdapter {
   private mentionCommand(
     text: string,
   ): {
-    name: "assign" | "stop" | "status" | "land" | "deploy" | "budget" | "model" | "effort" | "subagents" | "ultra";
+    name: "assign" | "stop" | "status" | "land" | "deploy" | "budget" | "model" | "effort" | "subagents" | "workflows" | "ultra";
     args: string;
   } | null {
     if (!this.botUserId) return null;
@@ -284,6 +284,12 @@ export class SlackAdapter implements SurfaceAdapter {
     if (first === "effort" && words.length === 2) return { name: "effort", args: words[1]! };
     if (first === "subagents" && words.length === 2) return { name: "subagents", args: words[1]! };
     if (first === "ultra" && words.length === 2) return { name: "ultra", args: words[1]! };
+    // M3.6: `@Conduit workflows on|off`, and `@Conduit workflows write on|off`
+    // (the worktree-write opt-in). The core validates the argument.
+    if (first === "workflows" && words.length === 2) return { name: "workflows", args: words[1]! };
+    if (first === "workflows" && second === "write" && words.length === 3) {
+      return { name: "workflows", args: `write ${words[2]!}` };
+    }
     return null;
   }
 

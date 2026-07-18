@@ -58,6 +58,9 @@ export type CommandName =
   | "model"
   | "effort"
   | "subagents"
+  // M3.6 — the multi-agent Workflow tool (opt-in, gated + confined). Args are
+  // "on"|"off" or "write on"|"write off" (the worktree-write opt-in, Tier 3).
+  | "workflows"
   | "ultra";
 
 export type InboundEvent =
@@ -175,8 +178,22 @@ export interface ToolCall {
    * subagent-initiated calls more strictly: reads pass (confined), but any gated
    * action or nested spawn is denied, because a subagent call cannot be paused
    * for out-of-band approval the way a main-agent call can (spike 2026-07-18).
+   * WORKFLOW agents also carry `agentId` (M3.6): under bypassPermissions the
+   * background workflow's tool calls route through the PreToolUse hook with an
+   * `agent_id`, so the same subagent policy confines them read-only.
    */
   agentId?: string;
+  /**
+   * Set when the call reached the gate via the harness's un-deferrable backstop
+   * path (Claude Code: `canUseTool`) rather than the main PreToolUse hook (M3.6).
+   * Such a call CANNOT be paused for approval, so the policy engine confines it
+   * instead of gating: confined reads pass, and (with the worktree-write opt-in)
+   * confined writes pass, but anything that would otherwise `gate` is DENIED —
+   * never left to `defer`. This is a defence-in-depth backstop; under
+   * bypassPermissions workflow-agent calls normally hit the PreToolUse hook
+   * (agentId) instead, but a call that escapes here is still confined, not leaked.
+   */
+  escaped?: boolean;
 }
 
 /**
@@ -239,12 +256,23 @@ export interface HarnessTurnOptions {
   /** Enable subagent tools (Agent/Task). Default off — Tier B, architect opt-in. */
   subagents?: boolean;
   /**
-   * RESERVED, currently no effect (M3.5). The Workflow tool is disabled: a spike
-   * found its orchestrated agents bypass the PreToolUse gate (they carry no
-   * `agent_id`), so they can't be gated read-only. This flag is kept for a future
-   * gated Workflow integration (M4+); until then the adapter never enables the tool.
+   * Enable the multi-agent Workflow tool (M3.6, architect opt-in, default off).
+   * When on, the adapter re-enables the `Workflow` tool AND switches the query to
+   * `permissionMode: "bypassPermissions"` — which, contrary to its name, routes the
+   * background workflow's sub-agent tool calls THROUGH our PreToolUse hook (with an
+   * `agent_id`) instead of the SDK's default-deny, so the hook still gates them
+   * read-only (spike 2026-07-18, DECISIONS.md). The main agent's defer→approve→
+   * resume loop is unaffected (hooks outrank permission mode). Implies subagents.
    */
   workflows?: boolean;
+  /**
+   * The informed worktree-write opt-in (M3.6 Tier 3, architect opt-in, default off;
+   * requires `workflows`). When on, the policy lets workflow/subagent-origin calls
+   * WRITE and run bash CONFINED TO THE WORKTREE without per-write approval;
+   * out-of-worktree, credential, and production-data access stay hard-denied. The
+   * land/deploy approval remains the real review point. Off = read-only fan-out.
+   */
+  workflowWrite?: boolean;
   /** Load the repo's project settings + skills. Tier C, TRUSTED repos only. */
   projectConfig?: boolean;
 }

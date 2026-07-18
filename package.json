@@ -13,7 +13,8 @@
     "smoke:approve": "bun run scripts/smoke-gate-approve.ts",
     "smoke:concurrency": "bun run scripts/smoke-concurrency.ts",
     "smoke:model": "bun run scripts/smoke-model.ts",
-    "smoke:subagents": "bun run scripts/smoke-subagents.ts"
+    "smoke:subagents": "bun run scripts/smoke-subagents.ts",
+    "smoke:workflows": "bun run scripts/smoke-workflows.ts"
   },
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "^0.3.214",

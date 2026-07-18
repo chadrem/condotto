@@ -271,3 +271,84 @@ describe("policy: multi-agent tools (M3.5 Tier B)", () => {
     expect(evaluate(wf, { ...ctx(), workflowsEnabled: true }).action).toBe("allow");
   });
 });
+
+describe("policy: escaped (un-deferrable) calls — canUseTool backstop (M3.6)", () => {
+  // An escaped call reached the harness's un-deferrable path (canUseTool) instead
+  // of the PreToolUse hook — a batched gated call, or a workflow-agent call without
+  // an agent_id. It CANNOT defer, so the policy confines it: reads pass, would-be
+  // gates become deny, never gate.
+  const escaped = (name: string, input: unknown): ToolCall => ({ id: "", name, input, escaped: true });
+  const bashEscaped = (command: string): ToolCall => escaped("Bash", { command });
+
+  test("an escaped confined read is allowed (workflow reads stay functional)", () => {
+    expect(evaluate(escaped("Read", { file_path: "src/x.ts" }), ctx()).action).toBe("allow");
+    expect(evaluate(escaped("Grep", { pattern: "foo", path: "src" }), ctx()).action).toBe("allow");
+    expect(evaluate(escaped("Glob", { pattern: "**/*.ts" }), ctx()).action).toBe("allow");
+    expect(evaluate(escaped("TodoWrite", { todos: [] }), ctx()).action).toBe("allow");
+  });
+
+  test("an escaped out-of-worktree read is denied (confinement holds)", () => {
+    expect(evaluate(escaped("Read", { file_path: "/etc/passwd" }), ctx()).action).toBe("deny");
+    expect(evaluate(escaped("Glob", { pattern: "/Users/**/.ssh/*" }), ctx()).action).toBe("deny");
+  });
+
+  test("an escaped write/bash is DENIED (never gated — can't defer here) by default", () => {
+    for (const c of [escaped("Write", { file_path: "src/x.ts" }), escaped("Edit", { file_path: "src/x.ts" }), bashEscaped("npm run build")]) {
+      const d = evaluate(c, ctx());
+      expect(d.action).toBe("deny");
+    }
+    // The batching backstop: a batched main-agent write reaches here and must deny.
+    expect(evaluate(escaped("Write", { file_path: "src/x.ts", content: "x" }), ctx()).action).toBe("deny");
+  });
+
+  test("an escaped allowlisted bash is still denied by default (allowlist ≠ read-only)", () => {
+    const c = { ...ctx(["git status", "bun test"]) };
+    expect(evaluate(bashEscaped("git status"), c).action).toBe("deny");
+  });
+
+  test("an escaped spawn (nested workflow/subagent) is denied", () => {
+    for (const name of ["Agent", "Task", "Workflow"]) {
+      expect(evaluate(escaped(name, {}), { ...ctx(), workflowsEnabled: true, subagentsEnabled: true }).action).toBe("deny");
+    }
+  });
+});
+
+describe("policy: worktree-write opt-in for confined calls (M3.6 Tier 3)", () => {
+  // With workflowWrite on, a subagent/workflow-agent (agentId) OR escaped call may
+  // WRITE and run bash CONFINED to the worktree; out-of-worktree / credential /
+  // production-data stay hard-denied.
+  const wctx = (allowlist: string[] = []) => ({ ...ctx(allowlist), workflowWrite: true });
+  const subCall = (name: string, input: unknown): ToolCall => ({ id: "t1", name, input, agentId: "sub-abc123" });
+  const escaped = (name: string, input: unknown): ToolCall => ({ id: "", name, input, escaped: true });
+
+  test("a confined write is ALLOWED for a subagent and an escaped call", () => {
+    expect(evaluate(subCall("Write", { file_path: "src/x.ts", content: "x" }), wctx()).action).toBe("allow");
+    expect(evaluate(subCall("Edit", { file_path: "src/x.ts" }), wctx()).action).toBe("allow");
+    expect(evaluate(escaped("Write", { file_path: "src/x.ts", content: "x" }), wctx()).action).toBe("allow");
+  });
+
+  test("an out-of-worktree write stays HARD-DENIED even with the opt-in", () => {
+    expect(evaluate(subCall("Write", { file_path: "/etc/passwd", content: "x" }), wctx()).action).toBe("deny");
+    expect(evaluate(escaped("Write", { file_path: "../escape.txt", content: "x" }), wctx()).action).toBe("deny");
+  });
+
+  test("ordinary bash is allowed, but credential/prod-data bash stays denied", () => {
+    expect(evaluate(subCall("Bash", { command: "npm run build" }), wctx()).action).toBe("allow");
+    expect(evaluate(subCall("Bash", { command: "cat ~/.ssh/id_rsa" }), wctx()).action).toBe("deny"); // hard-deny
+    expect(evaluate(subCall("Bash", { command: "psql -c 'select * from users'" }), wctx()).action).toBe("deny"); // prod-data
+  });
+
+  test("network and unknown tools stay denied even with the write opt-in", () => {
+    expect(evaluate(subCall("WebFetch", { url: "http://x" }), wctx()).action).toBe("deny");
+    expect(evaluate(subCall("Mystery", {}), wctx()).action).toBe("deny");
+  });
+
+  test("nested spawns stay denied even with the write opt-in", () => {
+    expect(evaluate(subCall("Agent", {}), { ...wctx(), subagentsEnabled: true }).action).toBe("deny");
+    expect(evaluate(escaped("Workflow", {}), { ...wctx(), workflowsEnabled: true }).action).toBe("deny");
+  });
+
+  test("reads still pass with the write opt-in on", () => {
+    expect(evaluate(subCall("Read", { file_path: "src/x.ts" }), wctx()).action).toBe("allow");
+  });
+});

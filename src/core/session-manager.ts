@@ -49,6 +49,7 @@ function conduitSystemPrompt(opts: {
   landAvailable?: boolean;
   deployAvailable?: boolean;
   subagents?: boolean;
+  workflows?: boolean;
 }): string {
   const ship =
     opts.landAvailable || opts.deployAvailable
@@ -66,6 +67,14 @@ function conduitSystemPrompt(opts: {
       `investigate in parallel. Subagents CANNOT write files, run shell commands, or spawn more ` +
       `subagents — those are gated and only you, the main agent, may do them so an architect can ` +
       `approve. Use subagents to gather findings; you make the edits yourself.`
+    : null;
+  // M3.6: guidance when the architect has enabled multi-agent workflows.
+  const workflow = opts.workflows
+    ? `- For a big cross-cutting job (auditing a pattern across the whole codebase, researching every ` +
+      `call site), you can launch a multi-agent WORKFLOW (the Workflow tool) that fans out many ` +
+      `read-only agents in parallel and synthesizes their findings. Workflow agents are READ-ONLY ` +
+      `and confined to this worktree — they cannot write, run shell, or reach the network. Use a ` +
+      `workflow for parallel investigation/analysis; you (the main agent) make any edits yourself, gated.`
     : null;
   return [
     `You are Conduit, an implementer agent bound to one chat thread. Humans in the`,
@@ -96,6 +105,7 @@ function conduitSystemPrompt(opts: {
     ship,
     ...(testing ? [testing] : []),
     ...(delegation ? [delegation] : []),
+    ...(workflow ? [workflow] : []),
     ``,
     `Context: repo "${opts.repoName}", working tree on branch "${opts.branch}" (your cwd).`,
     ``,
@@ -113,7 +123,7 @@ function threadCommandHelp(): string {
   return [
     `Architect commands — mention me in this thread:`,
     `• \`@Conduit model <opus|sonnet|fable>\` / \`@Conduit effort <low…max>\` — tune the implementer`,
-    `• \`@Conduit subagents on|off\` · \`@Conduit ultra on|off\` — multi-agent power (opt-in, gated)`,
+    `• \`@Conduit subagents on|off\` · \`@Conduit workflows on|off\` · \`@Conduit ultra on|off\` — multi-agent power (opt-in, gated)`,
     `• \`@Conduit land\` / \`@Conduit deploy\` — run the repo's ship path (gated)`,
     `• \`@Conduit budget <usd>\` — raise this thread's cost budget`,
     `• \`@Conduit status\` — list sessions · \`@Conduit stop\` — end this session`,
@@ -219,21 +229,30 @@ export class SessionManager {
     return session.effort ?? this.defaultEffort;
   }
   /**
-   * "Ultra" is a preset, not stored state (M3.5): it means subagents on AND xhigh
-   * effort. (Its original Workflow-tool leg is disabled — see the adapter.) Derived
-   * so the label always reflects the effective posture, however it was reached.
+   * "Ultra" is a preset, not stored state (M3.5/M3.6): it means subagents on AND
+   * workflows on AND xhigh effort — the full "max it out" posture (the SDK analogue
+   * of CLI "ultracode"). Derived so the label always reflects the effective posture,
+   * however it was reached. (M3.6 re-folded the Workflow tool back in — it was
+   * dropped in M3.5 while workflows were disabled.)
    */
   private isUltra(session: SessionRow): boolean {
-    return session.subagents === 1 && this.effectiveEffort(session) === "xhigh";
+    return (
+      session.subagents === 1 &&
+      session.workflows === 1 &&
+      this.effectiveEffort(session) === "xhigh"
+    );
   }
-  /** One-line human summary of a session's harness capabilities (M3.5). */
+  /** One-line human summary of a session's harness capabilities (M3.5/M3.6). */
   private capabilitySummary(session: SessionRow): string {
     const parts = [
       `model \`${this.effectiveModel(session)}\``,
       `effort \`${this.effectiveEffort(session)}\``,
     ];
-    if (this.isUltra(session)) parts.push("*ultra on* (xhigh + subagents)");
-    else if (session.subagents === 1) parts.push("*subagents on*");
+    if (this.isUltra(session)) parts.push("*ultra on* (xhigh + subagents + workflows)");
+    else {
+      if (session.subagents === 1) parts.push("*subagents on*");
+      if (session.workflows === 1) parts.push("*workflows on*");
+    }
     return parts.join(", ");
   }
 
@@ -245,12 +264,13 @@ export class SessionManager {
    */
   private settingsBlock(session: SessionRow, repo: RepoRow | null): string {
     const subagents = session.subagents === 1;
+    const workflows = session.workflows === 1;
     const ultra = this.isUltra(session);
     const budget = session.budget_limit_usd ?? this.defaultCostCapUsd;
     const lines = [
       `⚙️ *Session settings*`,
       `• model \`${this.effectiveModel(session)}\`  ·  effort \`${this.effectiveEffort(session)}\``,
-      `• subagents ${subagents ? "*on*" : "off"}  ·  ultra ${ultra ? "*on*" : "off"}`,
+      `• subagents ${subagents ? "*on*" : "off"}  ·  workflows ${workflows ? "*on*" : "off"}  ·  ultra ${ultra ? "*on*" : "off"}`,
       `• cost budget $${budget.toFixed(2)}`,
     ];
     if (repo?.trusted === 1) lines.push("• 🔐 trusted repo — loading its `CLAUDE.md`, skills, and `.claude/` config");
@@ -346,6 +366,9 @@ export class SessionManager {
         break;
       case "subagents":
         await this.setSubagents(event.conv, event.author, event.args);
+        break;
+      case "workflows":
+        await this.setWorkflows(event.conv, event.author, event.args);
         break;
       case "ultra":
         await this.setUltra(event.conv, event.author, event.args);
@@ -715,7 +738,50 @@ export class SessionManager {
   }
 
   /**
-   * `@Conduit ultra on|off` (M3.5 Tier B). The power preset: `xhigh` effort +
+   * `@Conduit workflows on|off` (M3.6, architect opt-in, default off). On: the
+   * implementer may launch multi-agent WORKFLOWS for parallel read-only
+   * research/analysis. Their sub-agents are gated read-only and worktree-confined
+   * (via the PreToolUse hook under bypassPermissions — spike 2026-07-18); the main
+   * agent still makes edits itself (gated). Enabling workflows implies subagents
+   * (a workflow orchestrates sub-agents). (Tier 3 adds `workflows write on|off`.)
+   */
+  private async setWorkflows(conv: ConversationRef, author: Principal, args: string): Promise<void> {
+    const surface = this.surfaceFor(conv);
+    const session = this.store.getSessionByConversation(conv.surfaceId, conv.conversationId);
+    if (!session || session.status === "stopped") {
+      await surface.post(conv, { text: "No active session in this thread." });
+      return;
+    }
+    if (!this.store.isArchitect(principalKey(author), conv.channelId)) {
+      this.store.audit({ sessionId: session.id, actor: principalKey(author), event: "authz_denied", detail: { action: "workflows" } });
+      await surface.post(conv, { text: "Only architects can change workflows." });
+      return;
+    }
+    const on = this.parseOnOff(args);
+    if (on === null) {
+      await surface.post(conv, {
+        text: `Usage: \`@Conduit workflows on|off\`. Currently ${session.workflows === 1 ? "on" : "off"}.`,
+      });
+      return;
+    }
+    this.store.setSessionWorkflows(session.id, on);
+    // A workflow orchestrates sub-agents, so enabling it enables the base
+    // capability too; turning subagents off elsewhere also turns workflows off.
+    if (on) this.store.setSessionSubagents(session.id, true);
+    this.store.audit({ sessionId: session.id, actor: principalKey(author), event: "workflows_set", detail: { on } });
+    const fresh = this.store.getSession(session.id)!;
+    await surface.post(conv, {
+      text:
+        (on
+          ? "Workflows on — I can launch multi-agent workflows for parallel read-only research and analysis. " +
+            "Their agents are gated read-only and confined to this worktree; I still make edits myself (gated). "
+          : "Workflows off. ") +
+        `(${this.capabilitySummary(fresh)}) Takes effect on your next message.`,
+    });
+  }
+
+  /**
+   * `@Conduit ultra on|off` (M3.5/M3.6). The power preset: `xhigh` effort +
    * subagents + the Workflow tool — the SDK analogue of CLI "ultracode". Off
    * restores subagents/workflows off and effort to the daemon default. Burns the
    * plan's rate limit fastest (§4), so it's an explicit, architect-only opt-in.
@@ -738,13 +804,15 @@ export class SessionManager {
       return;
     }
     if (on) {
-      // Ultra = the "max it out" preset: xhigh reasoning + parallel subagents.
-      // (Workflows were part of the original preset but are disabled — their
-      // agents bypass the gate; see the adapter. Subagents are the gated fan-out.)
+      // Ultra = the "max it out" preset (M3.6): xhigh reasoning + parallel
+      // subagents + the Workflow tool (re-folded back in now that workflows are
+      // gateable — spike 2026-07-18). All gated + worktree-confined.
       this.store.setSessionSubagents(session.id, true);
+      this.store.setSessionWorkflows(session.id, true);
       if (this.supportsEffort("xhigh")) this.store.setSessionEffort(session.id, "xhigh");
     } else {
       this.store.setSessionSubagents(session.id, false);
+      this.store.setSessionWorkflows(session.id, false);
       this.store.setSessionEffort(session.id, null); // back to the daemon default
     }
     this.store.audit({ sessionId: session.id, actor: principalKey(author), event: "ultra_set", detail: { on } });
@@ -752,7 +820,7 @@ export class SessionManager {
     await surface.post(conv, {
       text:
         (on
-          ? "⚡ Ultra on — max reasoning (`xhigh`) + parallel read-only subagents. This burns the rate limit fastest; dial down with `@Conduit ultra off`. "
+          ? "⚡ Ultra on — max reasoning (`xhigh`) + parallel read-only subagents + multi-agent workflows. This burns the rate limit fastest; dial down with `@Conduit ultra off`. "
           : "Ultra off. ") +
         `(${this.capabilitySummary(fresh)}) Takes effect on your next message.`,
     });
@@ -1382,6 +1450,7 @@ export class SessionManager {
       landAvailable: !!repo?.land_cmd,
       deployAvailable: !!repo?.deploy_cmd,
       subagents: session.subagents === 1,
+      workflows: session.workflows === 1,
     });
     const harness =
       session.harness_session_handle !== null

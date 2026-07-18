@@ -53,6 +53,14 @@ export interface PolicyContext {
    */
   subagentsEnabled?: boolean;
   workflowsEnabled?: boolean;
+  /**
+   * The informed worktree-write opt-in (M3.6 Tier 3). When on, subagent/workflow-
+   * origin calls and escaped (un-deferrable) calls may WRITE and run bash CONFINED
+   * TO THE WORKTREE without per-write approval; out-of-worktree, credential, and
+   * production-data access stay hard-denied. Off (default) = read-only fan-out:
+   * those calls may only run genuine confined reads.
+   */
+  workflowWrite?: boolean;
 }
 
 /**
@@ -63,6 +71,15 @@ export interface PolicyContext {
 const SUBAGENT_GATED_MSG =
   "Subagents can't run gated actions (writing/editing files, shell commands, deploys) or spawn " +
   "further subagents. Report what's needed and let the main agent do it, so an architect can approve.";
+
+/**
+ * Fed back when an "escaped" (un-deferrable) call reaches for a gated action
+ * (M3.6). Such a call can't be paused for approval, so it is denied rather than
+ * gated; the main agent must do it on its own turn where it can be approved.
+ */
+const ESCAPED_GATED_MSG =
+  "This action can't be paused for approval from here. The main agent must do it on its own turn, " +
+  "one call at a time, so an architect can approve it.";
 
 // Multi-agent meta-tools (M3.5 Tier B). Spawning is delegation, not a filesystem
 // or shell action; when the capability is enabled the spawn auto-allows and the
@@ -111,28 +128,21 @@ export function offendingPath(worktree: string, input: unknown): string | null {
 }
 
 /**
- * Classify a tool call (DESIGN §4). Dispatches on the call's ORIGIN first
- * (M3.5 Tier B): a subagent-initiated call is read-only (gated actions and nested
- * spawns are denied — a subagent call can't be paused for approval); the main
- * agent may spawn subagents/workflows when enabled; everything else runs the base
- * tool-semantics rules.
+ * Classify a tool call (DESIGN §4). Dispatches on the call's ORIGIN first: a
+ * subagent/workflow-agent call (M3.5/M3.6) OR an "escaped" un-deferrable call
+ * (M3.6) is CONFINED — it can't be paused for approval, so gated actions are
+ * denied (read-only), unless the worktree-write opt-in allows confined writes.
+ * The main agent may spawn subagents/workflows when enabled; everything else runs
+ * the base tool-semantics rules.
  */
 export function evaluate(call: ToolCall, ctx: PolicyContext): PolicyDecision {
   const name = call.name;
-  const isSpawn = SUBAGENT_SPAWN_TOOLS.has(name) || name === WORKFLOW_SPAWN_TOOL;
 
-  // Subagent-initiated call (M3.5 Tier B). Subagents are strictly READ-ONLY:
-  // only genuine confined reads pass. A hard-deny keeps its specific reason (e.g.
-  // out-of-worktree confinement); everything else — writes, network, unknown
-  // tools, nested spawns, AND allowlisted bash (still code execution) — is denied,
-  // because a subagent call can't be paused for approval (defer is main-agent-only).
-  if (call.agentId) {
-    if (isSpawn) return deny(SUBAGENT_GATED_MSG);
-    const base = evaluateBase(call, ctx);
-    if (base.action === "deny") return base;
-    if (base.action === "allow" && SUBAGENT_READ_TOOLS.has(name)) return base;
-    return deny(SUBAGENT_GATED_MSG);
-  }
+  // A subagent/workflow-agent call (agentId set — M3.5 Tier B, and M3.6 workflow
+  // agents under bypassPermissions) or an escaped call that reached the harness's
+  // un-deferrable backstop (M3.6). Both are confined: they can't defer, so a would-
+  // be gate becomes a deny (read-only), unless the architect opened worktree writes.
+  if (call.agentId || call.escaped) return evaluateConfined(call, ctx);
 
   // Main agent spawning a subagent / workflow. Delegation is not itself a gated
   // action when the architect enabled the capability; the disallowedTools set
@@ -146,6 +156,40 @@ export function evaluate(call: ToolCall, ctx: PolicyContext): PolicyDecision {
   }
 
   return evaluateBase(call, ctx);
+}
+
+/**
+ * Confinement for a call that CANNOT be paused for approval — a subagent/workflow
+ * agent (agentId) or an escaped un-deferrable call (M3.6). Strictly READ-ONLY by
+ * default: only genuine confined reads pass; a hard-deny keeps its specific reason
+ * (e.g. out-of-worktree); everything else — writes, network, unknown tools, nested
+ * spawns, AND allowlisted bash (still code execution) — is DENIED (never gated).
+ * With the worktree-write opt-in (Tier 3), confined writes and confined bash also
+ * pass, while out-of-worktree / credential / production-data stay hard-denied.
+ */
+function evaluateConfined(call: ToolCall, ctx: PolicyContext): PolicyDecision {
+  const name = call.name;
+  const denyMsg = call.escaped ? ESCAPED_GATED_MSG : SUBAGENT_GATED_MSG;
+
+  if (SUBAGENT_SPAWN_TOOLS.has(name) || name === WORKFLOW_SPAWN_TOOL) return deny(denyMsg);
+
+  const base = evaluateBase(call, ctx);
+  // Hard boundaries (out-of-worktree, hard-deny bash) win and keep their reason.
+  if (base.action === "deny") return base;
+  // Genuine confined reads always pass.
+  if (base.action === "allow" && SUBAGENT_READ_TOOLS.has(name)) return base;
+
+  // Worktree-write opt-in (Tier 3): confined writes and confined bash may run
+  // WITHOUT per-call approval. `base` already hard-denied out-of-worktree writes
+  // and dangerous/credential bash, and gate+concern marks production-data bash —
+  // which stays denied (never auto-runnable, DESIGN §4).
+  if (ctx.workflowWrite) {
+    if (WRITE_TOOLS.has(name)) return allow(describeCall(call));
+    if (name === "Bash" && base.concern !== "production-data") return allow(describeCall(call));
+  }
+
+  // Anything else can't run un-deferred here.
+  return deny(denyMsg);
 }
 
 /** Base tool-semantics rules (origin-agnostic): reads/writes/bash/network/unknown. */

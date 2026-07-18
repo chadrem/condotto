@@ -49,26 +49,31 @@ interface ClaudeCodeHandle {
 // `allowedTools` auto-approves reads (the hook still denies out-of-worktree
 // reads — a hook `deny` beats an allow rule). Write/Edit/Bash are deliberately
 // NEITHER allowed (they must gate) NOR disallowed (they must be reachable so the
-// agent can propose them).
+// agent can propose them). NOTE (M3.6): when the Workflow tool is enabled we clear
+// allowedTools and drive reads through the PreToolUse hook instead — in
+// allowedTools a tool is "auto-approved before the callback is consulted", and for
+// a background workflow's sub-agents that shadow path silently DENIES the read
+// (spike 2026-07-18). Via the hook, reads still auto-allow (confined) for the main
+// agent and the workflow agents alike.
 const ALLOWED_TOOLS = ["Read", "Glob", "Grep", "TodoWrite"];
 // Always removed from context, regardless of capability flags: plan-mode meta,
 // slash commands, and network reads are out of scope for the implementer.
-//
-// `Workflow` is ALSO always disallowed (M3.5). A spike (2026-07-18, spikes/m3.5/
-// workflow-path.ts) showed the Workflow tool's orchestrated agents BYPASS our
-// PreToolUse gate — their tool calls carry no `agent_id`, so the read-only
-// subagent policy never sees them; they fall through to the `canUseTool`
-// blanket-deny backstop, which denies everything (even reads). So workflows are
-// both non-functional under our isolation AND not gated in principle. Re-enable
-// only once workflow agents can be routed through the gate (M4+). Subagents (the
-// `Agent` tool) are the working, gated read-only fan-out.
-const BASE_DISALLOWED = ["ExitPlanMode", "SlashCommand", "WebFetch", "WebSearch", "Workflow"];
+const BASE_DISALLOWED = ["ExitPlanMode", "SlashCommand", "WebFetch", "WebSearch"];
 // Subagent tools, disabled BY DEFAULT (M3.5 Tier B is architect opt-in). Both the
 // current `Agent` name and the legacy `Task` alias are listed so "subagents off"
 // is genuinely off regardless of which the runtime exposes. Un-disallowed per-turn
 // only when the session enables the capability; even then every tool call a
 // subagent makes still hits the PreToolUse gate (agent_id-tagged).
 const SUBAGENT_TOOLS = ["Agent", "Task"];
+// The multi-agent Workflow tool (M3.6, architect opt-in). Disabled by default and
+// re-enabled per-turn only when the session enables workflows. When enabled the
+// query runs under `permissionMode: "bypassPermissions"` so the background
+// workflow's sub-agent tool calls route THROUGH the PreToolUse hook (agent_id-
+// tagged) where the read-only subagent policy confines them — the hook still
+// outranks permission mode, so main-agent defer/deny are unaffected (spike
+// 2026-07-18, DECISIONS.md). Was disabled outright in M3.5 (which used
+// permissionMode "default", under which the same agents default-DENY off-gate).
+const WORKFLOW_TOOL = "Workflow";
 
 // M3.5 Tier A. The core passes an opaque model token; the adapter is the only
 // place that knows SDK model IDs (keeps the port clean). Unrecognized tokens
@@ -116,9 +121,12 @@ function resolveEffort(token: string | undefined): string | undefined {
 }
 
 /**
- * Build the per-turn tool posture from the session's harness capabilities. Reads
- * stay auto-allowed; write/bash stay gated (absent from both lists). Subagent /
- * workflow tools are removed from context unless the architect opted in.
+ * Build the per-turn tool posture from the session's harness capabilities.
+ * Subagent / workflow tools are removed from context unless the architect opted
+ * in. When workflows are ON, reads move OUT of allowedTools onto the hook (so the
+ * background workflow's sub-agents aren't shadow-denied — see WORKFLOW_TOOL);
+ * otherwise reads stay auto-allowed via allowedTools (unchanged M2 behaviour).
+ * Write/bash are always absent from both lists so they gate.
  */
 function toolPosture(h: HarnessTurnOptions | undefined): {
   allowedTools: string[];
@@ -126,8 +134,9 @@ function toolPosture(h: HarnessTurnOptions | undefined): {
 } {
   const disallowed = [...BASE_DISALLOWED];
   if (!h?.subagents) disallowed.push(...SUBAGENT_TOOLS);
-  // Note: the Workflow tool stays in BASE_DISALLOWED unconditionally — see there.
-  return { allowedTools: ALLOWED_TOOLS, disallowedTools: disallowed };
+  if (!h?.workflows) disallowed.push(WORKFLOW_TOOL);
+  const allowedTools = h?.workflows ? [] : ALLOWED_TOOLS;
+  return { allowedTools, disallowedTools: disallowed };
 }
 
 /** Deny message for a gated call that arrived batched (defer unavailable). */
@@ -258,6 +267,37 @@ class ClaudeCodeSession implements HarnessSession {
     // (default) stays isolated: no repo CLAUDE.md/.mcp.json/.claude/, no skills.
     const settingSources: ("user" | "project" | "local")[] = h?.projectConfig ? ["project"] : [];
 
+    // M3.6: workflows run under bypassPermissions ONLY so the background workflow's
+    // sub-agent tool calls route through the PreToolUse hook (agent_id-tagged) where
+    // the policy confines them — NOT to weaken gating. Hooks outrank permission
+    // mode, so main-agent defer/deny and the canUseTool backstop still hold (spike
+    // 2026-07-18: diag3/diag4). Non-workflow sessions stay "default" (unchanged).
+    const permissionMode = h?.workflows ? ("bypassPermissions" as const) : ("default" as const);
+
+    // The canUseTool backstop (M2) now runs the CORE policy on an `escaped` call —
+    // a call that reached this un-deferrable path instead of the hook (a batched
+    // gated call, or a workflow-agent call that didn't carry agent_id). The policy
+    // confines it: reads pass, a would-be gate becomes deny (can't defer here), and
+    // with the worktree-write opt-in confined writes pass. Fail closed on error.
+    const canUseToolFn = async (toolName: string, toolInput: unknown) => {
+      let decision: Awaited<ReturnType<GateFn>>;
+      try {
+        decision = await gate({ id: "", name: toolName, input: toolInput, escaped: true });
+      } catch (err) {
+        decision = { decision: "deny", reason: `gate error (denied fail-closed): ${err}` };
+      }
+      if (decision.decision === "allow") {
+        return {
+          behavior: "allow" as const,
+          updatedInput: (decision.updatedInput ?? toolInput) as Record<string, unknown>,
+        };
+      }
+      // deny, or a defensive gate (the policy never gates an escaped call — that
+      // would strand it un-deferred — so treat any gate here as a fail-closed deny).
+      const message = decision.decision === "deny" ? decision.reason : BATCH_GATE_DENY;
+      return { behavior: "deny" as const, message };
+    };
+
     const q = query({
       prompt: input.text,
       options: {
@@ -266,7 +306,7 @@ class ClaudeCodeSession implements HarnessSession {
         systemPrompt: { type: "preset", preset: "claude_code", append: this.system },
         allowedTools,
         disallowedTools,
-        permissionMode: "default",
+        permissionMode,
         // M3.5 Tier A: exact SDK model id + reasoning effort. Omitted = SDK
         // defaults; the core always supplies them (default Opus + high).
         ...(model ? { model } : {}),
@@ -288,17 +328,22 @@ class ClaudeCodeSession implements HarnessSession {
         // input and must not register MCP servers or alter permissions (§4).
         settingSources,
         hooks: { PreToolUse: [{ hooks: [gateHook] }] },
-        // Deny-by-default backstop. In the normal single-call flow the hook is
-        // terminal and this is never reached; it only fires when a gated call's
-        // `defer` was ignored because it was batched (see BATCH_GATE_DENY). The
-        // hook already audited the call as gated, so no allow ever needs to
-        // originate here — a blanket deny is correct and cannot starve reads
-        // (those are resolved by allowedTools before reaching canUseTool).
-        canUseTool: async () => ({ behavior: "deny" as const, message: BATCH_GATE_DENY }),
+        // Backstop for calls that reach the un-deferrable path (batched gated
+        // calls; escaped workflow-agent calls). Runs the core confinement policy
+        // (see canUseToolFn): reads pass, gated actions deny, worktree-write opt-in
+        // allows confined writes. In the normal single-call flow the hook is
+        // terminal and this is never reached.
+        canUseTool: canUseToolFn,
       },
     });
 
     let sawResult = false;
+    // A workflow turn produces MULTIPLE `result` messages: an intermediate
+    // "workflow launched; waiting…" success, then the FINAL synthesized success
+    // once the background workflow completes (spike 2026-07-18). Buffer the latest
+    // success and deliver only it at turn end, so the human sees the real answer,
+    // not "launched; waiting". A terminal deferred/error supersedes and clears it.
+    let pendingReply: { text: string; costUsd?: number } | null = null;
     try {
       const iterator = q[Symbol.asyncIterator]();
       while (true) {
@@ -347,7 +392,9 @@ class ClaudeCodeSession implements HarnessSession {
           if (m.terminal_reason === "tool_deferred" || deferred) {
             // A gated tool call was deferred (M0-verified handshake). Hand the
             // preserved pending call to the core to record an approval; the turn
-            // is over until an architect decides and the session is resumed.
+            // is over until an architect decides and the session is resumed. A
+            // defer is the real outcome — drop any buffered intermediate reply.
+            pendingReply = null;
             if (deferred?.id) {
               yield {
                 kind: "deferred",
@@ -362,14 +409,16 @@ class ClaudeCodeSession implements HarnessSession {
               };
             }
           } else if (m.subtype === "success") {
-            yield {
-              kind: "reply",
+            // Buffer, don't yield: a later result may supersede this one (workflow
+            // "launched" → "completed"). Delivered after the loop (last wins).
+            pendingReply = {
               text: typeof m.result === "string" && m.result.length > 0 ? m.result : "(no reply)",
               costUsd: cost,
             };
           } else if (m.subtype === "error_max_budget_usd" || m.terminal_reason === "budget_exhausted") {
             // The turn hit its cost budget and stopped (M3). Surface it clearly
             // with the spend — the core will then pause the session (§4).
+            pendingReply = null;
             yield {
               kind: "error",
               message:
@@ -378,10 +427,13 @@ class ClaudeCodeSession implements HarnessSession {
               costUsd: cost,
             };
           } else {
+            pendingReply = null;
             yield { kind: "error", message: `session turn ended abnormally (${m.subtype})`, costUsd: cost };
           }
         }
       }
+      // Deliver the final buffered reply (the last success result of the turn).
+      if (pendingReply) yield { kind: "reply", text: pendingReply.text, costUsd: pendingReply.costUsd };
     } catch (err) {
       // A persisted session id the runtime no longer knows (pruned storage,
       // moved machine) would otherwise wedge the thread forever. Recover by
@@ -435,9 +487,37 @@ function describeToolUse(name: string, input: unknown): string {
       return `preparing to edit ${i.file_path ?? "a file"}`;
     case "Bash":
       return `preparing to run a command`;
+    case "Agent":
+    case "Task":
+      return `delegating to a subagent`;
+    case "Workflow": {
+      // The workflow script begins with `export const meta = { name, description }`.
+      const meta = parseWorkflowMeta(i.script ?? i.scriptPath);
+      return meta?.name ? `launching workflow \`${meta.name}\`` : `launching a multi-agent workflow`;
+    }
     default:
       return `using ${name}`;
   }
+}
+
+/**
+ * Best-effort pull of `name`/`description` from a Workflow tool call's `script`
+ * (a JS string beginning with `export const meta = { name: '…', description: '…' }`).
+ * Used only to describe the launch for progress/approval — never executed. Returns
+ * null if the script is absent or the fields can't be found.
+ */
+export function parseWorkflowMeta(script: unknown): { name?: string; description?: string } | null {
+  if (typeof script !== "string" || script.length === 0) return null;
+  // Scan only the meta block so a later string literal can't be mistaken for it.
+  const metaStart = script.indexOf("meta");
+  const scope = metaStart >= 0 ? script.slice(metaStart, metaStart + 1200) : script.slice(0, 1200);
+  const grab = (key: string): string | undefined => {
+    const m = scope.match(new RegExp(`${key}\\s*:\\s*(['"\`])([^'"\`]{0,200})\\1`));
+    return m?.[2]?.trim() || undefined;
+  };
+  const name = grab("name");
+  const description = grab("description");
+  return name || description ? { name, description } : null;
 }
 
 export class ClaudeCodeAdapter implements HarnessAdapter {

@@ -1042,6 +1042,88 @@ describe("harness capabilities — subagents & ultra (M3.5 Tier B)", () => {
   });
 });
 
+describe("harness capabilities — workflows (M3.6)", () => {
+  async function assign(w: World, id: string): Promise<void> {
+    await w.manager.handleEvent({ kind: "command", conv: conv(id), author: architect, name: "assign", args: "" });
+  }
+
+  test("workflows default off, and the join announcement lists it", async () => {
+    const w = makeWorld();
+    await assign(w, "wf1.000001");
+    expect(w.store.getSessionByConversation("fake", "wf1.000001")!.workflows).toBe(0);
+    const intro = w.surface.posts.at(-1)!.text;
+    expect(intro).toContain("workflows off");
+    expect(intro).not.toContain("*workflows on*");
+  });
+
+  test("architect turns workflows on; it persists, implies subagents, reaches the turn + prompt", async () => {
+    const w = makeWorld();
+    const c = conv("wf2.000001");
+    await assign(w, "wf2.000001");
+    await w.manager.handleEvent({ kind: "command", conv: c, author: architect, name: "workflows", args: "on" });
+    const s = w.store.getSessionByConversation("fake", "wf2.000001")!;
+    expect(s.workflows).toBe(1);
+    expect(s.subagents).toBe(1); // a workflow orchestrates subagents
+    expect(w.surface.posts.at(-1)!.text).toContain("Workflows on");
+
+    await w.manager.handleEvent({ kind: "message", conv: c, author: architect, text: "audit auth", attachments: [] });
+    expect(w.harness.allTurns.at(-1)!.harness?.workflows).toBe(true);
+    // System prompt on attach carries the workflow guidance.
+    expect(w.harness.created.at(-1)!.system).toMatch(/workflow/i);
+  });
+
+  test("a member cannot toggle workflows; a bad arg shows usage", async () => {
+    const w = makeWorld();
+    const c = conv("wf3.000001");
+    await assign(w, "wf3.000001");
+    await w.manager.handleEvent({ kind: "command", conv: c, author: member, name: "workflows", args: "on" });
+    expect(w.surface.posts.at(-1)!.text).toContain("Only architects");
+    expect(w.store.getSessionByConversation("fake", "wf3.000001")!.workflows).toBe(0);
+    await w.manager.handleEvent({ kind: "command", conv: c, author: architect, name: "workflows", args: "huh" });
+    expect(w.surface.posts.at(-1)!.text).toContain("Usage");
+    expect(w.store.getSessionByConversation("fake", "wf3.000001")!.workflows).toBe(0);
+  });
+
+  test("turning subagents off also turns workflows off (workflows need the base capability)", async () => {
+    const w = makeWorld();
+    const c = conv("wf4.000001");
+    await assign(w, "wf4.000001");
+    await w.manager.handleEvent({ kind: "command", conv: c, author: architect, name: "workflows", args: "on" });
+    expect(w.store.getSessionByConversation("fake", "wf4.000001")!.workflows).toBe(1);
+    await w.manager.handleEvent({ kind: "command", conv: c, author: architect, name: "subagents", args: "off" });
+    const s = w.store.getSessionByConversation("fake", "wf4.000001")!;
+    expect(s.subagents).toBe(0);
+    expect(s.workflows).toBe(0);
+  });
+
+  test("ultra on now enables workflows too (re-folded into the preset)", async () => {
+    const w = makeWorld();
+    const c = conv("wf5.000001");
+    await assign(w, "wf5.000001");
+    await w.manager.handleEvent({ kind: "command", conv: c, author: architect, name: "ultra", args: "on" });
+    const s = w.store.getSessionByConversation("fake", "wf5.000001")!;
+    expect(s.workflows).toBe(1);
+    expect(s.subagents).toBe(1);
+    expect(s.effort).toBe("xhigh");
+    await w.manager.handleEvent({ kind: "message", conv: c, author: architect, text: "go", attachments: [] });
+    expect(w.harness.allTurns.at(-1)!.harness?.workflows).toBe(true);
+    // ultra off clears workflows again.
+    await w.manager.handleEvent({ kind: "command", conv: c, author: architect, name: "ultra", args: "off" });
+    expect(w.store.getSessionByConversation("fake", "wf5.000001")!.workflows).toBe(0);
+  });
+
+  test("workflows on shows in the status listing and re-announcement", async () => {
+    const w = makeWorld();
+    const c = conv("wf6.000001");
+    await assign(w, "wf6.000001");
+    await w.manager.handleEvent({ kind: "command", conv: c, author: architect, name: "workflows", args: "on" });
+    await w.manager.handleEvent({ kind: "command", conv: c, author: architect, name: "status", args: "" });
+    expect(w.surface.posts.at(-1)!.text).toContain("workflows on");
+    await w.manager.handleEvent({ kind: "command", conv: c, author: architect, name: "help", args: "" });
+    expect(w.surface.posts.at(-1)!.text).toContain("workflows *on*");
+  });
+});
+
 describe("trust-scoped project config (M3.5 Tier C)", () => {
   async function assign(w: World, id: string): Promise<void> {
     await w.manager.handleEvent({ kind: "command", conv: conv(id), author: architect, name: "assign", args: "" });
