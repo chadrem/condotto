@@ -96,13 +96,18 @@ only grantable on surfaces with strong identity.
 these to its native affordances: Teams message actions, signed email links, a
 web UI. The journeys themselves are surface-agnostic.)
 
-1. **Assign.** In any thread: `/conduit assign <repo>` (or `@Conduit take
-   this`, architects only). The daemon creates a git worktree for that repo,
-   starts a Claude Code session pinned to it, and the session introduces
-   itself in the thread ("I'm on it — repo `webapp`, branch
-   `conduit/payout-bug`. Reading the thread now."). The thread↔session binding
-   is persisted; from here on, every human message in the thread is a turn for
-   that session, and every session reply is posted back into the thread.
+1. **Assign.** Two paths (architects only). For an **existing** thread:
+   `@Conduit assign` (or `@Conduit take this`) mentioned in the thread — Slack
+   delivers mentions with thread context. For a **new** ticket: `/conduit
+   assign <repo>` at channel top level — the daemon posts an anchor message
+   whose `ts` becomes the thread root, and the conversation happens in that
+   thread. (Custom slash commands cannot be invoked inside Slack threads at
+   all — verified 2026-07-18, see DECISIONS.md.) Either way the daemon creates
+   a git worktree for the repo, starts a Claude Code session pinned to it, and
+   the session introduces itself in the thread ("I'm on it — repo `webapp`,
+   branch `conduit/payout-bug`."). The thread↔session binding is persisted;
+   from here on, every human message in the thread is a turn for that session,
+   and every session reply is posted back into the thread.
 
 2. **Converse.** Members describe the problem, drop screenshots, link to code.
    The session reads the whole thread as context, reads the repo, asks
@@ -1041,7 +1046,11 @@ if used), `app_mention`, and `reaction_added` (only if emoji assignment).
 
 **Slash command:** create `/conduit` (Socket Mode delivers it; the "request
 URL" field can be a placeholder). Bolt handles subcommands (`assign`, `status`,
-`stop`) by parsing the command text.
+`stop`) by parsing the command text. **Caveat (verified 2026-07-18):** custom
+slash commands cannot be invoked inside message threads, so `/conduit assign`
+always creates a *new* conversation (the daemon posts an anchor message that
+becomes the thread root); assigning an existing thread is done with
+`@Conduit assign` in that thread.
 
 **Interactivity:** enable it (required for the Approve/Deny **buttons**);
 Socket Mode delivers `block_actions` events — no URL needed.

@@ -85,3 +85,43 @@ subscription OAuth, no API key, throwaway git repo. Scripts preserved in
    became the preserved pending call). Harmless here, but the daemon must not
    assume exactly one hook firing per gated action — key approval records by
    `tool_use_id`.
+
+## 2026-07-18 — Slack: custom slash commands cannot run inside threads
+
+**Fact (contradicts DESIGN.md §2 journey 1 as written):** Slack does not offer
+custom slash commands inside message threads — only at channel top level — and
+the command payload carries no thread context. `/conduit assign` "in a thread"
+is therefore impossible. Sources: Slack's implementing-slash-commands doc and
+community reports (checked 2026-07-18).
+
+**Decision (M1):** two assignment paths, both implemented in `adapters/slack/`:
+
+- `/conduit assign [repo]` (top level) creates a **new** conversation: the
+  adapter posts an anchor message and that message's `ts` becomes the thread
+  root / `conversation_id`. Humans converse in the anchor's thread.
+- `@Conduit assign` mentioned **inside an existing thread** assigns that thread
+  (`app_mention` events do carry `thread_ts`). A top-level mention roots its
+  own thread. `@Conduit stop` / `@Conduit status` are the thread-scoped forms;
+  `/conduit stop` replies with a hint since it cannot know a thread.
+
+**Consequences:** DESIGN.md §2 journey 1 and Appendix C updated. The
+`ConversationRef` flow is unchanged — the core never knew about slash-command
+mechanics.
+
+## 2026-07-18 — M1 implementation decisions (daemon skeleton)
+
+- **Read-only posture is enforced twice:** the harness adapter passes
+  `allowedTools: [Read, Glob, Grep, TodoWrite]` and disallows the rest by bare
+  name (removed from context), AND the session manager's M1 `GateFn` denies any
+  tool outside that set via the `PreToolUse` hook. The double layer is
+  deliberate — it seeds M2's deny-by-default backstop and keeps the harness
+  port's gate contract real from the first commit.
+- **The Conduit system-prompt append lives inside the opaque harness handle.**
+  The SDK's `systemPrompt` is per-`query()` config, so resumed turns must
+  re-supply it; storing it in the handle keeps the core ignorant of that
+  mechanic (handle: `{v, sessionId, system}`, owned by `adapters/claude-code/`).
+- **Smoke-verified (2026-07-18, Bun 1.3.14, subscription OAuth):** the real
+  adapter created a session in a fresh worktree of the throwaway repo, gated
+  every tool call, and a **separate process** resumed by handle and recalled
+  the prior answer — the M1 park/resume loop works outside tests
+  (`scripts/smoke-create.ts` / `smoke-resume.ts`).
