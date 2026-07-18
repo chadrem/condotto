@@ -126,13 +126,15 @@ class Semaphore {
       this.active++;
       return;
     }
+    // Wait for a hand-off. The slot count is NOT re-incremented on resume — the
+    // releaser hands its slot straight to us, so `active` never exceeds `max`
+    // even if an acquire runs between a release and this resume (robust pattern).
     await new Promise<void>((resolve) => this.waiters.push(resolve));
-    this.active++;
   }
   release(): void {
-    this.active--;
     const next = this.waiters.shift();
-    if (next) next();
+    if (next) next(); // hand the slot to the next waiter (active unchanged)
+    else this.active--; // no waiter — free the slot
   }
 }
 
@@ -628,10 +630,14 @@ export class SessionManager {
     // A daemon-run action (land/deploy): the daemon runs the configured command
     // itself rather than resuming the harness. On denial, just acknowledge.
     if (approval.tool_name.startsWith(SHIP_TOOL_PREFIX)) {
+      if (!surface) {
+        this.log(`[approval] no surface for ${session.surface_id} — cannot run ${approval.tool_name}`);
+        return;
+      }
       if (outcome === "approved") {
-        await this.runShip(session, approval, conv, surface!, decider);
+        await this.runShip(session, approval, conv, surface, decider);
       } else {
-        await surface?.post(conv, { text: `${approval.tool_name.replace(SHIP_TOOL_PREFIX, "")} cancelled — nothing ran.` }).catch(() => {});
+        await surface.post(conv, { text: `${approval.tool_name.replace(SHIP_TOOL_PREFIX, "")} cancelled — nothing ran.` }).catch(() => {});
       }
       return;
     }
