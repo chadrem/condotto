@@ -1150,6 +1150,91 @@ describe("harness capabilities — workflows (M3.6)", () => {
   });
 });
 
+describe("informed worktree-write opt-in (M3.6 Tier 3)", () => {
+  async function assign(w: World, id: string): Promise<void> {
+    await w.manager.handleEvent({ kind: "command", conv: conv(id), author: architect, name: "assign", args: "" });
+  }
+
+  test("a workflow/subagent write is denied read-only, then ALLOWED after `workflows write on`", async () => {
+    const w = makeWorld();
+    const c = conv("ww1.000001");
+    await assign(w, "ww1.000001");
+    await w.manager.handleEvent({ kind: "command", conv: c, author: architect, name: "workflows", args: "on" });
+
+    // Read-only default: a subagent-origin write is denied, nothing runs, no approval.
+    w.harness.scriptTurn([{ id: "ww-a", name: "Write", input: { file_path: "x.ts", content: "x" }, agentId: "sub-1" }]);
+    await w.manager.handleEvent({ kind: "message", conv: c, author: architect, text: "go", attachments: [] });
+    expect(w.harness.executed.find((cl) => cl.id === "ww-a")).toBeUndefined();
+    expect(w.surface.approvalRequests.length).toBe(0);
+
+    // Turn on worktree-write — the mandatory warning posts and the flags flip.
+    await w.manager.handleEvent({ kind: "command", conv: c, author: architect, name: "workflows", args: "write on" });
+    const s = w.store.getSessionByConversation("fake", "ww1.000001")!;
+    expect(s.workflow_write).toBe(1);
+    expect(s.workflows).toBe(1);
+    expect(s.subagents).toBe(1);
+    expect(w.surface.posts.at(-1)!.text).toMatch(/worktree-write is now ON/i);
+    expect(w.surface.posts.at(-1)!.text).toMatch(/WITHOUT per-write approval/i);
+    expect(w.surface.posts.at(-1)!.text).toMatch(/hard-denied/i);
+
+    // Now a confined subagent write is allowed and runs — no per-write approval.
+    w.harness.scriptTurn([{ id: "ww-b", name: "Write", input: { file_path: "y.ts", content: "y" }, agentId: "sub-2" }]);
+    await w.manager.handleEvent({ kind: "message", conv: c, author: architect, text: "go again", attachments: [] });
+    expect(w.harness.executed.map((cl) => cl.id)).toContain("ww-b");
+    expect(w.surface.approvalRequests.length).toBe(0);
+  });
+
+  test("worktree-write still HARD-DENIES an out-of-worktree subagent write", async () => {
+    const w = makeWorld();
+    const c = conv("ww2.000001");
+    await assign(w, "ww2.000001");
+    await w.manager.handleEvent({ kind: "command", conv: c, author: architect, name: "workflows", args: "write on" });
+    w.harness.scriptTurn([{ id: "ww-esc", name: "Write", input: { file_path: "/etc/evil", content: "x" }, agentId: "sub-3" }]);
+    await w.manager.handleEvent({ kind: "message", conv: c, author: architect, text: "go", attachments: [] });
+    expect(w.harness.executed.length).toBe(0);
+    expect(w.surface.approvalRequests.length).toBe(0);
+  });
+
+  test("`workflows off` clears the worktree-write opt-in (invariant: write ⟹ workflows)", async () => {
+    const w = makeWorld();
+    const c = conv("ww3.000001");
+    await assign(w, "ww3.000001");
+    await w.manager.handleEvent({ kind: "command", conv: c, author: architect, name: "workflows", args: "write on" });
+    expect(w.store.getSessionByConversation("fake", "ww3.000001")!.workflow_write).toBe(1);
+    await w.manager.handleEvent({ kind: "command", conv: c, author: architect, name: "workflows", args: "off" });
+    const s = w.store.getSessionByConversation("fake", "ww3.000001")!;
+    expect(s.workflows).toBe(0);
+    expect(s.workflow_write).toBe(0);
+  });
+
+  test("a member cannot enable worktree-write", async () => {
+    const w = makeWorld();
+    const c = conv("ww4.000001");
+    await assign(w, "ww4.000001");
+    await w.manager.handleEvent({ kind: "command", conv: c, author: member, name: "workflows", args: "write on" });
+    expect(w.surface.posts.at(-1)!.text).toContain("Only architects");
+    expect(w.store.getSessionByConversation("fake", "ww4.000001")!.workflow_write).toBe(0);
+  });
+
+  test("the settings announcement warns prominently when worktree-write is on", async () => {
+    const w = makeWorld();
+    const c = conv("ww5.000001");
+    await assign(w, "ww5.000001");
+    await w.manager.handleEvent({ kind: "command", conv: c, author: architect, name: "workflows", args: "write on" });
+    await w.manager.handleEvent({ kind: "command", conv: c, author: architect, name: "help", args: "" });
+    expect(w.surface.posts.at(-1)!.text).toMatch(/worktree-write ON/i);
+  });
+
+  test("worktree-write reaches the turn's system prompt", async () => {
+    const w = makeWorld();
+    const c = conv("ww6.000001");
+    await assign(w, "ww6.000001");
+    await w.manager.handleEvent({ kind: "command", conv: c, author: architect, name: "workflows", args: "write on" });
+    await w.manager.handleEvent({ kind: "message", conv: c, author: architect, text: "refactor in parallel", attachments: [] });
+    expect(w.harness.created.at(-1)!.system).toMatch(/WORKTREE-WRITE/i);
+  });
+});
+
 describe("trust-scoped project config (M3.5 Tier C)", () => {
   async function assign(w: World, id: string): Promise<void> {
     await w.manager.handleEvent({ kind: "command", conv: conv(id), author: architect, name: "assign", args: "" });

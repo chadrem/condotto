@@ -54,6 +54,7 @@ function conduitSystemPrompt(opts: {
   deployAvailable?: boolean;
   subagents?: boolean;
   workflows?: boolean;
+  workflowWrite?: boolean;
 }): string {
   const ship =
     opts.landAvailable || opts.deployAvailable
@@ -78,12 +79,17 @@ function conduitSystemPrompt(opts: {
   // grep/enumeration YOURSELF first, then fan the found files out to be read.
   const workflow = opts.workflows
     ? `- For a big cross-cutting job (auditing a pattern across the codebase, reviewing many files), ` +
-      `you can launch a multi-agent WORKFLOW (the Workflow tool): it fans out read-only agents in ` +
-      `parallel and synthesizes their findings. Workflow agents are READ-ONLY and confined to this ` +
+      `you can launch a multi-agent WORKFLOW (the Workflow tool): it fans out ${opts.workflowWrite ? "" : "read-only "}` +
+      `agents in parallel and synthesizes their findings. Workflow agents are confined to this ` +
       `worktree. Their reliable tools are Read and Glob — they CANNOT Grep or run shell — so when a ` +
       `job needs search, YOU grep/enumerate first to find the files, then launch a workflow whose ` +
       `agents each Read and analyze a slice in parallel. Launching a workflow needs an architect's ` +
-      `approval (it fans out and spends budget). You (the main agent) make any edits yourself, gated.`
+      `approval (it fans out and spends budget).` +
+      (opts.workflowWrite
+        ? ` The architect has enabled WORKTREE-WRITE mode: workflow agents may WRITE files in this ` +
+          `worktree without per-write approval (still confined — no out-of-worktree, credential, or ` +
+          `production access). Use it for parallel edits/refactors; landing still needs approval.`
+        : ` You (the main agent) make any edits yourself, gated.`)
     : null;
   return [
     `You are Conduit, an implementer agent bound to one chat thread. Humans in the`,
@@ -260,8 +266,9 @@ export class SessionManager {
     if (this.isUltra(session)) parts.push("*ultra on* (xhigh + subagents + workflows)");
     else {
       if (session.subagents === 1) parts.push("*subagents on*");
-      if (session.workflows === 1) parts.push("*workflows on*");
+      if (session.workflows === 1) parts.push(session.workflow_write === 1 ? "*workflows on* (worktree-write)" : "*workflows on*");
     }
+    if (this.isUltra(session) && session.workflow_write === 1) parts.push("worktree-write");
     return parts.join(", ");
   }
 
@@ -282,6 +289,9 @@ export class SessionManager {
       `• subagents ${subagents ? "*on*" : "off"}  ·  workflows ${workflows ? "*on*" : "off"}  ·  ultra ${ultra ? "*on*" : "off"}`,
       `• cost budget $${budget.toFixed(2)}`,
     ];
+    if (workflows && session.workflow_write === 1) {
+      lines.push("• ⚠️ *workflow worktree-write ON* — workflow agents write in this worktree without per-write approval");
+    }
     if (repo?.trusted === 1) lines.push("• 🔐 trusted repo — loading its `CLAUDE.md`, skills, and `.claude/` config");
     if (repo?.test_cmd) lines.push(`• tests \`${repo.test_cmd}\` (auto-run, no approval)`);
     return lines.join("\n");
@@ -752,7 +762,13 @@ export class SessionManager {
    * research/analysis. Their sub-agents are gated read-only and worktree-confined
    * (via the PreToolUse hook under bypassPermissions — spike 2026-07-18); the main
    * agent still makes edits itself (gated). Enabling workflows implies subagents
-   * (a workflow orchestrates sub-agents). (Tier 3 adds `workflows write on|off`.)
+   * (a workflow orchestrates sub-agents).
+   *
+   * `@Conduit workflows write on|off` (Tier 3, the informed insecure opt-in): lets
+   * workflow/subagent-origin (and batched) calls WRITE and run bash confined to the
+   * worktree WITHOUT per-write approval. Off by default; enabling it posts a
+   * mandatory, non-skippable warning. out-of-worktree/credential/prod-data stay
+   * hard-denied and land/deploy still require an Approve click.
    */
   private async setWorkflows(conv: ConversationRef, author: Principal, args: string): Promise<void> {
     const surface = this.surfaceFor(conv);
@@ -766,16 +782,59 @@ export class SessionManager {
       await surface.post(conv, { text: "Only architects can change workflows." });
       return;
     }
-    const on = this.parseOnOff(args);
+
+    const parts = args.trim().toLowerCase().split(/\s+/).filter(Boolean);
+    // Tier 3: `workflows write on|off` — the informed worktree-write opt-in.
+    if (parts[0] === "write") {
+      const on = this.parseOnOff(parts[1] ?? "");
+      if (on === null) {
+        await surface.post(conv, {
+          text: `Usage: \`@Conduit workflows write on|off\`. Currently ${session.workflow_write === 1 ? "on" : "off"}.`,
+        });
+        return;
+      }
+      if (on) {
+        // Enabling write mode implies workflows (and subagents) — write mode is
+        // meaningless without them.
+        this.store.setSessionSubagents(session.id, true);
+        this.store.setSessionWorkflows(session.id, true);
+        this.store.setSessionWorkflowWrite(session.id, true);
+        this.store.audit({ sessionId: session.id, actor: principalKey(author), event: "workflow_write_set", detail: { on: true } });
+        await surface.post(conv, {
+          text:
+            "⚠️ *Workflow worktree-write is now ON.* Read this:\n" +
+            "• Workflow agents — and any batched tool calls — will now *WRITE files and run shell " +
+            "commands inside this thread's disposable worktree WITHOUT per-write approval*.\n" +
+            "• Blast radius is *this worktree only*: out-of-worktree paths, credential/secret access, " +
+            "and production-data access stay *hard-denied* (no approval can widen them).\n" +
+            "• `land`/`deploy` still require an explicit Approve click — reviewing the diff before " +
+            "landing is the real safety net.\n" +
+            "Turn it back off with `@Conduit workflows write off` (or `@Conduit workflows off`). " +
+            "Takes effect on your next message.",
+        });
+      } else {
+        this.store.setSessionWorkflowWrite(session.id, false);
+        this.store.audit({ sessionId: session.id, actor: principalKey(author), event: "workflow_write_set", detail: { on: false } });
+        const fresh = this.store.getSession(session.id)!;
+        await surface.post(conv, {
+          text: `Workflow worktree-write off — workflow agents are read-only again. (${this.capabilitySummary(fresh)}) Takes effect on your next message.`,
+        });
+      }
+      return;
+    }
+
+    const on = this.parseOnOff(parts[0] ?? "");
     if (on === null) {
       await surface.post(conv, {
-        text: `Usage: \`@Conduit workflows on|off\`. Currently ${session.workflows === 1 ? "on" : "off"}.`,
+        text:
+          `Usage: \`@Conduit workflows on|off\` (or \`@Conduit workflows write on|off\`). ` +
+          `Currently ${session.workflows === 1 ? "on" : "off"}${session.workflow_write === 1 ? " (worktree-write)" : ""}.`,
       });
       return;
     }
     this.store.setSessionWorkflows(session.id, on);
     // A workflow orchestrates sub-agents, so enabling it enables the base
-    // capability too; turning subagents off elsewhere also turns workflows off.
+    // capability; turning it off also clears the worktree-write opt-in (store).
     if (on) this.store.setSessionSubagents(session.id, true);
     this.store.audit({ sessionId: session.id, actor: principalKey(author), event: "workflows_set", detail: { on } });
     const fresh = this.store.getSession(session.id)!;
@@ -1173,6 +1232,9 @@ export class SessionManager {
       // downstream). Subagent-initiated gated calls are denied by the policy engine.
       subagentsEnabled: session.subagents === 1,
       workflowsEnabled: session.workflows === 1,
+      // M3.6 Tier 3: the worktree-write opt-in — subagent/workflow/escaped calls
+      // may write & run bash confined to the worktree without per-write approval.
+      workflowWrite: session.workflow_write === 1,
     };
     // Remembers a policy concern (e.g. production-data) per gated tool_use_id so
     // the later approval prompt can surface it (the gate and the defer are
@@ -1453,7 +1515,7 @@ export class SessionManager {
     // cached harness was built (a subagents/ultra toggle). Reading the fresh row
     // here makes this race-free — no reliance on out-of-band invalidation that a
     // toggle landing mid-attach could miss (M3.5 review fix).
-    const promptKey = `${session.subagents}:${session.workflows}`;
+    const promptKey = `${session.subagents}:${session.workflows}:${session.workflow_write}`;
     if (entry.harness && entry.promptKey === promptKey) return entry.harness;
 
     // The system prompt is current Conduit policy, re-supplied on resume too —
@@ -1468,6 +1530,7 @@ export class SessionManager {
       deployAvailable: !!repo?.deploy_cmd,
       subagents: session.subagents === 1,
       workflows: session.workflows === 1,
+      workflowWrite: session.workflow_write === 1,
     });
     const harness =
       session.harness_session_handle !== null

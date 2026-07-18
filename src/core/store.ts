@@ -24,14 +24,17 @@ export interface SessionRow {
   /** Per-thread cost ceiling in USD (M3); null = use the daemon-wide default. */
   budget_limit_usd: number | null;
   /**
-   * Harness capability state (M3.5). model/effort are opaque tokens (null = fall
-   * back to the daemon-wide default); subagents/workflows are 0/1 flags gating
-   * the multi-agent tools (default 0 — architect opt-in, Tier B).
+   * Harness capability state (M3.5/M3.6). model/effort are opaque tokens (null =
+   * fall back to the daemon-wide default); subagents/workflows/workflow_write are
+   * 0/1 flags gating the multi-agent tools (default 0 — architect opt-in). Invariant
+   * (enforced in the session manager): workflow_write ⟹ workflows ⟹ subagents.
    */
   model: string | null;
   effort: string | null;
   subagents: number;
   workflows: number;
+  /** M3.6 Tier 3: the informed worktree-write opt-in for workflow/escaped calls. */
+  workflow_write: number;
   created_at: string;
   last_active_at: string;
 }
@@ -232,6 +235,8 @@ export class Store {
     this.ensureColumn("sessions", "effort", "TEXT");
     this.ensureColumn("sessions", "subagents", "INTEGER NOT NULL DEFAULT 0");
     this.ensureColumn("sessions", "workflows", "INTEGER NOT NULL DEFAULT 0");
+    // M3.6 Tier 3: the worktree-write opt-in for workflow/escaped calls.
+    this.ensureColumn("sessions", "workflow_write", "INTEGER NOT NULL DEFAULT 0");
     this.ensureColumn("repos", "default_model", "TEXT");
     this.ensureColumn("repos", "default_effort", "TEXT");
     this.ensureColumn("repos", "trusted", "INTEGER NOT NULL DEFAULT 0");
@@ -333,7 +338,7 @@ export class Store {
   createSession(
     s: Omit<
       SessionRow,
-      "created_at" | "last_active_at" | "budget_limit_usd" | "model" | "effort" | "subagents" | "workflows"
+      "created_at" | "last_active_at" | "budget_limit_usd" | "model" | "effort" | "subagents" | "workflows" | "workflow_write"
     > & {
       budget_limit_usd?: number | null;
       model?: string | null;
@@ -392,6 +397,7 @@ export class Store {
       effort,
       subagents,
       workflows,
+      workflow_write: 0,
       created_at: now,
       last_active_at: now,
     };
@@ -488,9 +494,22 @@ export class Store {
     this.db.query(`UPDATE sessions SET subagents = $v WHERE id = $id`).run({ id, v: on ? 1 : 0 });
   }
 
-  /** Toggle a session's Workflow tool (M3.5 Tier B, part of the `ultra` preset). */
+  /**
+   * Toggle a session's Workflow tool (M3.6, part of the `ultra` preset). Turning
+   * it OFF also clears the worktree-write opt-in (invariant: workflow_write ⟹
+   * workflows), so a re-enable never silently resurrects write mode.
+   */
   setSessionWorkflows(id: string, on: boolean): void {
-    this.db.query(`UPDATE sessions SET workflows = $v WHERE id = $id`).run({ id, v: on ? 1 : 0 });
+    if (on) {
+      this.db.query(`UPDATE sessions SET workflows = 1 WHERE id = $id`).run({ id });
+    } else {
+      this.db.query(`UPDATE sessions SET workflows = 0, workflow_write = 0 WHERE id = $id`).run({ id });
+    }
+  }
+
+  /** Toggle a session's worktree-write opt-in for workflow/escaped calls (M3.6 Tier 3). */
+  setSessionWorkflowWrite(id: string, on: boolean): void {
+    this.db.query(`UPDATE sessions SET workflow_write = $v WHERE id = $id`).run({ id, v: on ? 1 : 0 });
   }
 
   /**

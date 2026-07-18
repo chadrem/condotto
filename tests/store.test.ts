@@ -113,6 +113,20 @@ describe("store sessions", () => {
     expect(row.model).toBeNull();
   });
 
+  test("workflow_write defaults off and turning workflows off clears it (M3.6 invariant)", () => {
+    const store = memoryStore();
+    store.createSession({ ...baseSession, id: "s1", conversation_id: "1.1" });
+    expect(store.getSession("s1")!.workflow_write).toBe(0);
+    store.setSessionWorkflows("s1", true);
+    store.setSessionWorkflowWrite("s1", true);
+    expect(store.getSession("s1")!.workflow_write).toBe(1);
+    // Turning workflows off must also clear the worktree-write opt-in.
+    store.setSessionWorkflows("s1", false);
+    const row = store.getSession("s1")!;
+    expect(row.workflows).toBe(0);
+    expect(row.workflow_write).toBe(0);
+  });
+
   test("repo default model/effort and trust flag round-trip (M3.5)", () => {
     const store = memoryStore();
     store.upsertRepo({ name: "r", path: "/tmp/r", defaultBranch: "main", defaultModel: "sonnet", defaultEffort: "xhigh", trusted: true });

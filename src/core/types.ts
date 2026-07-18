@@ -270,17 +270,13 @@ export interface HarnessTurnOptions {
    * resume loop is unaffected (hooks outrank permission mode). Implies subagents.
    */
   workflows?: boolean;
-  /**
-   * The informed worktree-write opt-in (M3.6 Tier 3, architect opt-in, default off;
-   * requires `workflows`). When on, the policy lets workflow/subagent-origin calls
-   * WRITE and run bash CONFINED TO THE WORKTREE without per-write approval;
-   * out-of-worktree, credential, and production-data access stay hard-denied. The
-   * land/deploy approval remains the real review point. Off = read-only fan-out.
-   */
-  workflowWrite?: boolean;
   /** Load the repo's project settings + skills. Tier C, TRUSTED repos only. */
   projectConfig?: boolean;
 }
+// NOTE (M3.6 Tier 3): the informed worktree-write opt-in is NOT a harness-tool
+// option — it does not change the model, tools, or permission mode. It is a POLICY
+// decision (PolicyContext.workflowWrite, set by the session manager from the
+// session row), so it lives in the core gate, not in HarnessTurnOptions.
 
 export interface TurnInput {
   text: string;
