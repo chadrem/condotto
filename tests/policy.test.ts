@@ -151,6 +151,17 @@ describe("policy: production-data gate (M3, DESIGN §4)", () => {
     }
   });
 
+  test("env-var and sudo/env prefixes cannot hide a production-data program", () => {
+    for (const c of [
+      "PGPASSWORD=secret psql -h prod -c 'select 1'",
+      "sudo psql -c 'select 1'",
+      "env REDIS_URL=x redis-cli GET k",
+      "PGPASSWORD=x /usr/bin/psql prod",
+    ]) {
+      expect(productionDataConcern(c)).toBe(true);
+    }
+  });
+
   test("ordinary dev commands are NOT flagged as production-data", () => {
     for (const c of [
       "git status",

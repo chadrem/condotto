@@ -165,11 +165,15 @@ function evaluateBash(input: unknown, ctx: PolicyContext): PolicyDecision {
 export function productionDataConcern(command: string): boolean {
   for (const rawSeg of command.split(/(?:\|\||&&|;|\||&|\n)+/)) {
     const seg = rawSeg.trim();
-    // Match on the invoked program (first token, allowing leading paths like
-    // `bin/rails` or `./manage.py`), not on an argument that merely mentions it.
-    const first = seg.split(/\s+/)[0] ?? "";
+    // Find the invoked program: skip leading env-var assignments (`PGPASSWORD=x`)
+    // and common wrappers (`sudo`, `env`, `nice`, `time`, `command`) so a prefix
+    // can't hide the program from the match. Then allow a path prefix.
+    const tokens = seg.split(/\s+/);
+    let idx = 0;
+    while (idx < tokens.length && (/^\w+=/.test(tokens[idx]!) || /^(sudo|env|nice|time|command)$/.test(tokens[idx]!))) idx++;
+    const first = tokens[idx] ?? "";
     const prog = first.replace(/^.*\//, ""); // strip any path prefix
-    const rest = seg.slice(first.length);
+    const rest = " " + tokens.slice(idx + 1).join(" ");
     // Direct database / cache / search clients.
     if (/^(psql|mysql|mysqldump|mongo|mongosh|redis-cli|clickhouse-client|cqlsh|influx|mongoexport|pg_dump)$/.test(prog)) return true;
     // App consoles / runners that reach the live datastore.

@@ -710,8 +710,12 @@ export class SessionManager {
         .catch(() => {});
       return;
     }
+    // Per-turn cap only bounds NEW human turns. An approval-resume (no `inbound`)
+    // completes an action an architect already approved: capping it to a tiny
+    // remaining headroom could make the SDK stop it (error_max_budget_usd) and
+    // strand the approved action — so resume turns run uncapped.
     const remaining = budgetLimit - spent;
-    const turnBudgetUsd = remaining > 0 ? remaining : undefined;
+    const turnBudgetUsd = inbound && remaining > 0 ? remaining : undefined;
 
     const repo = this.store.getRepo(session.repo_id);
     const policyCtx: PolicyContext = {

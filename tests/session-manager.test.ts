@@ -578,6 +578,22 @@ describe("cost budgets & runaway cap (M3, DESIGN §4)", () => {
     expect(w.harness.allTurns.at(-1)!.budgetUsd).toBe(5); // full headroom on the first turn
   });
 
+  test("an approval-resume turn runs uncapped so a near-budget approved action isn't stranded", async () => {
+    const w = makeWorld(undefined, { costCap: 5 });
+    await w.manager.handleEvent({ kind: "command", conv: conv("e05.000001"), author: architect, name: "assign", args: "" });
+    const sid = w.store.getSessionByConversation("fake", "e05.000001")!.id;
+    w.store.insertTurn({ sessionId: sid, direction: "out", text: "prior", costUsd: 4.9 }); // near the $5 cap
+    w.harness.scriptTurn([{ id: "tu-w", name: "Write", input: { file_path: "x.txt", content: "hi" } }]);
+    await w.manager.handleEvent({ kind: "message", conv: conv("e05.000001"), author: member, text: "add x", attachments: [] });
+    const requestId = w.surface.lastApprovalRequestId()!;
+    await w.manager.handleEvent({ kind: "approval_decision", requestId, decider: architect, decision: "approved" });
+
+    // The approved Write ran despite being near the cap.
+    expect(w.harness.executed.map((c) => c.name)).toContain("Write");
+    // The resume turn (last) carried NO per-turn budget cap.
+    expect(w.harness.allTurns.at(-1)!.budgetUsd).toBeUndefined();
+  });
+
   test("a session over its cap pauses new turns and pings for a budget raise", async () => {
     const w = makeWorld(undefined, { costCap: 5 });
     const sid = await assignAndSpend(w, "e10.000001", 6); // already over the $5 cap

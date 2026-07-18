@@ -49,29 +49,48 @@ export class CommandRunner implements CommandRunnerLike {
     });
 
     const timeoutMs = this.opts.timeoutMs ?? 5 * 60_000;
-    let timedOut = false;
-    let finished = false;
-    const timer = setTimeout(() => {
-      if (finished) return; // don't kill / mismark a process that already exited
-      timedOut = true;
-      proc.kill();
-    }, timeoutMs);
-
     // NOTE (M3): output is read fully into memory then byte-bounded. Fine for the
     // trusted, echo/no-op land/deploy commands here; a real deploy path (M4)
     // should stream-bound to defend against an output flood.
-    const [stdout, stderr] = await Promise.all([
-      new Response(proc.stdout).text(),
-      new Response(proc.stderr).text(),
-    ]);
-    const code = await proc.exited;
-    finished = true;
+    const readAll = Promise.all([
+      new Response(proc.stdout).text().catch(() => ""),
+      new Response(proc.stderr).text().catch(() => ""),
+    ]).then(([o, e]) => o + e);
+
+    // Race the read against a hard deadline. run() MUST always settle within the
+    // timeout — if a killed shell's surviving child kept the pipe open, awaiting
+    // stream EOF would hang forever, and the caller (runShip) would hold its
+    // concurrency slot and wedge the session. On timeout we SIGKILL and return
+    // whatever was buffered.
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const deadline = new Promise<"timeout">((resolve) => {
+      timer = setTimeout(() => resolve("timeout"), timeoutMs);
+    });
+
+    const bound = (s: string): string => {
+      const trimmed = s.trim();
+      const max = this.opts.maxOutputBytes ?? 16_000;
+      return trimmed.length > max ? trimmed.slice(0, max) + "\n… (truncated)" : trimmed;
+    };
+
+    const outcome = await Promise.race([readAll.then((o) => ({ o }) as const), deadline]);
     clearTimeout(timer);
 
-    let output = (stdout + stderr).trim();
-    const max = this.opts.maxOutputBytes ?? 16_000;
-    if (output.length > max) output = output.slice(0, max) + "\n… (truncated)";
+    if (outcome === "timeout") {
+      try {
+        proc.kill(9); // SIGKILL — the shell can't ignore it
+      } catch {
+        /* already gone */
+      }
+      // Grab anything already buffered, but never wait indefinitely for EOF.
+      const partial = await Promise.race([
+        readAll,
+        new Promise<string>((r) => setTimeout(() => r(""), 500)),
+      ]);
+      return { code: null, output: bound(partial), timedOut: true };
+    }
 
-    return { code: timedOut ? null : code, output, timedOut };
+    const code = await proc.exited;
+    return { code, output: bound(outcome.o), timedOut: false };
   }
 }
