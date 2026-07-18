@@ -450,3 +450,40 @@ an architect issued the command — deliberate belt-and-braces for the most
 dangerous action, matching §4's "the deploy path ... posts Approve/Deny." The
 `@`-mention ping of specific architects on a budget stall is a plain in-thread
 notice for now (surface-specific mention rendering is a later refinement).
+
+## 2026-07-18 — M3 framing red-team + adversarial review: findings fixed
+
+Two multi-agent adversarial passes, matching the M1/M2 process.
+
+**Framing red-team (four lenses: linebreak / fence / header / unicode).**
+Confirmed the three-layer model holds (header-only authority + unforgeable
+random-nonce body fence + line quoting) and net authority-forge is backstopped.
+One residual quoting-layer escape and two completeness gaps were closed (literal
+`\n` un-escape → defang the `[conduit:` sentinel; info separators FS/GS/RS/US into
+line-break normalization; bidi MARKS ALM/LRM/RLM into the strip set). Emoji ZWJ
+preserved. (Commit 1e56e9a.)
+
+**Six-dimension review (authority/approval, policy/prod-data, cost, concurrency/
+lifecycle, harness/SDK, command-runner, framing/ports) with refute-by-default
+verification.** 6 of 8 candidates survived; all fixed:
+
+- **(high)** `CommandRunner.run()` could hang forever if a killed shell's
+  surviving child kept the pipe open (awaiting stream EOF), leaking the turn slot
+  and wedging the session/daemon. Now races the read against a hard deadline and
+  SIGKILLs — `run()` always settles within the timeout.
+- **(med)** Output was read to EOF before the byte cap (unbounded peak memory,
+  OOM risk). Now read with a per-stream byte cap that STOPS at the cap.
+- **(med)** An approval-resume turn near the budget got a tiny `maxBudgetUsd`,
+  which could stop it (`error_max_budget_usd`) and strand the just-approved
+  action. Only inbound human turns are capped now; resume turns run uncapped.
+- **(med)** A `stop` landing while a turn waited on the concurrency semaphore
+  still ran a full turn on the stopped session. `tryActivate` now claims the turn
+  AFTER acquiring the slot, so a stop during the wait aborts it.
+- **(low)** `productionDataConcern` missed env-var/`sudo`/`timeout` prefixes
+  (`PGPASSWORD=x psql`, `sudo -u pg psql`). Now skips prefixes + a fallback scan.
+
+Two candidates were refuted (a claimed missing guard that already existed; an
+env-denylist-vs-allowlist design point — deliberate, since a real deploy needs
+most of the env). Regression tests added for each fix; 124 tests green, `tsc` +
+`check-ports` clean; the real-harness gate→approve→resume and 4-way concurrency
+smokes pass.
