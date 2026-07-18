@@ -61,6 +61,49 @@ describe("loadConfig repos", () => {
     );
   });
 
+  test("the throwaway testrepo ships a real test command and echo land/deploy no-ops (M3)", () => {
+    const config = loadConfig({ CONDUIT_REPOS_FILE: "/nonexistent/repos.json", ...NO_ROLES });
+    const testrepo = config.repos.find((r) => r.name === "testrepo")!;
+    expect(testrepo.testCmd).toBe("bun test");
+    expect(testrepo.landCmd).toContain("echo");
+    expect(testrepo.deployCmd).toContain("echo");
+    // Build-time safety: land/deploy must not be a real deploy path.
+    expect(testrepo.landCmd).not.toMatch(/git push|deploy|kubectl|ssh/i);
+  });
+
+  test("registry file loads test/land/deploy commands and per-repo cost cap (M3)", () => {
+    const file = reposFile([
+      { name: "webapp", path: "/srv/webapp", testCmd: "npm test", landCmd: "make land", deployCmd: "make deploy", costCapUsd: 25 },
+      { name: "bare", path: "/srv/bare" },
+    ]);
+    const cfg = loadConfig({ CONDUIT_REPOS_FILE: file, ...NO_ROLES });
+    const webapp = cfg.repos.find((r) => r.name === "webapp")!;
+    expect(webapp.testCmd).toBe("npm test");
+    expect(webapp.landCmd).toBe("make land");
+    expect(webapp.deployCmd).toBe("make deploy");
+    expect(webapp.costCapUsd).toBe(25);
+    const bare = cfg.repos.find((r) => r.name === "bare")!;
+    expect(bare.testCmd).toBeUndefined();
+    expect(bare.landCmd).toBeUndefined();
+    expect(bare.costCapUsd).toBeUndefined();
+  });
+
+  test("daemon-wide cost cap and concurrency defaults, overridable by env (M3)", () => {
+    const def = loadConfig({ CONDUIT_REPOS_FILE: "/nonexistent/repos.json", ...NO_ROLES });
+    expect(def.defaultCostCapUsd).toBe(10);
+    expect(def.maxConcurrentTurns).toBe(6);
+    const over = loadConfig({
+      CONDUIT_REPOS_FILE: "/nonexistent/repos.json",
+      CONDUIT_COST_CAP_USD: "42.5",
+      CONDUIT_MAX_CONCURRENT_TURNS: "3",
+      ...NO_ROLES,
+    });
+    expect(over.defaultCostCapUsd).toBe(42.5);
+    expect(over.maxConcurrentTurns).toBe(3);
+    expect(() => loadConfig({ CONDUIT_COST_CAP_USD: "-1", ...NO_ROLES })).toThrow(/positive number/);
+    expect(() => loadConfig({ CONDUIT_MAX_CONCURRENT_TURNS: "0", ...NO_ROLES })).toThrow(/positive integer/);
+  });
+
   test("safeBashAllowlist defaults to the conservative set and can be overridden", () => {
     const def = loadConfig({ CONDUIT_REPOS_FILE: "/nonexistent/repos.json", ...NO_ROLES });
     expect(def.repos[0]!.safeBashAllowlist).toContain("git status");

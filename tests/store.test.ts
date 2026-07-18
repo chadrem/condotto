@@ -76,6 +76,53 @@ describe("store sessions", () => {
     store.upsertRepo({ name: "r2", path: "/tmp/r2", defaultBranch: "main" });
     expect(store.getRepo("r2")?.safe_bash_allowlist).toEqual([]);
   });
+
+  test("repo test/land/deploy commands and cost cap round-trip (M3)", () => {
+    const store = memoryStore();
+    store.upsertRepo({
+      name: "r",
+      path: "/tmp/r",
+      defaultBranch: "main",
+      testCmd: "bun test",
+      landCmd: "echo land",
+      deployCmd: "echo deploy",
+      costCapUsd: 3.5,
+    });
+    const r = store.getRepo("r")!;
+    expect(r.test_cmd).toBe("bun test");
+    expect(r.land_cmd).toBe("echo land");
+    expect(r.deploy_cmd).toBe("echo deploy");
+    expect(r.cost_cap_usd).toBe(3.5);
+    // Omitted M3 fields are null, and upsert overwrites them back to null.
+    store.upsertRepo({ name: "r", path: "/tmp/r", defaultBranch: "main" });
+    const r2 = store.getRepo("r")!;
+    expect(r2.test_cmd).toBeNull();
+    expect(r2.land_cmd).toBeNull();
+    expect(r2.cost_cap_usd).toBeNull();
+  });
+});
+
+describe("store cost accounting (M3)", () => {
+  test("sessionCostUsd sums per-turn cost and is 0 for a fresh session", () => {
+    const store = memoryStore();
+    store.createSession({ ...baseSession, id: "s1", conversation_id: "1.1" });
+    expect(store.sessionCostUsd("s1")).toBe(0);
+    store.insertTurn({ sessionId: "s1", direction: "out", text: "a", costUsd: 0.1 });
+    store.insertTurn({ sessionId: "s1", direction: "out", text: "b", costUsd: 0.25 });
+    store.insertTurn({ sessionId: "s1", direction: "in", principal: "x", text: "no cost" });
+    expect(store.sessionCostUsd("s1")).toBeCloseTo(0.35, 6);
+  });
+
+  test("budget_limit_usd is seeded on create and an architect can raise it", () => {
+    const store = memoryStore();
+    store.createSession({ ...baseSession, id: "s1", conversation_id: "1.1", budget_limit_usd: 5 });
+    expect(store.getSession("s1")!.budget_limit_usd).toBe(5);
+    store.setSessionBudgetLimit("s1", 20);
+    expect(store.getSession("s1")!.budget_limit_usd).toBe(20);
+    // Omitted at create → null (daemon falls back to its default).
+    store.createSession({ ...baseSession, id: "s2", conversation_id: "1.2" });
+    expect(store.getSession("s2")!.budget_limit_usd).toBeNull();
+  });
 });
 
 describe("store roles", () => {

@@ -21,11 +21,30 @@ export interface SessionRow {
   harness_session_handle: SessionHandle | null;
   branch: string;
   status: SessionStatus;
+  /** Per-thread cost ceiling in USD (M3); null = use the daemon-wide default. */
+  budget_limit_usd: number | null;
   created_at: string;
   last_active_at: string;
 }
 
 export class ConflictError extends Error {}
+
+/** A repo as read back from the store (M3 adds test/land/deploy + cost cap). */
+export interface RepoRow {
+  id: string;
+  name: string;
+  path: string;
+  default_branch: string;
+  safe_bash_allowlist: string[];
+  test_cmd: string | null;
+  land_cmd: string | null;
+  deploy_cmd: string | null;
+  cost_cap_usd: number | null;
+}
+
+interface RawRepoRow extends Omit<RepoRow, "safe_bash_allowlist"> {
+  safe_bash_allowlist: string;
+}
 
 interface RawSessionRow extends Omit<SessionRow, "harness_session_handle"> {
   harness_session_handle: string | null;
@@ -185,6 +204,12 @@ export class Store {
     this.db.run(
       `CREATE INDEX IF NOT EXISTS idx_approvals_tooluse ON approvals (session_id, tool_use_id);`,
     );
+
+    // M3: per-repo test command + cost cap, and a per-session cost ceiling.
+    // (deploy_cmd/land_cmd already exist from the M1 repos schema above.)
+    this.ensureColumn("repos", "test_cmd", "TEXT");
+    this.ensureColumn("repos", "cost_cap_usd", "REAL");
+    this.ensureColumn("sessions", "budget_limit_usd", "REAL");
   }
 
   private ensureColumn(table: string, column: string, ddl: string): void {
@@ -207,13 +232,20 @@ export class Store {
     path: string;
     defaultBranch: string;
     safeBashAllowlist?: string[];
+    testCmd?: string;
+    landCmd?: string;
+    deployCmd?: string;
+    costCapUsd?: number;
   }): void {
     this.db
       .query(
-        `INSERT INTO repos (id, name, path, default_branch, safe_bash_allowlist)
-         VALUES ($id, $name, $path, $branch, $allow)
+        `INSERT INTO repos
+           (id, name, path, default_branch, safe_bash_allowlist,
+            test_cmd, land_cmd, deploy_cmd, cost_cap_usd)
+         VALUES ($id, $name, $path, $branch, $allow, $test, $land, $deploy, $cap)
          ON CONFLICT(name) DO UPDATE SET
-           path = $path, default_branch = $branch, safe_bash_allowlist = $allow`,
+           path = $path, default_branch = $branch, safe_bash_allowlist = $allow,
+           test_cmd = $test, land_cmd = $land, deploy_cmd = $deploy, cost_cap_usd = $cap`,
       )
       .run({
         id: repo.name,
@@ -221,20 +253,33 @@ export class Store {
         path: repo.path,
         branch: repo.defaultBranch,
         allow: JSON.stringify(repo.safeBashAllowlist ?? []),
+        test: repo.testCmd ?? null,
+        land: repo.landCmd ?? null,
+        deploy: repo.deployCmd ?? null,
+        cap: repo.costCapUsd ?? null,
       });
   }
 
-  getRepo(
-    name: string,
-  ): { id: string; name: string; path: string; default_branch: string; safe_bash_allowlist: string[] } | null {
+  getRepo(name: string): RepoRow | null {
     const row = this.db
-      .query<
-        { id: string; name: string; path: string; default_branch: string; safe_bash_allowlist: string },
-        { name: string }
-      >(`SELECT id, name, path, default_branch, safe_bash_allowlist FROM repos WHERE name = $name`)
+      .query<RawRepoRow, { name: string }>(
+        `SELECT id, name, path, default_branch, safe_bash_allowlist,
+                test_cmd, land_cmd, deploy_cmd, cost_cap_usd
+         FROM repos WHERE name = $name`,
+      )
       .get({ name });
     if (!row) return null;
-    return { ...row, safe_bash_allowlist: parseJsonArray(row.safe_bash_allowlist) };
+    return {
+      id: row.id,
+      name: row.name,
+      path: row.path,
+      default_branch: row.default_branch,
+      safe_bash_allowlist: parseJsonArray(row.safe_bash_allowlist),
+      test_cmd: row.test_cmd,
+      land_cmd: row.land_cmd,
+      deploy_cmd: row.deploy_cmd,
+      cost_cap_usd: row.cost_cap_usd,
+    };
   }
 
   listRepos(): { name: string; path: string; default_branch: string }[] {
@@ -247,16 +292,22 @@ export class Store {
 
   // -- sessions -------------------------------------------------------------
 
-  createSession(s: Omit<SessionRow, "created_at" | "last_active_at">): SessionRow {
+  createSession(
+    s: Omit<SessionRow, "created_at" | "last_active_at" | "budget_limit_usd"> & {
+      budget_limit_usd?: number | null;
+    },
+  ): SessionRow {
     const now = new Date().toISOString();
+    const budget = s.budget_limit_usd ?? null;
     try {
       this.db
         .query(
           `INSERT INTO sessions
              (id, surface_id, conversation_id, channel_id, repo_id, worktree_path,
-              harness_id, harness_session_handle, branch, status, created_at, last_active_at)
+              harness_id, harness_session_handle, branch, status, budget_limit_usd,
+              created_at, last_active_at)
            VALUES ($id, $surface_id, $conversation_id, $channel_id, $repo_id, $worktree_path,
-                   $harness_id, $handle, $branch, $status, $now, $now)`,
+                   $harness_id, $handle, $branch, $status, $budget, $now, $now)`,
         )
         .run({
           id: s.id,
@@ -269,6 +320,7 @@ export class Store {
           handle: s.harness_session_handle === null ? null : JSON.stringify(s.harness_session_handle),
           branch: s.branch,
           status: s.status,
+          budget,
           now,
         });
     } catch (err) {
@@ -279,7 +331,7 @@ export class Store {
       }
       throw err;
     }
-    return { ...s, created_at: now, last_active_at: now };
+    return { ...s, budget_limit_usd: budget, created_at: now, last_active_at: now };
   }
 
   getSessionByConversation(surfaceId: string, conversationId: string): SessionRow | null {
@@ -351,6 +403,25 @@ export class Store {
     this.db
       .query(`UPDATE sessions SET last_active_at = $now WHERE id = $id`)
       .run({ id, now: new Date().toISOString() });
+  }
+
+  /** Raise/lower a session's cost ceiling (architect `@Conduit budget`, M3). */
+  setSessionBudgetLimit(id: string, usd: number): void {
+    this.db.query(`UPDATE sessions SET budget_limit_usd = $usd WHERE id = $id`).run({ id, usd });
+  }
+
+  /**
+   * Cumulative spend for a session in USD (M3 runaway cap, DESIGN §4). Sums the
+   * per-turn `cost_usd` the harness reported; SQLite returns NULL for an empty
+   * set, coalesced to 0.
+   */
+  sessionCostUsd(id: string): number {
+    const row = this.db
+      .query<{ total: number }, { id: string }>(
+        `SELECT COALESCE(SUM(cost_usd), 0) AS total FROM turns WHERE session_id = $id`,
+      )
+      .get({ id });
+    return row?.total ?? 0;
   }
 
   // -- turns ----------------------------------------------------------------

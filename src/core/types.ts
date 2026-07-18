@@ -45,7 +45,7 @@ export interface Attachment {
 // ---------------------------------------------------------------------------
 // Surface port — how humans reach Conduit
 
-export type CommandName = "assign" | "status" | "stop";
+export type CommandName = "assign" | "status" | "stop" | "land" | "deploy" | "budget";
 
 export type InboundEvent =
   | {
@@ -135,13 +135,19 @@ export type GateFn = (call: ToolCall) => Promise<GateDecision>;
 export type TurnEvent =
   | { kind: "progress"; text: string }
   | { kind: "reply"; text: string; costUsd?: number }
-  | { kind: "error"; message: string }
+  /**
+   * A turn that ended without a usable reply. `costUsd` is carried because an
+   * error result (including the SDK's `error_max_budget_usd`) still reports the
+   * spend, and the core's cost ledger must count it (DESIGN §4 runaway cap).
+   */
+  | { kind: "error"; message: string; costUsd?: number }
   /**
    * A gated tool call was deferred: the turn ended un-executed with this call
    * preserved. The core records an approval and posts it to the surface; a
-   * later architect decision resumes the session and re-drives `call`.
+   * later architect decision resumes the session and re-drives `call`. `costUsd`
+   * is the spend up to the defer (the SDK reports it on the deferring result).
    */
-  | { kind: "deferred"; call: ToolCall }
+  | { kind: "deferred"; call: ToolCall; costUsd?: number }
   /**
    * The adapter's opaque handle changed (e.g. the underlying session id became
    * known). The core persists it immediately and never inspects it.
@@ -153,6 +159,13 @@ export type SessionHandle = unknown;
 
 export interface TurnInput {
   text: string;
+  /**
+   * Optional per-turn cost ceiling in USD (M3). The harness enforces it as an
+   * intra-turn runaway brake (Claude Code: the SDK's `maxBudgetUsd`), stopping a
+   * single turn before it can blow the thread budget. The core computes it from
+   * the session's remaining headroom; omitted = no per-turn limit.
+   */
+  budgetUsd?: number;
 }
 
 export interface HarnessSession {
@@ -189,4 +202,25 @@ export interface RepoConfig {
   defaultBranch: string;
   /** Commands that run without approval (exact or word-boundary prefix match). */
   safeBashAllowlist: string[];
+  /**
+   * The repo's real test command (M3). Auto-allowed as a Bash call so the agent
+   * can verify its own work without approval, and surfaced in the system prompt.
+   * `undefined` = no test command; the agent must gate any bash it runs.
+   */
+  testCmd?: string;
+  /**
+   * The repo's land/deploy path (M3, DESIGN §2 journey 4). Architect-ordered
+   * (`@Conduit land` / `deploy`) and run by the daemon through the approval gate,
+   * never by the agent's shell. Build-time safety: these are `echo`/no-ops on the
+   * throwaway repo until M4 hardening. `undefined` = the action is unavailable.
+   */
+  landCmd?: string;
+  deployCmd?: string;
+  /**
+   * Per-thread cost ceiling in USD (M3, DESIGN §4). A session whose cumulative
+   * `total_cost_usd` reaches this pauses and pings the architect; the ceiling is
+   * seeded onto each session and an architect can raise it. `undefined` = fall
+   * back to the daemon-wide default.
+   */
+  costCapUsd?: number;
 }
