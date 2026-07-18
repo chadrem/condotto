@@ -336,3 +336,37 @@ audited as `tool_call decision=gate` although `canUseTool` then denies it — th
 adapter has no store handle to audit the backstop denial, and the case is rare
 (the model must batch a gated call); revisit when auditing moves behind the
 harness port in M3.
+
+## 2026-07-18 — Fix: system prompt is core policy, re-supplied on resume
+
+**Symptom (found in the live M2 demo):** an M1 session (`acme`, read-only)
+was reactivated under M2; when asked to create a file it refused — "I'm in
+read-only mode this milestone." The M2 approval loop never fired because the
+agent never attempted the write.
+
+**Root cause:** the M1 design froze the Conduit system-prompt append inside the
+opaque harness handle at `create()` time. On resume the adapter replayed that
+stored string — for this session, the **M1 read-only prompt** (confirmed by
+reading `harness_session_handle.system` in the DB). So the M2 `conduitSystemPrompt`
+reached only newly-created sessions; every pre-existing session kept its old
+posture.
+
+**Fix:** the system prompt is Conduit **policy**, not adapter session state, so
+the core now supplies the current prompt on **both** create and resume
+(`HarnessAdapter.resume(handle, cwd, system)`); the handle no longer carries it
+(legacy handles' `system` field is ignored). A reactivated session now gets the
+current posture. Regression test in `session-manager.test.ts`. This supersedes
+the M1 note "the Conduit system-prompt append lives inside the opaque harness
+handle."
+
+**Caveat for the demo:** the fix corrects the *prompt*, but a reactivated
+session's transcript still contains its prior read-only exchanges, which prime
+the model. For a clean M2 write demo, start a **fresh** thread.
+
+**Build-time-safety reminder (still in force):** M2 write-gating must be
+demoed against the **throwaway `testrepo`**, not a real registered repo like
+`acme`. The 2026-07-18 repo-registry decision registered real repos for
+**read-only** M1 exploration and explicitly kept "no write access to real repos
+until M4 hardening + gating review." Gated writes land in an isolated
+`conduit/*` worktree branch, but the guardrail is deliberately conservative —
+use `/conduit assign` (defaults to `testrepo`) for the write demo.

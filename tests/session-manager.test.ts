@@ -175,6 +175,29 @@ describe("conversing", () => {
     expect(w2.surface.updates.at(-1)?.text).toContain("echo(fake-session-1)");
   });
 
+  test("resume re-supplies the CURRENT system prompt, not the one frozen in the handle", async () => {
+    const dbPath = join(mkdtempSync(join(tmpdir(), "conduit-db-")), "test.sqlite");
+    const w1 = makeWorld(new Store(dbPath));
+    await assignAndMessage(w1, "410.000001", "hello");
+    const row = w1.store.getSessionByConversation("fake", "410.000001")!;
+    // Simulate a session created under the old M1 posture: overwrite its stored
+    // handle with a stale read-only prompt.
+    w1.store.updateSessionHandle(row.id, { fake: true, sessionId: "fake-session-1", system: "OLD — you are READ-ONLY" });
+    w1.store.close();
+
+    const w2 = makeWorld(new Store(dbPath));
+    await w2.manager.handleEvent({
+      kind: "message",
+      conv: conv("410.000001"),
+      author: architect,
+      text: "can you change things now?",
+      attachments: [],
+    });
+    // The core supplied the current (M2) prompt on resume — the stale one is gone.
+    expect(w2.harness.resumed[0]!.system).not.toContain("READ-ONLY");
+    expect(w2.harness.resumed[0]!.system).toContain("approval");
+  });
+
   test("queued messages run as sequential turns, never interleaved", async () => {
     const w = makeWorld();
     await w.manager.handleEvent({ kind: "command", conv: conv("600.000001"), author: architect, name: "assign", args: "" });

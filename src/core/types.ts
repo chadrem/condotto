@@ -172,7 +172,12 @@ export interface HarnessAdapter {
   readonly id: string;
   readonly capabilities: HarnessCapabilities;
   create(opts: { cwd: string; system: string }): Promise<HarnessSession>;
-  resume(handle: SessionHandle, cwd: string): Promise<HarnessSession>;
+  /**
+   * `system` is re-supplied on every resume: the Conduit protocol prompt is
+   * core policy, not session state, so a posture change (e.g. read-only → gated)
+   * must reach existing sessions. The adapter must NOT freeze it in the handle.
+   */
+  resume(handle: SessionHandle, cwd: string, system: string): Promise<HarnessSession>;
 }
 
 // ---------------------------------------------------------------------------

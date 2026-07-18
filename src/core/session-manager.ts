@@ -618,13 +618,14 @@ export class SessionManager {
     const entry = this.entryFor(session.id);
     if (entry.harness) return entry.harness;
 
+    // The system prompt is current Conduit policy, re-supplied on resume too —
+    // never the stale one a session was created with (e.g. an M1 read-only
+    // session reactivated under M2 must now know it can propose gated actions).
+    const system = conduitSystemPrompt({ repoName: session.repo_id, branch: session.branch });
     const harness =
       session.harness_session_handle !== null
-        ? await this.harness.resume(session.harness_session_handle, session.worktree_path)
-        : await this.harness.create({
-            cwd: session.worktree_path,
-            system: conduitSystemPrompt({ repoName: session.repo_id, branch: session.branch }),
-          });
+        ? await this.harness.resume(session.harness_session_handle, session.worktree_path, system)
+        : await this.harness.create({ cwd: session.worktree_path, system });
 
     entry.harness = harness;
     return harness;

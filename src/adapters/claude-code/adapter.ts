@@ -34,12 +34,15 @@ import type {
 // it (verified doc precedence: hooks -> deny/ask rules -> permission mode ->
 // allow rules -> canUseTool).
 
-/** Opaque to the core. Owned entirely by this adapter. */
+/**
+ * Opaque to the core. Owned entirely by this adapter. Deliberately does NOT
+ * carry the system prompt — that is core policy, re-supplied on every
+ * create/resume so a posture change reaches existing sessions. (Legacy handles
+ * from M1 may still contain a `system` field; asHandle ignores it.)
+ */
 interface ClaudeCodeHandle {
   v: 1;
   sessionId: string | null;
-  /** The Conduit system-prompt append, replayed on every query() incl. resume. */
-  system: string;
 }
 
 // `allowedTools` auto-approves reads (the hook still denies out-of-worktree
@@ -61,21 +64,18 @@ const TURN_INACTIVITY_MS = 10 * 60_000;
 
 function asHandle(handle: SessionHandle): ClaudeCodeHandle {
   const h = handle as Partial<ClaudeCodeHandle> | null;
-  if (
-    !h ||
-    h.v !== 1 ||
-    typeof h.system !== "string" ||
-    (h.sessionId !== null && typeof h.sessionId !== "string")
-  ) {
+  if (!h || h.v !== 1 || (h.sessionId !== null && h.sessionId !== undefined && typeof h.sessionId !== "string")) {
     throw new Error("claude-code: unrecognized session handle");
   }
-  return h as ClaudeCodeHandle;
+  return { v: 1, sessionId: h.sessionId ?? null };
 }
 
 class ClaudeCodeSession implements HarnessSession {
   constructor(
     private _handle: ClaudeCodeHandle,
     private cwd: string,
+    /** Conduit protocol prompt (preset append). Supplied fresh each turn. */
+    private system: string,
   ) {}
 
   get handle(): SessionHandle {
@@ -129,7 +129,7 @@ class ClaudeCodeSession implements HarnessSession {
       options: {
         cwd: this.cwd,
         resume: this._handle.sessionId ?? undefined,
-        systemPrompt: { type: "preset", preset: "claude_code", append: this._handle.system },
+        systemPrompt: { type: "preset", preset: "claude_code", append: this.system },
         allowedTools: ALLOWED_TOOLS,
         disallowedTools: DISALLOWED_TOOLS,
         permissionMode: "default",
@@ -284,11 +284,10 @@ export class ClaudeCodeAdapter implements HarnessAdapter {
   };
 
   async create(opts: { cwd: string; system: string }): Promise<HarnessSession> {
-    const handle: ClaudeCodeHandle = { v: 1, sessionId: null, system: opts.system };
-    return new ClaudeCodeSession(handle, opts.cwd);
+    return new ClaudeCodeSession({ v: 1, sessionId: null }, opts.cwd, opts.system);
   }
 
-  async resume(handle: SessionHandle, cwd: string): Promise<HarnessSession> {
-    return new ClaudeCodeSession(asHandle(handle), cwd);
+  async resume(handle: SessionHandle, cwd: string, system: string): Promise<HarnessSession> {
+    return new ClaudeCodeSession(asHandle(handle), cwd, system);
   }
 }

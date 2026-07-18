@@ -20,7 +20,7 @@ const gate: GateFn = async (call) => {
 };
 
 const adapter = new ClaudeCodeAdapter();
-const session = await adapter.resume(state.handle, state.cwd);
+const session = await adapter.resume(state.handle, state.cwd, "You are Conduit (M2 smoke). Be terse.");
 
 for await (const ev of session.turn({ text: "" }, gate)) {
   console.log(`[event] ${ev.kind}${ev.kind === "reply" ? ": " + ev.text.slice(0, 160) : ""}`);

@@ -191,7 +191,7 @@ export class FakeHarness implements HarnessAdapter {
 
   sessionSeq = 0;
   created: { cwd: string; system: string }[] = [];
-  resumed: { handle: SessionHandle; cwd: string }[] = [];
+  resumed: { handle: SessionHandle; cwd: string; system: string }[] = [];
   allTurns: { cwd: string; text: string }[] = [];
   /** Tool calls the gate allowed to run (approved or auto-allowed). */
   executed: ToolCall[] = [];
@@ -214,8 +214,9 @@ export class FakeHarness implements HarnessAdapter {
     return new FakeHarnessSession({ fake: true, sessionId: null, system: opts.system }, opts.cwd, this);
   }
 
-  async resume(handle: SessionHandle, cwd: string): Promise<HarnessSession> {
-    this.resumed.push({ handle, cwd });
-    return new FakeHarnessSession(handle as FakeHandle, cwd, this);
+  async resume(handle: SessionHandle, cwd: string, system: string): Promise<HarnessSession> {
+    this.resumed.push({ handle, cwd, system });
+    // Reflect the freshly-supplied prompt, as the real adapter does.
+    return new FakeHarnessSession({ ...(handle as FakeHandle), system }, cwd, this);
   }
 }
