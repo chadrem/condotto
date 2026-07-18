@@ -535,3 +535,59 @@ capability flags as config the core persists and passes through (never core
 policy). Include a way to dial capability *down* — model×effort×subagents spend
 the subscription plan's **rate limit**, the real constraint (cost budgets are
 notional). **Not yet implemented** — this entry records the plan + verified facts.
+
+## 2026-07-18 — M3.5 Tier A shipped + Tier B spike: subagent defer does NOT resume
+
+**Tier A (model + effort) — done.** Per-session `model`/`effort` columns (opaque
+tokens) with per-repo defaults (`conduit.repos.json`) + a daemon-wide default of
+**Opus + high** (DESIGN §1: a first-class implementer). Architect commands
+`@Conduit model <opus|sonnet|fable>` / `effort <low…max>` (architect-only, audited),
+shown in intro/status/help. Ports stayed clean: the core validates a choice by
+membership in `HarnessCapabilities.supportedModels/supportedEfforts` and forwards
+the opaque token via `TurnInput.harness`; the **claude-code adapter** is the only
+place that knows SDK ids (`opus→claude-opus-4-8`, `sonnet→claude-sonnet-5`,
+`fable→claude-fable-5`) and applies `effort`. Also hardened the default posture:
+both `Agent` **and** `Task` (+`Workflow`) are now disallowed by default (was
+`Task`-only — see the spike's tool-name finding). Verified by `smoke:model` on live
+subscription auth: Opus/high then a mid-session switch to Fable/low apply cleanly.
+
+**SDK re-verification (installed `@anthropic-ai/claude-agent-sdk` 0.3.214, against
+`sdk.d.ts`).** All facts confirmed: `Options.model?: string` (its own docstring
+examples are `claude-opus-4-8`/`claude-sonnet-5`/`claude-fable-5`);
+`Options.effort?: EffortLevel = low|medium|high|xhigh|max` (default high; `xhigh`
+needs Fable 5 / Opus 4.7+ / Sonnet 5 — our Opus qualifies — silently falls back to
+`high` elsewhere); `settingSources?: ('user'|'project'|'local')[]` (`[]` isolates,
+`'project'` needed for CLAUDE.md); `skills?: 'all' | string[]`;
+`agents?: Record<string, AgentDefinition>` (per-subagent `tools`/`effort`/`model`,
+daemon-defined, no repo trust); `mcpServers`. `BaseHookInput` carries
+`agent_id`/`agent_type` ("present only when the hook fires from within a subagent").
+
+**Tier B spike (two phases, real SDK, subscription auth) — the load-bearing test
+BEFORE building Tier B. Scripts in `spikes/m3.5/`.**
+
+- **The subagent tool is named `Agent`** (the model emitted `Agent`, not the legacy
+  `Task`). So disabling subagents requires disallowing **both** names (done).
+- **The `PreToolUse` gate fires inside a subagent** — a subagent's `Write` hit the
+  hook with `agent_id` set and `agent_type: "writer"`. Subagent tool calls are
+  gateable exactly as claimed; enabling subagents does NOT bypass the gate.
+- **BUT `defer` on a subagent-initiated call does NOT produce a resumable pending
+  call.** Phase 1: the subagent's `Write` was deferred → the file was NOT written
+  (fail-safe), but the query ended `terminal_reason: "completed"` with
+  `deferred_tool_use: null` — nothing to resume. **`defer`/resume is a main-thread
+  mechanism.** The M0 defer→approve→resume loop works only for the main agent.
+- **Phase 2 validated the corrected Tier B mechanism** (`subagent-deny.ts`): a
+  subagent READ hit the hook (`agent_id` set) and was allowed + confined; a subagent
+  WRITE was **denied** cleanly (query completed, no hang); the **main agent** then
+  performed the write itself. This is the intended flow.
+
+**Decision (Tier B design, spike-driven).** Subagents are enabled as **read-only
+parallel fan-out** for exploration/analysis. Their reads flow through the gate
+(allowed + worktree-confined, `agent_id`-tagged). Any subagent-initiated **gated**
+action (write/edit/bash/network) or **nested spawn** is **DENIED** in the policy
+engine (fail-closed, with feedback telling the model the main agent must do it),
+because defer→resume can't pause a subagent call. The **main agent** performs all
+mutations via the M0-proven defer→approve→resume path. Defense-in-depth: daemon-side
+`agents` give subagents a read-only default toolset, and the deny-in-policy backstop
+catches any subagent (built-in type or Workflow-spawned) that still reaches for a
+gated tool. The `ultra` preset = `xhigh` + subagents + the `Workflow` tool; its
+orchestrated sub-agents obey the same subagent gate.
