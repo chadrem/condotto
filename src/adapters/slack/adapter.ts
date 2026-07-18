@@ -369,8 +369,10 @@ export class SlackAdapter implements SurfaceAdapter {
     const decider: Principal = { surface: SURFACE_ID, externalId: String(body.user?.id) };
     const channelId = String(body.channel?.id ?? body.container?.channel_id ?? "");
     const outcome: "approved" | "denied" = action.action_id === APPROVE_ACTION ? "approved" : "denied";
+    this.log(`[slack] approval click: ${outcome} req=${requestId} by ${decider.externalId} ch=${channelId}`);
 
     if (!this.authority.isArchitect(decider, channelId)) {
+      this.log(`[slack] click ignored — ${decider.externalId} is not an architect in ${channelId}`);
       await respond({
         response_type: "ephemeral",
         text: "Only architects can approve or deny — ignoring.",

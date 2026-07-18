@@ -332,9 +332,15 @@ export class SessionManager {
     event: Extract<InboundEvent, { kind: "approval_decision" }>,
   ): Promise<void> {
     const approval = this.store.getApproval(event.requestId);
-    if (!approval) return; // unknown/expired request — nothing to resume
+    if (!approval) {
+      this.log(`[approval] unknown request ${event.requestId} — nothing to resume`);
+      return;
+    }
     const session = this.store.getSession(approval.session_id);
-    if (!session) return;
+    if (!session) {
+      this.log(`[approval] request ${event.requestId} has no session`);
+      return;
+    }
     const conv: ConversationRef = {
       surfaceId: session.surface_id,
       channelId: session.channel_id,
@@ -346,6 +352,7 @@ export class SessionManager {
     // Authoritative role check — the surface may pre-check for UX, but authority
     // is decided here and never trusts the client (DESIGN.md §4).
     if (!this.store.isArchitect(decider, session.channel_id)) {
+      this.log(`[approval] ${decider} is not an architect in ${session.channel_id} — rejected`);
       this.store.audit({
         sessionId: session.id,
         actor: decider,
@@ -371,7 +378,11 @@ export class SessionManager {
     const outcome = event.decision === "approved" ? "approved" : "denied";
     // Transition once; a second click (Slack at-least-once / double-click)
     // returns false and must not resume the session again.
-    if (!this.store.decideApproval(event.requestId, decider, outcome)) return;
+    if (!this.store.decideApproval(event.requestId, decider, outcome)) {
+      this.log(`[approval] request ${event.requestId} was already decided — ignoring`);
+      return;
+    }
+    this.log(`[approval] ${outcome} by ${decider} — resuming session ${session.id}`);
     this.store.audit({
       sessionId: session.id,
       actor: decider,
