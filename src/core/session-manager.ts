@@ -11,7 +11,7 @@ import type {
   SurfaceAdapter,
 } from "./types";
 import { principalKey } from "./types";
-import type { Store, SessionRow, ApprovalRow } from "./store";
+import type { Store, SessionRow, ApprovalRow, RepoRow } from "./store";
 import { ConflictError } from "./store";
 import { WorktreeManager } from "./worktrees";
 import { CommandRunner, type CommandRunnerLike } from "./command-runner";
@@ -230,6 +230,27 @@ export class SessionManager {
     else if (session.subagents === 1) parts.push("*subagents on*");
     return parts.join(", ");
   }
+
+  /**
+   * A settings announcement posted when Conduit joins (or rejoins) a thread —
+   * like Claude Code's startup banner (M3.5). Lists EVERY setting, including the
+   * ones that are off, so the current posture is unambiguous at a glance. The
+   * repo row supplies trust + the test command.
+   */
+  private settingsBlock(session: SessionRow, repo: RepoRow | null): string {
+    const subagents = session.subagents === 1;
+    const ultra = session.subagents === 1 && session.workflows === 1;
+    const budget = session.budget_limit_usd ?? this.defaultCostCapUsd;
+    const lines = [
+      `⚙️ *Session settings*`,
+      `• model \`${this.effectiveModel(session)}\`  ·  effort \`${this.effectiveEffort(session)}\``,
+      `• subagents ${subagents ? "*on*" : "off"}  ·  ultra ${ultra ? "*on*" : "off"}`,
+      `• cost budget $${budget.toFixed(2)}`,
+    ];
+    if (repo?.trusted === 1) lines.push("• 🔐 trusted repo — loading its `CLAUDE.md`, skills, and `.claude/` config");
+    if (repo?.test_cmd) lines.push(`• tests \`${repo.test_cmd}\` (auto-run, no approval)`);
+    return lines.join("\n");
+  }
   /** The per-turn harness config for a session (opaque tokens + capability flags). */
   private harnessOptionsFor(session: SessionRow, repoTrusted: boolean): HarnessTurnOptions {
     return {
@@ -372,7 +393,8 @@ export class SessionManager {
           text:
             `Session reactivated — repo \`${existing.repo_id}\`, branch \`${existing.branch}\`. ` +
             `I still have the prior context.\n` +
-            `Running ${this.capabilitySummary(existing)}.\n\n` +
+            this.settingsBlock(existing, this.store.getRepo(existing.repo_id)) +
+            `\n\n` +
             threadCommandHelp(),
         });
       });
@@ -437,10 +459,7 @@ export class SessionManager {
     await surface.post(conv, {
       text:
         `I'm on it — repo \`${repo.name}\`, branch \`${worktree.branch}\`.\n` +
-        `Running ${this.capabilitySummary(session)}.` +
-        (repo.trusted === 1
-          ? `\n🔐 Trusted repo — I'm loading its own \`CLAUDE.md\`, skills, and \`.claude/\` config (still behind the gate).`
-          : "") +
+        this.settingsBlock(session, repo) +
         `\n\n` +
         `Reply in this thread to talk — reading and analysis are free. Edits, shell ` +
         `commands, and land/deploy pause for an architect's Approve/Deny.\n\n` +
@@ -463,7 +482,8 @@ export class SessionManager {
       await surface.post(conv, {
         text:
           `I'm working in this thread — repo \`${session.repo_id}\`, branch \`${session.branch}\`.\n` +
-          `Running ${this.capabilitySummary(session)}.\n\n` +
+          this.settingsBlock(session, this.store.getRepo(session.repo_id)) +
+          `\n\n` +
           threadCommandHelp(),
       });
       return;

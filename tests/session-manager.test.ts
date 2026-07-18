@@ -917,6 +917,31 @@ describe("harness capabilities — subagents & ultra (M3.5 Tier B)", () => {
     expect(w.surface.posts.at(-1)!.text).not.toContain("*ultra on*");
   });
 
+  test("the join announcement lists EVERY setting, including subagents/ultra when off", async () => {
+    const w = makeWorld();
+    await assign(w, "set1.000001");
+    const intro = w.surface.posts.at(-1)!.text;
+    expect(intro).toContain("Session settings");
+    expect(intro).toContain("model `opus`");
+    expect(intro).toContain("effort `high`");
+    expect(intro).toContain("subagents off"); // announced even though off
+    expect(intro).toContain("ultra off");
+    expect(intro).toContain("cost budget");
+  });
+
+  test("the join announcement reflects enabled subagents/ultra when Conduit re-announces", async () => {
+    const w = makeWorld();
+    const c = conv("set2.000001");
+    await assign(w, "set2.000001");
+    await w.manager.handleEvent({ kind: "command", conv: c, author: architect, name: "ultra", args: "on" });
+    // A bare @Conduit (help) re-announces the current settings in an assigned thread.
+    await w.manager.handleEvent({ kind: "command", conv: c, author: architect, name: "help", args: "" });
+    const msg = w.surface.posts.at(-1)!.text;
+    expect(msg).toContain("Session settings");
+    expect(msg).toContain("subagents *on*");
+    expect(msg).toContain("ultra *on*");
+  });
+
   test("architect turns subagents on; it persists, reaches the turn, and enters the prompt", async () => {
     const w = makeWorld();
     const c = conv("sb2.000001");
