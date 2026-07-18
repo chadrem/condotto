@@ -158,8 +158,9 @@ export class SessionManager {
     const repoName = args.trim().split(/\s+/)[0] || "testrepo";
     const repo = this.store.getRepo(repoName);
     if (!repo) {
+      const available = this.store.listRepos().map((r) => r.name).join(", ") || "(none)";
       await surface.post(conv, {
-        text: `Unknown repo "${repoName}". Available: testrepo (M1 has a single throwaway repo).`,
+        text: `Unknown repo "${repoName}". Available: ${available}.`,
       });
       return;
     }

@@ -161,6 +161,14 @@ export class Store {
       .get({ name });
   }
 
+  listRepos(): { name: string; path: string; default_branch: string }[] {
+    return this.db
+      .query<{ name: string; path: string; default_branch: string }, []>(
+        `SELECT name, path, default_branch FROM repos ORDER BY name`,
+      )
+      .all();
+  }
+
   // -- sessions -------------------------------------------------------------
 
   createSession(s: Omit<SessionRow, "created_at" | "last_active_at">): SessionRow {

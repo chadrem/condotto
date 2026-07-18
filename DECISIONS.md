@@ -204,3 +204,20 @@ session traffic doesn't land in working team channels.
 
 **Consequences:** DESIGN.md §8 and CLAUDE.md updated. Sessions and future
 Claude instances must not re-flag the workspace as a safety violation.
+
+## 2026-07-18 — Repo registry: point Conduit at real repos by name
+
+**Decision (architect request):** repos are registered in a gitignored
+`conduit.repos.json` (array of `{name, path, defaultBranch?}`; path override
+via `CONDUIT_REPOS_FILE`). The throwaway `testrepo` stays registered by
+default; an entry named `testrepo` overrides it. `/conduit assign <name>`
+resolves any registered repo. This pulls "real repo registration" forward
+from post-M4 at the architect's request, for read-only M1 sessions.
+
+**Why it's acceptable now:** sessions only ever see **committed content** —
+each session works in a fresh `git worktree`, so the repo's working tree,
+untracked files (`.env`, local configs), and ignored files are never visible
+to the agent; M1 sessions are read-only with reads confined to the worktree.
+Registered repos accumulate `conduit/*` branches + worktree registrations
+(clean with `git worktree prune` and branch deletion). The deploy/land
+no-op rule and M4 gating review still stand before any write access.
