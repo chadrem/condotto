@@ -689,13 +689,15 @@ Socket Mode setup) is only needed from M1; that setup is **Appendix C**.
 
 **Build-time safety (applies to every milestone).** You are building a tool
 that runs shell commands and can deploy. While *building* it: point it only at
-a **throwaway git repo** and a **scratch Slack workspace/channel** you control
-— never a real production repo, real deploy path, or a shared team channel —
+a **throwaway git repo** — never a real production repo or real deploy path —
 until M4 hardening is done and an architect (the human running this) has
 reviewed the gating. Wire the deploy/land commands (M3) as **no-ops or
 `echo`** first; make them real only after the approval loop is proven. The
 daemon's whole risk surface is "text from Slack → shell on a real machine";
 treat your own dev loop with the same suspicion the product treats its users.
+(Slack side: development runs in the real company workspace by explicit
+architect decision, 2026-07-18 — see DECISIONS.md. Prefer a dedicated test
+channel; the repo/deploy guardrails above are unaffected.)
 
 **Milestone 0 — Prove the gated-resume loop (spike, throwaway ok).**
 **✅ DONE 2026-07-16.** All success criteria met under Bun 1.3.14 on

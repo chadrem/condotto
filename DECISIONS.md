@@ -187,3 +187,20 @@ SDK usage) with three-lens adversarial verification confirmed 41 findings
 orphan cleanup on assign races (M4), symlink-aware confinement (M3/M4),
 render polish (URLs containing `)`, truncation mid-fence), turn duration
 timestamps.
+
+## 2026-07-18 — Development uses the real Slack workspace (architect decision)
+
+**Decision (Chad, the architect/owner):** all Conduit development and testing
+runs in the real company workspace, Acme (acme.slack.com) — not a
+scratch workspace. Risks are known and accepted. This supersedes the
+scratch-workspace clause of DESIGN.md §8's build-time safety rule.
+
+**What is NOT lifted:** every other guardrail stands unchanged — sessions
+point only at the throwaway git repo (`~/tmp/conduit-testrepo`), never a real
+repo or deploy path until M4 hardening + gating review; deploy/land commands
+ship as no-ops/`echo` first (M3); M1 sessions remain read-only and
+worktree-confined. Practical mitigation: prefer a dedicated test channel so
+session traffic doesn't land in working team channels.
+
+**Consequences:** DESIGN.md §8 and CLAUDE.md updated. Sessions and future
+Claude instances must not re-flag the workspace as a safety violation.
