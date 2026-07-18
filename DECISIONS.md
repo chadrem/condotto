@@ -893,3 +893,66 @@ allowlisted bash; `Write`/`Edit` are lexically worktree-confined even in write m
 `escaped`/`agentId` are adapter-set (not model-spoofable) and `id:""` never collides
 with an approval lookup; the launch gate can't be bypassed and nested spawns are denied;
 `parseWorkflowMeta` is crash/ReDoS-safe; no port violations; docs match the code.
+
+## 2026-07-18 — M3.6 key learnings & the `bypassPermissions` decision (read before touching workflows)
+
+A consolidated, durable record of what M3.6 taught us — the non-obvious things a
+future session (or an architect deciding whether to keep this) needs.
+
+**1. The load-bearing decision: workflow sessions run under
+`permissionMode: "bypassPermissions"`. This is NOT a security downgrade, and the
+name is misleading.** In the Agent SDK, hooks outrank permission mode (precedence:
+hooks → deny/ask rules → permission mode → allow rules → canUseTool). So our
+PreToolUse hook's `deny`/`defer` still win under `bypassPermissions`; what the mode
+actually changes is the *fallback* for a call the hook doesn't terminally decide —
+from "ask the interactive user" (which, headless, DEFAULT-DENIES) to "proceed". We
+set it ONLY for workflow-enabled sessions, and ONLY because the SDK runs a workflow
+as a detached background task whose sub-agent tool calls otherwise never reach our
+hook (they default-deny off-gate — that is the whole M3.5 "workflows bypass the gate"
+mirage). Under `bypassPermissions` those same calls DO reach our hook with an
+`agent_id`, where the read-only subagent policy confines them. Empirically proven,
+not reasoned: `spikes/m3.6/diag3.ts` (hook `deny` on a workflow write is honored;
+main-agent `defer` still pauses) and `diag4.ts` (the `canUseTool` batching backstop
+is still reached and still denies). **This inverts the M3.5 conclusion and is an
+architect-level call** — it is safe as built, but if the flag itself is unacceptable,
+the only alternative found is to keep workflows disabled (there is no other mechanism
+that makes the background workflow's agents both functional AND gateable). Do not
+"harden" this by switching workflow sessions back to `permissionMode: "default"` —
+that silently breaks workflows (agents default-deny) rather than making them safer.
+
+**2. The SDK's Workflow execution model (why the toolset is limited).** The Workflow
+tool launches the whole workflow as a *background task* (`system` subtype
+`task_started`/`task_progress`/`background_tasks_changed`/`task_updated`), returns
+"launched; waiting…" immediately, and the launching `query()` generator then streams
+that task's lifecycle and yields a SECOND, FINAL `result` when it completes — so a
+workflow turn produces MULTIPLE results (the adapter buffers and delivers the last).
+Background workflow sub-agents get a MINIMAL default toolset: **Read/Glob route
+through our hook and are confined reliably; Grep/Bash/Write are frequently denied by
+the SDK's task-permission layer UPSTREAM of our hook** ("The user doesn't want to take
+this action right now"), inconsistently run-to-run. So workflow agents are best used
+for parallel READ/analyze fan-out; grep-style search and any shell stay with the main
+agent (the system prompt says so). This is an SDK limitation we cannot override from
+our gate — but it never widens the security boundary (nothing escapes the worktree on
+any path; our gate AND the SDK's own worktree sandbox both deny out-of-tree).
+
+**3. Bash cannot be worktree-confined by our policy, so it is never auto-runnable by
+a confined/escaped call — not even in the worktree-write opt-in.** `evaluateBash`
+screens only heuristics (hard-deny + prod-data); it applies NO path confinement to a
+command string. The write opt-in relaxes WRITES only (which ARE lexically confined via
+`offendingPath`). This was the CRITICAL review finding — do not "restore" confined
+bash for convenience without first giving Bash real worktree confinement (reject
+absolute/`..`/`~`/`$`/substitution/redirect targets) or a positive-parse allowlist.
+
+**4. M4 watch-list (known, accepted for now):** (a) a turn-inactivity TIMEOUT records
+zero cost — no `result` carries `total_cost_usd` — so a wedged workflow's spend can
+evade the runaway cap; and `q.interrupt()` may not cancel the detached background
+workflow, which could keep spending after the turn parks. Wire background-task cost
+accounting + cancellation in M4. (b) The 10-min watchdog could trip if every workflow
+agent is silent >10 min (rare; `task_progress` resets it). (c) The Slack adapter still
+has no unit tests; the `workflows write` mention parse is verified-by-reading only
+(fails safe). (d) Symlink-chasing confinement remains M3/M4 (writes are lexical-only).
+
+**5. Process learning:** the spike-first rule paid for itself again — re-running the
+real Workflow tool (not trusting the M3.5 write-up) is what surfaced the
+`permissionMode` inversion. When a prior "it can't be done" blocks a north-star
+capability, re-spike the primitive before accepting it.
