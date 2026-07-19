@@ -1,24 +1,29 @@
 # Condotto
 
 **Now the person who knows what to build can build it themselves — right there
-in Slack.** Assign any thread a **dedicated, persistent
-[Claude Code](https://claude.com/claude-code) session running on your own
-development machine** — the real repo, the real toolchain, the real deploy
-path — and the person who understands the problem builds the fix themselves, in
-plain language, while a software engineer (the *architect*) rides shotgun in the
-same thread and approves every consequential move. The product manager who filed
-the bug fixes it herself; the support lead pulls the report she needs straight
-from production — because **every write, shell command, production read, and
-deploy pauses un-executed until the architect approves**, and each one lands in
-an append-only audit log. Work that used to mean pulling an engineer aside now
-happens in the open, in the channel: gated, audited, and done as a team.
+in Slack.** Assign any thread a dedicated, persistent
+[Claude Code](https://claude.com/claude-code) session on your own dev machine —
+real repo, real toolchain, real deploy path — and your whole team ships real
+work together, every consequential move gated by an engineer and written to an
+audit log.
 
-Under the hood it's a **three-way working conversation**. The domain expert —
-**a product manager first** — drives the *what* and *why* in plain language; the
-AI implementer writes the code, runs the tests, and posts progress; and the
-*architect* keeps quality and safety honest, approving the consequential moves.
-Your product people ship real features and fixes; your engineers spend their
-time guiding instead of ticket-taking.
+- **Fix the bug you filed** — the PM who reported it drives the fix herself,
+  tests and all, instead of waiting in an engineer's queue.
+- **Ship a feature or prototype a spec** — describe the *what* and *why* in
+  plain language; the AI implementer writes the code, runs the tests, and posts
+  progress in the thread.
+- **Debug support issues together** — read the logs and chase the root cause in
+  the open channel, as a team, instead of pulling an engineer aside.
+- **Pull a report from production** — safely, through the gate; only aggregates
+  (counts, rates, yes/no) ever come back to the channel, never raw rows.
+- **Gated and audited by default** — every write, shell command, production
+  read, and deploy pauses un-executed until the architect approves, each one
+  logged, with a hard-deny floor no one can override.
+
+Under the hood it's a **three-way working conversation**: the domain expert —
+such as a product manager — drives the *what* and *why* in plain language, the
+AI implementer writes and tests the code, and the *architect* approves the
+consequential moves.
 
 > Condotto is the missing quadrant: **persistent, multi-session coding agents on
 > your own computer, with chat threads as the entire user interface.** Claude in
@@ -26,8 +31,8 @@ time guiding instead of ticket-taking.
 > Code CLI is one human at one terminal. Condotto is your machine, your
 > credentials, your deploy path — driven from Slack, by a whole team.
 
-This is an **open-source beta** meant for a **small, mutually-trusting team**
-whose architect self-hosts it. See [Security & trust model](#security--trust-model)
+It is meant for a **small, mutually-trusting team** whose architect
+self-hosts it. See [Security & trust model](#security--trust-model)
 for exactly what that means and what Condotto does — and does not — defend against.
 
 **Contents**
