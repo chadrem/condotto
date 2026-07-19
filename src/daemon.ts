@@ -166,6 +166,13 @@ async function main(): Promise<void> {
   const slack = new SlackAdapter(
     slackCreds,
     { isArchitect: (p, channelId) => store.isArchitect(principalKey(p), channelId) },
+    // Operator console (M4 §4): the core renders the daemon-wide `/conduit status`
+    // dashboard and the `/conduit stop` session list; the adapter delivers them
+    // ephemerally. Least-privilege object literal (not the whole manager).
+    {
+      operatorStatus: (p, channelId) => manager.operatorStatus(p, channelId),
+      channelStopGuidance: (channelId) => manager.channelStopGuidance(channelId),
+    },
     log,
   );
   manager.registerSurface(slack);

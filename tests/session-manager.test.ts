@@ -62,6 +62,8 @@ function makeWorld(
     worktreesRoot?: string;
     /** M4 §3: `stop clean` retention window. */
     worktreeRetentionMs?: number;
+    /** M4 §4: fixed daemon start time for deterministic operator-status uptime. */
+    startedAt?: number;
   } = {},
 ): World {
   const s = store ?? new Store(":memory:");
@@ -83,6 +85,7 @@ function makeWorld(
     maxConcurrentTurns: opts.maxConcurrentTurns,
     commandRunner: runner,
     worktreeRetentionMs: opts.worktreeRetentionMs,
+    startedAt: opts.startedAt,
   });
   manager.registerSurface(surface);
   return { store: s, surface, harness, runner, manager, worktreesRoot: root };
@@ -309,6 +312,126 @@ describe("stop & status", () => {
       args: "",
     });
     expect(w.surface.posts.at(-1)?.text).toContain("testrepo");
+  });
+});
+
+describe("operator status & slash stop guidance (M4 §4)", () => {
+  async function assign(w: World, id: string, channelId = "C1"): Promise<void> {
+    await w.manager.handleEvent({
+      kind: "command",
+      conv: { surfaceId: "fake", channelId, conversationId: id },
+      author: architect,
+      name: "assign",
+      args: "",
+    });
+  }
+
+  test("the daemon-wide dashboard renders uptime, counts, in-flight/cap, backlog, and config (architect)", async () => {
+    const w = makeWorld(undefined, { startedAt: 1000 });
+    await assign(w, "ops1.000001");
+    // 3 days 4 hours after the fixed start time.
+    const now = 1000 + (3 * 86400 + 4 * 3600) * 1000;
+    const text = w.manager.operatorStatus(architect, "C1", now);
+    expect(text).toContain("operator status");
+    expect(text).toContain("uptime 3d 4h");
+    expect(text).toContain("*1* parked");
+    expect(text).toContain("turns in flight: *0/6*"); // idle, default cap
+    expect(text).toContain("pending approvals: *0*");
+    expect(text).toContain("default model `opus`");
+    expect(text).toContain("effort `high`");
+    expect(text).toContain("cost cap $10.00/thread");
+    expect(text).toContain("auto-approve on");
+    expect(text).toContain("1 repo"); // just testrepo
+    expect(text).toContain("1 architect"); // fake:U_ARCH
+  });
+
+  test("uptime formats every magnitude branch (hours, minutes, seconds) and clamps a backwards clock", async () => {
+    const start = 1_000_000;
+    const w = makeWorld(undefined, { startedAt: start });
+    await assign(w, "ops1b.000001");
+    const at = (ms: number) => w.manager.operatorStatus(architect, "C1", start + ms);
+    expect(at((5 * 3600 + 12 * 60) * 1000)).toContain("uptime 5h 12m");
+    expect(at((8 * 60 + 3) * 1000)).toContain("uptime 8m 3s");
+    expect(at(45 * 1000)).toContain("uptime 45s");
+    expect(at(-5000)).toContain("uptime 0s"); // clock skew clamps to 0, never negative
+  });
+
+  test("a member is refused the operator dashboard (authority decided in the core)", async () => {
+    const w = makeWorld();
+    await assign(w, "ops2.000001");
+    expect(w.manager.operatorStatus(member, "C1")).toContain("Only architects");
+  });
+
+  test("counts are daemon-wide and reflect parked/stopped + the pending-approval backlog", async () => {
+    const w = makeWorld();
+    await assign(w, "ops3.000001", "C1");
+    await assign(w, "ops4.000001", "C1");
+    await assign(w, "ops5.000001", "C2"); // a different channel — still counted daemon-wide
+    // Plain-stop one → it becomes 'stopped'.
+    await w.manager.handleEvent({
+      kind: "command",
+      conv: { surfaceId: "fake", channelId: "C1", conversationId: "ops4.000001" },
+      author: architect,
+      name: "stop",
+      args: "",
+    });
+    // A gated write on another leaves a pending approval (session parks). The
+    // author is a MEMBER — an architect-initiated turn would auto-approve (M3.8),
+    // leaving nothing pending.
+    w.harness.scriptTurn([{ id: "tu-w", name: "Write", input: { file_path: "x.txt", content: "hi" } }]);
+    await w.manager.handleEvent({
+      kind: "message",
+      conv: { surfaceId: "fake", channelId: "C1", conversationId: "ops3.000001" },
+      author: member,
+      text: "add x",
+      attachments: [],
+    });
+
+    const text = w.manager.operatorStatus(architect, "C1");
+    expect(text).toContain("*2* parked"); // ops3 (parked after defer) + ops5 (C2)
+    expect(text).toContain("1 stopped"); // ops4
+    expect(text).toContain("pending approvals: *1*");
+  });
+
+  test("turns in flight tracks the concurrency semaphore while a turn is held", async () => {
+    const w = makeWorld();
+    await assign(w, "ops6.000001");
+    let release!: () => void;
+    const held = new Promise<void>((r) => (release = r));
+    w.harness.beforeReply = () => held;
+
+    const turnP = w.manager.handleEvent({
+      kind: "message",
+      conv: { surfaceId: "fake", channelId: "C1", conversationId: "ops6.000001" },
+      author: architect,
+      text: "go",
+      attachments: [],
+    });
+    // Wait until the turn has acquired its slot (visible as 1/6 in the dashboard).
+    for (let i = 0; i < 60 && !w.manager.operatorStatus(architect, "C1").includes("*1/6*"); i++) {
+      await Bun.sleep(5);
+    }
+    expect(w.manager.operatorStatus(architect, "C1")).toContain("turns in flight: *1/6*");
+    release();
+    await turnP;
+    expect(w.manager.operatorStatus(architect, "C1")).toContain("turns in flight: *0/6*");
+  });
+
+  test("`/conduit stop` guidance lists the channel's sessions and points to @Conduit stop", async () => {
+    const w = makeWorld();
+    await assign(w, "ops7.000001");
+    const text = w.manager.channelStopGuidance("C1");
+    expect(text).toContain("Sessions in this channel");
+    expect(text).toContain("testrepo");
+    expect(text).toContain("@Conduit stop");
+    expect(text).toContain("stop clean");
+  });
+
+  test("`/conduit stop` guidance in an empty channel points to assign", () => {
+    const w = makeWorld();
+    const text = w.manager.channelStopGuidance("C_EMPTY");
+    expect(text).toContain("No active sessions");
+    expect(text).toContain("/conduit assign");
   });
 });
 

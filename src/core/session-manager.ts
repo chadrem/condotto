@@ -201,6 +201,12 @@ export interface SessionManagerOptions {
    * longer than an assign, so a real crash-orphan still ages out promptly.
    */
   orphanMinAgeMs?: number;
+  /**
+   * Epoch-ms the daemon started (M4 §4 operator status uptime). The manager is
+   * constructed once at boot, so it defaults to construction time — a faithful
+   * proxy for daemon uptime. Injectable so tests get a deterministic uptime.
+   */
+  startedAt?: number;
 }
 
 /** Prefix marking an approval whose action the daemon runs itself (land/deploy) */
@@ -232,6 +238,25 @@ class Semaphore {
     if (next) next(); // hand the slot to the next waiter (active unchanged)
     else this.active--; // no waiter — free the slot
   }
+  /** Point-in-time load for the operator status (M4 §4): turns running now, the
+   *  cap, and how many are queued waiting for a slot. */
+  snapshot(): { active: number; max: number; waiting: number } {
+    return { active: this.active, max: this.max, waiting: this.waiters.length };
+  }
+}
+
+/** Human-readable elapsed time for the operator status uptime (M4 §4). Coarse by
+ *  design — two largest units — since operators glance at it, not stopwatch it. */
+function formatDuration(ms: number): string {
+  const s = Math.max(0, Math.floor(ms / 1000));
+  const d = Math.floor(s / 86400);
+  const h = Math.floor((s % 86400) / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  const sec = s % 60;
+  if (d) return `${d}d ${h}h`;
+  if (h) return `${h}h ${m}m`;
+  if (m) return `${m}m ${sec}s`;
+  return `${sec}s`;
 }
 
 export class SessionManager {
@@ -246,6 +271,8 @@ export class SessionManager {
   private readonly orphanMinAgeMs: number;
   private readonly turnSlots: Semaphore;
   private readonly commandRunner: CommandRunnerLike;
+  /** Daemon start time for the operator-status uptime (M4 §4). */
+  private readonly startedAt: number;
 
   constructor(
     private store: Store,
@@ -264,6 +291,7 @@ export class SessionManager {
     this.orphanMinAgeMs = opts.orphanMinAgeMs ?? 10 * 60 * 1000;
     this.turnSlots = new Semaphore(Math.max(1, opts.maxConcurrentTurns ?? 6));
     this.commandRunner = opts.commandRunner ?? new CommandRunner();
+    this.startedAt = opts.startedAt ?? Date.now();
   }
 
   // -- harness capability helpers (M3.5) ------------------------------------
@@ -649,21 +677,91 @@ export class SessionManager {
     this.log(`[choice] unknown choiceId "${event.choiceId}" — ignoring`);
   }
 
+  /**
+   * `@Conduit status` (in-thread mention) — the CHANNEL-scoped session list, posted
+   * publicly into the thread. Unchanged in M4 §4: the daemon-wide operator view moved
+   * to the `/conduit status` slash command (see `operatorStatus`); this stays the
+   * lightweight "what's running here" a member can ask for.
+   */
   private async status(conv: ConversationRef): Promise<void> {
     const surface = this.surfaceFor(conv);
-    // Scope to the requesting container when known — a channel should not see
-    // other channels' sessions.
+    // Scope to the requesting container — a channel should not see other channels'
+    // sessions.
+    const text = this.renderChannelSessions(conv.channelId, conv.surfaceId);
+    await surface.post(conv, { text: text ?? "No active sessions in this channel." });
+  }
+
+  /**
+   * The channel-scoped session list as text (M4 §4 shared helper), or null when
+   * the channel has none. Feeds the in-thread `@Conduit status` and the operator's
+   * `/conduit stop` session listing. Scoped to `surfaceId` when given (the mention
+   * path knows it); the slash path passes only the channel (a channel id is unique
+   * in practice, and the daemon runs a single surface).
+   */
+  private renderChannelSessions(channelId: string, surfaceId?: string): string | null {
     const sessions = this.store
-      .listSessions({ surfaceId: conv.surfaceId })
-      .filter((s) => !conv.channelId || s.channel_id === conv.channelId);
-    if (sessions.length === 0) {
-      await surface.post(conv, { text: "No active sessions in this channel." });
-      return;
-    }
+      .listSessions({ surfaceId })
+      .filter((s) => s.channel_id === channelId);
+    if (sessions.length === 0) return null;
     const lines = sessions.map(
       (s) => `• ${s.repo_id} @ ${s.branch} — ${s.status}, ${this.capabilitySummary(s)}, last active ${s.last_active_at}`,
     );
-    await surface.post(conv, { text: `Sessions in this channel:\n${lines.join("\n")}` });
+    return `Sessions in this channel:\n${lines.join("\n")}`;
+  }
+
+  /**
+   * `/conduit status` — the daemon-wide, architect-only OPERATOR dashboard (M4 §4,
+   * DESIGN §8-(5)). Called synchronously by the surface adapter (like `isArchitect`,
+   * mirroring the `SurfaceAuthority` injection) and rendered as an EPHEMERAL reply,
+   * so it never spams a channel. Read-only telemetry: uptime, session counts across
+   * ALL channels, turns-in-flight vs the concurrency cap, the daemon-wide pending-
+   * approval backlog, and the config summary. Authority is (re-)checked HERE — the
+   * adapter's pre-check is UX only — but since this is aggregate, read-only telemetry
+   * that mutates nothing, a non-architect simply gets the refusal line, not an audit
+   * event. `now` is injectable for deterministic uptime in tests.
+   */
+  operatorStatus(author: Principal, channelId: string, now: number = Date.now()): string {
+    if (!this.store.isArchitect(principalKey(author), channelId)) {
+      return "Only architects can view the operator status.";
+    }
+    const all = this.store.listSessions({ statuses: ["active", "parked", "stopped"] });
+    const active = all.filter((s) => s.status === "active").length;
+    const parked = all.filter((s) => s.status === "parked").length;
+    const stopped = all.filter((s) => s.status === "stopped").length;
+    const slots = this.turnSlots.snapshot();
+    const pending = this.store.countPendingApprovals();
+    const repos = this.store.listRepos().length;
+    const architects = this.store.countArchitects();
+    const inFlight =
+      `${slots.active}/${slots.max}` + (slots.waiting ? ` (${slots.waiting} queued for a slot)` : "");
+    return [
+      `🛰️ *Conduit operator status* — daemon-wide`,
+      `• uptime ${formatDuration(now - this.startedAt)}`,
+      `• sessions: *${active}* active · *${parked}* parked · ${stopped} stopped`,
+      `• turns in flight: *${inFlight}*`,
+      `• pending approvals: *${pending}*`,
+      `• config: default model \`${this.defaultModel}\` · effort \`${this.defaultEffort}\` · ` +
+        `cost cap $${this.defaultCostCapUsd.toFixed(2)}/thread · ` +
+        `auto-approve ${this.defaultAutoApprove ? "on" : "off"} · ` +
+        `${repos} repo${repos === 1 ? "" : "s"} · ${architects} architect${architects === 1 ? "" : "s"}`,
+    ].join("\n");
+  }
+
+  /**
+   * `/conduit stop` — the operator's ephemeral guidance (M4 §4). A custom slash
+   * command can't run inside a thread, so it can't target a stop; instead it lists
+   * this channel's live sessions (so the operator can find the thread) and points
+   * them at the in-thread `@Conduit stop` (mirroring `@Conduit assign`). Closes the
+   * old "silent no-op" gap (DESIGN §8-(5)).
+   */
+  channelStopGuidance(channelId: string): string {
+    const list = this.renderChannelSessions(channelId);
+    const how =
+      "To stop one, open its thread and mention `@Conduit stop` " +
+      "(or `@Conduit stop clean` to also discard its worktree).";
+    return list
+      ? `${list}\n\n${how}`
+      : "No active sessions in this channel. Start one with `/conduit assign <repo>`.";
   }
 
   /**

@@ -851,6 +851,19 @@ export class Store {
   }
 
   /**
+   * Daemon-wide count of distinct principals holding an `architect` role at any
+   * scope (M4 §4 operator status config summary). Counts a person once even if
+   * they are an architect in several channels — the gauge is "how many people can
+   * approve", not "how many role rows exist".
+   */
+  countArchitects(): number {
+    const row = this.db
+      .query<{ n: number }, []>(`SELECT COUNT(DISTINCT principal) AS n FROM roles WHERE role = 'architect'`)
+      .get();
+    return row?.n ?? 0;
+  }
+
+  /**
    * The exact role row for a (principal, scope) pair, with its source (M3.8) — used
    * by `grant`/`revoke` to reason about provenance (e.g. refuse to shadow-demote a
    * config architect). Null when no row exists at that exact scope. NOTE: this is an
@@ -956,6 +969,18 @@ export class Store {
       )
       .get({ sid: sessionId });
     return row !== null;
+  }
+
+  /**
+   * Daemon-wide count of undecided approvals (M4 §4 operator status). Every
+   * pending row is a session waiting on an architect's Approve/Deny click, so the
+   * total is the operator's "how many threads are blocked on me right now" gauge.
+   */
+  countPendingApprovals(): number {
+    const row = this.db
+      .query<{ n: number }, []>(`SELECT COUNT(*) AS n FROM approvals WHERE decision = 'pending'`)
+      .get();
+    return row?.n ?? 0;
   }
 
   /** Most recent approval for a re-driven tool call, keyed by tool_use_id. */

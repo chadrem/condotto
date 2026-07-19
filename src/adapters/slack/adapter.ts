@@ -35,6 +35,43 @@ export interface SurfaceAuthority {
   isArchitect(principal: Principal, channelId: string): boolean;
 }
 
+/**
+ * Core-provided operator queries for the `/conduit` slash console (M4 §4). Both
+ * are synchronous, read-only text renderers the core owns — the adapter only
+ * decides HOW to deliver them (an ephemeral `respond`, so a channel is never
+ * spammed). Same injection shape as `SurfaceAuthority`: the composition root wires
+ * these to the SessionManager, and no core type leaks into Slack transport.
+ */
+export interface OperatorConsole {
+  /** Daemon-wide operator dashboard; returns the refusal line for non-architects
+   *  (authority is decided in the core, not trusted from here). */
+  operatorStatus(author: Principal, channelId: string): string;
+  /** This channel's live sessions + how to stop one in-thread (`/conduit stop`). */
+  channelStopGuidance(channelId: string): string;
+}
+
+/**
+ * The ephemeral text a `/conduit <sub>` slash command should `respond` with, or
+ * null when the sub-command is NOT an ephemeral console query (assign, unknown) and
+ * the caller handles it. Pure and module-level so the console routing is unit-
+ * testable without a live Bolt App (M4 §4).
+ */
+export function slashEphemeralText(
+  sub: string,
+  author: Principal,
+  channelId: string,
+  operator: OperatorConsole,
+): string | null {
+  switch (sub.trim().toLowerCase()) {
+    case "status":
+      return operator.operatorStatus(author, channelId);
+    case "stop":
+      return operator.channelStopGuidance(channelId);
+    default:
+      return null;
+  }
+}
+
 // Slack surface adapter: Bolt over Socket Mode (outbound WebSocket, no public
 // URL — hard requirement, DESIGN.md §3). All Slack shapes (thread_ts, channel
 // ids, Bolt payloads) stay inside this directory.
@@ -172,6 +209,7 @@ export class SlackAdapter implements SurfaceAdapter {
   constructor(
     tokens: { botToken: string; appToken: string },
     private authority: SurfaceAuthority,
+    private operator: OperatorConsole,
     private log: (msg: string) => void = console.log,
   ) {
     this.app = new App({
@@ -249,6 +287,16 @@ export class SlackAdapter implements SurfaceAdapter {
     const author = { surface: SURFACE_ID, externalId: String(command.user_id) };
     const channelId = String(command.channel_id);
 
+    // `/conduit status` (daemon-wide operator dashboard) and `/conduit stop`
+    // (session list + how to stop in-thread) are EPHEMERAL operator-console
+    // queries: the core renders the text, and we deliver it privately via
+    // `respond` — never a public channel post (M4 §4, DESIGN §8-(5)).
+    const ephemeral = slashEphemeralText(sub, author, channelId, this.operator);
+    if (ephemeral !== null) {
+      await respond({ response_type: "ephemeral", text: renderMrkdwn(ephemeral) });
+      return;
+    }
+
     switch (sub.toLowerCase()) {
       case "assign": {
         // Slash commands carry no thread context — create a fresh conversation
@@ -281,29 +329,13 @@ export class SlackAdapter implements SurfaceAdapter {
         });
         return;
       }
-      case "status": {
-        this.emit({
-          kind: "command",
-          conv: { surfaceId: SURFACE_ID, channelId, conversationId: "" },
-          author,
-          name: "status",
-          args,
-        });
-        return;
-      }
-      case "stop": {
-        // Slash commands can't run inside threads, so there is no thread to stop.
-        await respond({
-          response_type: "ephemeral",
-          text: "To stop a session, mention me inside its thread: `@Conduit stop`.",
-        });
-        return;
-      }
       default: {
         await respond({
           response_type: "ephemeral",
           text:
-            "Usage: `/conduit assign [repo]` (new session in this channel), `/conduit status`.\n" +
+            "Usage: `/conduit assign [repo]` (new session in this channel), " +
+            "`/conduit status` (operator dashboard — architects), " +
+            "`/conduit stop` (list this channel's sessions).\n" +
             "Inside a session thread (mention me): `@Conduit stop`, `@Conduit status`, " +
             "`@Conduit land`/`deploy` (gated), `@Conduit budget <usd>`.\n" +
             "Tune the implementer: `@Conduit model <opus|sonnet|fable>`, `@Conduit effort <low…max>`, " +

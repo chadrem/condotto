@@ -1474,3 +1474,64 @@ orphan grace, retentionLabel), `src/daemon.ts` (boot + periodic GC), `src/adapte
 (`stop clean` parse), `tests/worktrees.test.ts` (new), `tests/session-manager.test.ts`,
 `tests/store.test.ts`, `tests/adapter-slack.test.ts`. **Next: M4 §4 — daemon-wide `/conduit status`
 + slash fixes.**
+
+## 2026-07-19 — M4 §4 done: daemon-wide operator `/conduit status` + slash fixes
+
+**What shipped.** `/conduit status` (the Slack SLASH command) is now a **daemon-wide, architect-only
+operator dashboard**, delivered as an **ephemeral** `respond` (never a public channel post): uptime,
+session counts across ALL channels (active/parked/stopped), turns-in-flight vs the concurrency cap, the
+daemon-wide pending-approval backlog, and a config summary (default model/effort, cost cap, auto-approve
+default, repo + architect counts). The in-thread **`@Conduit status`** mention is UNCHANGED — the
+channel-scoped session list, posted in-thread. **`/conduit stop`** (previously a near-no-op) now
+ephemerally lists the channel's live sessions and points the operator to the in-thread `@Conduit stop`
+(custom slash commands can't run inside a thread; targeting a stop stays the mention, mirroring
+`@Conduit assign`). Both slash gaps from DESIGN §8-(5) closed: status is ephemeral (was public), stop is
+actionable (was silent).
+
+**Design — how the core stays Slack-free while replying ephemerally.** The reply must be ephemeral (a
+Slack transport concern: `respond`'s ephemeral response, per DESIGN §8-(5)), but the DATA is core-owned
+(uptime, the concurrency semaphore, the store). Resolved with the same injection shape as
+`SurfaceAuthority`: a new **`OperatorConsole`** interface (declared in the adapter) that the composition
+root wires to the SessionManager. The adapter's pure, unit-tested
+`slashEphemeralText(sub, author, channelId, operator)` routes `status`→`operatorStatus` and
+`stop`→`channelStopGuidance` (both return rendered text), then the Bolt handler delivers it via
+`respond({response_type:"ephemeral"})` — so no `respond`/Bolt type crosses the port and `check-ports`
+stays green. Authority is re-decided IN THE CORE (`operatorStatus` checks `isArchitect` itself and
+returns the refusal line for non-architects — the adapter's pre-check is UX only); since the view is
+aggregate, read-only telemetry that mutates nothing, a refused view is not audited.
+
+**Core additions.** `SessionManager.operatorStatus(author, channelId, now?)` (daemon-wide dashboard;
+`now` injectable for deterministic uptime) and `channelStopGuidance(channelId)`; a shared
+`renderChannelSessions(channelId, surfaceId?)` that both the mention `status()` and the slash stop reuse
+(the old `status()` body extracted verbatim — behavior parity); `Semaphore.snapshot()` for
+in-flight/cap/queued; a module `formatDuration` for coarse uptime. Store: `countPendingApprovals()` and
+`countArchitects()` (distinct principals with an architect role at any scope). `startedAt` added to
+`SessionManagerOptions` (defaults to construction time; the manager is built once at boot, so that ≈
+daemon uptime).
+
+**Verified by running it.** `bun test` 305 pass (+9: operator dashboard render incl. every uptime
+magnitude branch, member refusal, daemon-wide counts + pending-approval backlog, live in-flight tracked
+against the semaphore via a held turn, stop-guidance listing + assign-hint, and the adapter's
+`slashEphemeralText` routing). `tsc --noEmit` + `check-ports` clean. A drive script built the REAL
+Store+WorktreeManager+SessionManager against a throwaway repo, assigned sessions across two channels,
+plain-stopped one, left a member-initiated pending approval, and printed the operator dashboard, the
+member refusal, the stop guidance, and the adapter routing — all 13 assertions ✓ (uptime 1d 2h; 0
+active / 2 parked / 1 stopped daemon-wide; 0/3 in-flight; 1 pending; 2 repos; 2 architects).
+
+**Adversarial review** (5 lenses — correctness, security, port-erosion, UX, test-honesty — refute-by-
+default, run as a multi-agent workflow). **1 confirmed (a test-coverage nit), 4 refuted.** Confirmed:
+`formatDuration`'s hours/minutes/seconds/clock-skew branches were reached only via the days branch —
+now driven directly through `operatorStatus` with fixed `now` deltas. Refuted (correctly, against the
+working tree): no cross-channel content leak (the daemon-wide view is aggregate counts + config only,
+never per-channel session content or secrets); the authority check is genuinely in the core; the
+`stopped` count growing over time is correct-by-design (plain-stopped sessions are RETAINED and
+reactivatable — surfacing the retained-worktree count is useful operator info, motivating cleanup, not a
+bug); and the two untested-path observations (the queued-slot count, the Bolt `respond` call) are
+correct-by-design gaps with no defect.
+
+**Files:** `src/core/session-manager.ts` (operatorStatus, channelStopGuidance, renderChannelSessions,
+Semaphore.snapshot, formatDuration, startedAt), `src/core/store.ts` (countPendingApprovals,
+countArchitects), `src/adapters/slack/adapter.ts` (OperatorConsole, slashEphemeralText, ephemeral
+status/stop routing, usage text), `src/daemon.ts` (wire the operator console), `tests/session-manager.test.ts`
+(+7), `tests/adapter-slack.test.ts` (+2). **Next: M4 §5 — riders: env-scrub the agent shell +
+background-task cost accounting/cancellation.**

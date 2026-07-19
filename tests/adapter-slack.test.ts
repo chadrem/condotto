@@ -1,5 +1,7 @@
 import { describe, expect, test } from "bun:test";
-import { parseMentionCommand, resolveUserMention } from "../src/adapters/slack/adapter";
+import { parseMentionCommand, resolveUserMention, slashEphemeralText } from "../src/adapters/slack/adapter";
+import type { OperatorConsole } from "../src/adapters/slack/adapter";
+import type { Principal } from "../src/core/types";
 
 // The Slack mention parser is a pure module-level function, so it can be unit
 // tested without a live Bolt App. `BOT` stands in for the bot's own user id.
@@ -44,6 +46,27 @@ describe("parseMentionCommand — grant/revoke/auto-approve (M3.8)", () => {
     expect(parse("auto-approve on")).toEqual({ name: "auto-approve", args: "on" });
     expect(parse("auto-approve off")).toEqual({ name: "auto-approve", args: "off" });
     expect(parse("auto-approve")).toBeNull(); // falls through to conversation/help
+  });
+});
+
+describe("slashEphemeralText — /conduit console routing (M4 §4)", () => {
+  const author: Principal = { surface: "slack", externalId: "U1" };
+  const op: OperatorConsole = {
+    operatorStatus: (a, ch) => `OPS ${a.externalId}@${ch}`,
+    channelStopGuidance: (ch) => `STOPHELP@${ch}`,
+  };
+
+  test("status → operator dashboard, stop → channel stop guidance (case-insensitive)", () => {
+    expect(slashEphemeralText("status", author, "C1", op)).toBe("OPS U1@C1");
+    expect(slashEphemeralText("STATUS", author, "C1", op)).toBe("OPS U1@C1");
+    expect(slashEphemeralText("stop", author, "C1", op)).toBe("STOPHELP@C1");
+    expect(slashEphemeralText("  Stop ", author, "C2", op)).toBe("STOPHELP@C2");
+  });
+
+  test("assign, unknown, and empty subcommands are not ephemeral queries (null → caller handles)", () => {
+    expect(slashEphemeralText("assign", author, "C1", op)).toBeNull();
+    expect(slashEphemeralText("bogus", author, "C1", op)).toBeNull();
+    expect(slashEphemeralText("", author, "C1", op)).toBeNull();
   });
 });
 
