@@ -1026,7 +1026,7 @@ export class SessionManager {
     const overwritesConfig = exact?.source === "config";
     const shadowsConfigArchitect = role !== "architect" && globalRow?.source === "config" && globalRow.role === "architect";
     if (overwritesConfig || shadowsConfigArchitect) {
-      await surface.post(conv, { text: `\`${target}\`'s role at this scope is set by config — change it in \`conduit.roles.json\` / \`CONDUIT_ARCHITECTS\`, not with a runtime grant.` });
+      await surface.post(conv, { text: `\`${target}\`'s role at this scope is set by config — change it in \`conduit.toml\` (\`architects\`/\`[[roles]]\`) or \`CONDUIT_ARCHITECTS\`, not with a runtime grant.` });
       return;
     }
     this.store.setRole(target, role, scope, "grant", principalKey(author));
@@ -1080,7 +1080,7 @@ export class SessionManager {
       (exactRow?.source === "config" && exactRow.role === "architect") ||
       (globalRow?.source === "config" && globalRow.role === "architect");
     if (isConfigArchitect) {
-      await surface.post(conv, { text: `\`${target}\`'s role comes from config, not a runtime grant — change it in \`conduit.roles.json\` / \`CONDUIT_ARCHITECTS\` and restart.` });
+      await surface.post(conv, { text: `\`${target}\`'s role comes from config, not a runtime grant — change it in \`conduit.toml\` (\`architects\`/\`[[roles]]\`) or \`CONDUIT_ARCHITECTS\` and restart.` });
       return;
     }
     const otherRow = this.store.getRoleRow(target, scope === "*" ? conv.channelId : "*");

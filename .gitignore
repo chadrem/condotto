@@ -4,5 +4,10 @@ node_modules/
 .env.*
 *.sqlite
 *.sqlite-*
-DECISIONS.md.bak
+*.bak
+# The single config file holds secrets (Slack tokens) — track only the example.
+conduit.toml
+# Legacy config files (superseded by conduit.toml in M4 §1); ignored so any that
+# still linger on an installed box are never committed.
 conduit.repos.json
+conduit.roles.json

@@ -107,7 +107,8 @@ daemon, and replaces the honor-system protocol with mechanical enforcement.
   role mappings. (Initially: the same person as the architect.)
 - **Architect** — Slack users (by user ID) with command authority: assign
   sessions, approve gated actions, order landings/deploys, stop sessions.
-  Configured via `CONDUIT_ARCHITECTS`/`conduit.roles.json`, or delegated at
+  Configured via `conduit.toml` (`architects`/`[[roles]]`) or `CONDUIT_ARCHITECTS`
+  (M4 §1: the single config file), or delegated at
   runtime by another architect (M3.8: `@Conduit grant @user architect
   [everywhere]`, channel-scoped by default; persisted across restarts, while
   config stays authoritative for config-sourced roles).

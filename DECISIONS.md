@@ -1187,3 +1187,69 @@ surfaced buildability gaps in the reframed §8 M4; these close them — judgment
 forward-references fixed in build-time-safety and the M3 summary); CLAUDE.md M4 "Next up" +
 build-time-safety lines updated. Build starts with the `conduit.toml` refactor (`config.ts` /
 `daemon.ts` / `types.ts`) since the README documents it.
+
+## 2026-07-19 — M4 §1 complete: single `conduit.toml` (config consolidation)
+
+**Implementation (DESIGN.md §8 M4 deliverable 1).** Conduit now reads ONE config file,
+`conduit.toml` (TOML via `Bun.TOML.parse`, zero deps), consolidating the former scattered
+`.env` + `conduit.repos.json` + `conduit.roles.json` + `CONDUIT_*`. A faithful superset of the
+old `config.ts` parsing — a **consolidation, not a behavior change**. 268 tests (config suite 32),
+`tsc` + `check-ports` clean; verified by **actually booting the daemon against the real
+`conduit.toml`** (Slack Socket Mode connected, architect seeded from `architects=[…]`), plus the
+env-override and fail-fast boot paths.
+
+**Schema.** Top-level `architects = [...]`; `[slack]` `bot_token`/`app_token`; `[paths]`
+`db`/`worktrees_root`; `[defaults]` `model`/`effort`/`auto_approve`/`cost_cap_usd`/
+`max_concurrent_turns`; `[[roles]]` `{principal, role, scope?}`; `[[repos]]` with EVERY field the
+old reader had — `name`/`path`/`default_branch`/`safe_bash_allowlist`/`test_cmd`/`land_cmd`/
+`deploy_cmd`/`cost_cap_usd`/`default_model`/`default_effort`/`trusted`/`auto_approve`. Snake_case
+(idiomatic TOML — Cargo/pyproject; the old JSON was camelCase, but this is a fresh file format).
+Tracked, commented `conduit.example.toml`; the real `conduit.toml` is gitignored (secrets live in it).
+
+**Decisions / notes.**
+- **Discovery:** `--config <path>` (daemon argv) > `CONDUIT_CONFIG` env > `./conduit.toml`. A
+  `--config` with no/empty/flag-shaped value is an error, not a silent fall-through.
+- **Env overrides win over file values** for scalars (tokens, paths, caps, model/effort,
+  auto-approve) — the documented M4 rule, so an operator can keep secrets out of the file.
+- **ONE deliberate exception — roles.** On a same-`(principal, scope)` collision the FILE wins
+  over the env `CONDUIT_ARCHITECTS` quick-list (matches the pre-M4 reader). Role assignments are
+  authority; a demote in the owned file must not be silently re-elevated by a leftover env entry.
+  (The naive rewrite had inverted this to env-wins, elevation-only; review finding #1 restored it,
+  and a regression test locks it.)
+- **Ports stayed sealed.** `loadConfig` returns the core domain `ConduitConfig` (NO Slack tokens);
+  a separate `loadSlackConfig` returns bare `{botToken, appToken}` strings for the composition root
+  (`daemon.ts`) — no Slack TYPE crosses into core, and no `xoxb-`/`xapp-` literal appears in a
+  `src/*.ts` (check-ports forbids both). `policy.ts` untouched.
+- **`policy_overrides`** (listed among the §5/§8 repo fields) is an unused reserved SQLite column
+  the old `config.ts` never read; excluded from the TOML schema to avoid dead config. Revisit if
+  per-repo policy overrides are ever implemented.
+- **Fail-fast boot validation:** missing file, malformed TOML, or a bad-typed required field throws
+  an actionable `Configuration error: …` and exits(1) — never a half-started daemon. Unknown keys
+  **warn** (typo protection) rather than throw. `trusted` now validates as a real boolean (was
+  silently coerced to false — review finding #4), matching `auto_approve`.
+- **Legacy readers removed** (single source of truth): `CONDUIT_REPOS_FILE`/`CONDUIT_ROLES_FILE`/
+  `conduit.repos.json`/`conduit.roles.json` parsing is gone. The throwaway-`testrepo` default,
+  `CONDUIT_TEST_REPO`, the roles reseed (`clearConfigRoles`), worktree pathing, and all downstream
+  behavior are intact.
+- **Manual cutover of the one live instance (Acme):** `.env` + `conduit.repos.json` →
+  `./conduit.toml` (gitignored), the legacy files moved to `.bak`. A side effect: Bun no longer
+  auto-loads `.env`, so the Slack tokens now reach the adapter straight from `conduit.toml` and no
+  longer transit `process.env` at all — a small security bonus that anticipates the M4 §5
+  agent-shell env-scrub (the `SLACK_*` env-override path still works if an operator prefers it).
+
+**Adversarial review (5 dimensions — parity, security, TOML-edge, correctness, tests/docs — with
+refute-by-default verification, run as a multi-agent workflow).** 8 findings confirmed, ALL
+low-severity, ALL fixed before commit: (1) roles precedence inversion → restored file-wins +
+regression test; (2/6/8) stale `conduit.roles.json` references in the session-manager grant/revoke
+messages, the `store.ts` `RoleSource` comment, and DESIGN §2 → repointed at `conduit.toml`; (3/5)
+`--config` with no value silently fell back → now errors actionably; (4) `trusted` accepted a
+non-boolean silently → now fails fast; (7) restored the dropped `CONDUIT_ARCHITECTS` comma/space
+split test. No high/med findings; the port boundary, the explicit-boolean `trusted`/`auto_approve`
+guards, architect-seeding integrity, and secrets handling all verified clean. (The verifier also
+noted the dev smoke scripts now need a `./conduit.toml` present — true, and satisfied on the dev
+box by the cutover; they never ran without a testrepo + auth anyway, so no change.)
+
+**Files:** `src/core/config.ts` (rewritten), `src/daemon.ts` (`parseConfigArg` + config/slack load
++ messages), `conduit.example.toml` (new, tracked), `.gitignore`, `tests/config.test.ts`
+(rewritten, 32 tests), plus stale-reference fixes in `src/core/session-manager.ts`,
+`src/core/store.ts`, and `DESIGN.md` §2. **Next: M4 §2 — binary + schema migrations.**

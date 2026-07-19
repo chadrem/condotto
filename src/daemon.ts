@@ -1,6 +1,6 @@
 import { existsSync } from "node:fs";
 import { join } from "node:path";
-import { loadConfig } from "./core/config";
+import { loadConfig, loadSlackConfig } from "./core/config";
 import { Store } from "./core/store";
 import { WorktreeManager } from "./core/worktrees";
 import { SessionManager } from "./core/session-manager";
@@ -12,14 +12,46 @@ import { SlackAdapter } from "./adapters/slack/adapter";
 
 const log = (msg: string) => console.log(`${new Date().toISOString()} ${msg}`);
 
+/** Minimal `--config <path>` / `--config=<path>` argv scan (M4 §1; the rest of
+ *  the CLI — --version/--help — is M4 §2). Env `CONDUIT_CONFIG` also works. A
+ *  `--config` with no path (or a flag-shaped/empty value) is an error, not a
+ *  silent fall-through to default discovery. */
+function parseConfigArg(argv: string[]): string | undefined {
+  for (let i = 2; i < argv.length; i++) {
+    const a = argv[i]!;
+    let value: string | undefined;
+    if (a === "--config") value = argv[i + 1];
+    else if (a.startsWith("--config=")) value = a.slice("--config=".length);
+    else continue;
+    if (value === undefined || value.trim() === "" || value.startsWith("-")) {
+      throw new Error("--config requires a path (e.g. --config /etc/conduit/conduit.toml)");
+    }
+    return value;
+  }
+  return undefined;
+}
+
 async function main(): Promise<void> {
-  const config = loadConfig();
+  // Single source of truth is conduit.toml (M4 §1). A bad --config flag, a
+  // missing file, malformed TOML, or a bad required field throws here with an
+  // actionable message — never a half-started daemon.
+  let config: ReturnType<typeof loadConfig>;
+  let slackCreds: ReturnType<typeof loadSlackConfig>;
+  try {
+    const configPath = parseConfigArg(process.argv);
+    config = loadConfig(process.env, configPath);
+    slackCreds = loadSlackConfig(process.env, configPath);
+  } catch (err) {
+    console.error(`Configuration error: ${err instanceof Error ? err.message : err}`);
+    process.exit(1);
+  }
 
   for (const repo of config.repos) {
     if (!existsSync(join(repo.path, ".git"))) {
       console.error(
-        `Test repo missing at ${repo.path} — create a throwaway git repo there ` +
-          `(build-time safety: Conduit only ever points at throwaway repos until M4).`,
+        `Repo "${repo.name}" missing at ${repo.path} — point [[repos]].path in conduit.toml at a ` +
+          `git repository (or remove the entry). The default throwaway testrepo lives at ` +
+          `~/tmp/conduit-testrepo; create it or override CONDUIT_TEST_REPO.`,
       );
       process.exit(1);
     }
@@ -36,7 +68,7 @@ async function main(): Promise<void> {
   if (architects === 0) {
     log(
       "[daemon] WARNING: no architects configured — gated actions (writes, bash, deploys) " +
-        "will have no one who can approve them. Set CONDUIT_ARCHITECTS or conduit.roles.json.",
+        "will have no one who can approve them. Set `architects` in conduit.toml (or CONDUIT_ARCHITECTS).",
     );
   } else {
     log(`[daemon] seeded ${config.roles.length} role mapping(s), ${architects} architect(s)`);
@@ -68,20 +100,11 @@ async function main(): Promise<void> {
       `architect auto-approve ${config.defaultAutoApprove ? "ON" : "off"} by default`,
   );
 
-  // Surface credentials belong to the adapter, not core config — the
-  // composition root reads them and hands them straight over.
-  const botToken = process.env.SLACK_BOT_TOKEN;
-  const appToken = process.env.SLACK_APP_TOKEN;
-  if (!botToken || !appToken) {
-    console.error(
-      "No Slack tokens found. Create .env with SLACK_BOT_TOKEN and SLACK_APP_TOKEN " +
-        "(see DESIGN.md Appendix C for the Slack app setup), then rerun.",
-    );
-    process.exit(1);
-  }
-
+  // Surface credentials belong to the adapter, not the core domain config — the
+  // composition root gets them from conduit.toml (via loadSlackConfig, validated
+  // above) and hands them straight over.
   const slack = new SlackAdapter(
-    { botToken, appToken },
+    slackCreds,
     { isArchitect: (p, channelId) => store.isArchitect(principalKey(p), channelId) },
     log,
   );

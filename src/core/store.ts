@@ -102,9 +102,9 @@ export type ApprovalDecision = "pending" | "approved" | "denied" | "expired";
 
 /**
  * Where a role mapping came from (M3.8). `config` rows are wiped + reseeded from
- * `CONDUIT_ARCHITECTS`/`conduit.roles.json` on every boot (config stays
- * authoritative); `grant` rows are runtime `@Conduit grant` delegations that
- * survive restart.
+ * `conduit.toml` (`architects`/`[[roles]]`) / `CONDUIT_ARCHITECTS` on every boot
+ * (config stays authoritative); `grant` rows are runtime `@Conduit grant`
+ * delegations that survive restart.
  */
 export type RoleSource = "config" | "grant";
 
