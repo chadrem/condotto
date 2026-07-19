@@ -1,6 +1,6 @@
 # Condotto
 
-**Collaborative AI coding for your whole team, in Slack.**
+**Collaborative AI coding that empowers your whole team, in Slack.**
 
 Condotto gives any Slack thread its own persistent
 [Claude Code](https://claude.com/claude-code) session, running on your own dev
@@ -36,10 +36,10 @@ Every session is a three-way collaboration: the domain expert drives the what
 and why, the AI implementer writes and tests the code, and the architect (your
 engineer with approval authority) signs off on the moves that matter.
 
-> **How it's different.** Claude in Slack and Claude Code on the web run in
-> Anthropic-hosted sandboxes. The Claude Code CLI is one person at one
-> terminal. Condotto is your machine, your credentials, your deploy path,
-> driven from Slack by your whole team.
+**How it's different.** Claude in Slack and Claude Code on the web run in
+Anthropic-hosted sandboxes, and the Claude Code CLI is one person at one
+terminal. Condotto is your machine, your credentials, and your deploy path,
+driven from Slack by your whole team.
 
 Software engineering and product management are evolving fast, and the line
 between them is blurring. Condotto is helping define what comes next:
