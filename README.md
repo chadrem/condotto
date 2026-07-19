@@ -1,39 +1,54 @@
 # Condotto
 
-**Now the person who knows what to build can build it themselves — right there
-in Slack.** Assign any thread a dedicated, persistent
-[Claude Code](https://claude.com/claude-code) session on your own dev machine —
-real repo, real toolchain, real deploy path — and your whole team ships real
-work together, every consequential move gated by an engineer and written to an
-audit log.
+**Collaborative AI coding for your whole team, in Slack.**
 
-- **Fix the bug you filed** — the PM who reported it drives the fix herself,
-  tests and all, instead of waiting in an engineer's queue.
-- **Ship a feature or prototype a spec** — describe the *what* and *why* in
-  plain language; the AI implementer writes the code, runs the tests, and posts
-  progress in the thread.
-- **Debug support issues together** — read the logs and chase the root cause in
-  the open channel, as a team, instead of pulling an engineer aside.
-- **Pull a report from production** — safely, through the gate; only aggregates
-  (counts, rates, yes/no) ever come back to the channel, never raw rows.
-- **Gated and audited by default** — every write, shell command, production
-  read, and deploy pauses un-executed until the architect approves, each one
-  logged, with a hard-deny floor no one can override.
+Condotto gives any Slack thread its own persistent
+[Claude Code](https://claude.com/claude-code) session, running on your own dev
+machine with your real repo, your real toolchain, and your real deploy path.
+Describe what you want in plain language. The AI writes the code, runs the
+tests, and posts progress in the thread. When it reaches for something
+consequential, an engineer clicks Approve.
 
-Under the hood it's a **three-way working conversation**: the domain expert —
-such as a product manager — drives the *what* and *why* in plain language, the
-AI implementer writes and tests the code, and the *architect* approves the
-consequential moves.
+That changes who gets to build. **The people who know what to build can now
+build it themselves**, working alongside your engineers instead of waiting on
+them. A product manager ships the fix instead of filing a ticket about it. A
+support lead chases the root cause instead of waiting for someone to free up.
 
-> Condotto is the missing quadrant: **persistent, multi-session coding agents on
-> your own computer, with chat threads as the entire user interface.** Claude in
-> Slack and Claude Code on the web run in Anthropic-hosted sandboxes; the Claude
-> Code CLI is one human at one terminal. Condotto is your machine, your
-> credentials, your deploy path — driven from Slack, by a whole team.
+What teams use it for:
 
-It is meant for a **small, mutually-trusting team** whose architect
-self-hosts it. See [Security & trust model](#security--trust-model)
-for exactly what that means and what Condotto does — and does not — defend against.
+- **Fix the bug you filed.** The PM who reported it drives the fix, tests and
+  all, with an engineer approving the changes.
+- **Ship a feature from a plain-language spec.** You bring the what and the
+  why; the AI implementer handles the code.
+- **Debug support issues together.** Read the logs and chase the root cause in
+  the open channel, as a team.
+- **Ask production a question, safely.** Answers come back as aggregates only
+  (counts, rates, yes or no), never raw rows.
+
+**Guardrails that help, not hinder.** Reading and analysis run freely, so the
+conversation never stalls. Writes, shell commands, production reads, and
+deploys pause until an engineer approves, every action is written to an audit
+log, and a hard-deny floor blocks the truly dangerous moves for everyone. The
+guardrails are not there to slow your team down. They are what make it safe to
+hand real building power to the whole team.
+
+Every session is a three-way collaboration: the domain expert drives the what
+and why, the AI implementer writes and tests the code, and the architect (your
+engineer with approval authority) signs off on the moves that matter.
+
+> **How it's different.** Claude in Slack and Claude Code on the web run in
+> Anthropic-hosted sandboxes. The Claude Code CLI is one person at one
+> terminal. Condotto is your machine, your credentials, your deploy path,
+> driven from Slack by your whole team.
+
+Software engineering and product management are evolving fast, and the line
+between them is blurring. Condotto is helping define what comes next:
+collaborative team coding, where AI does the typing, people make the calls,
+and nobody waits in a queue.
+
+Condotto is built for a small, mutually trusting team whose architect
+self-hosts it. See the [Security & trust model](#security--trust-model) for
+exactly what that means, and what Condotto does and does not defend against.
 
 **Contents**
 - [How it works](#how-it-works)
@@ -188,7 +203,8 @@ workspace you'll use it in. Then:
 7. **Invite the bot to your channel**: `/invite @Condotto`. Without this, reads
    fail with `not_in_channel`.
 
-Full rationale and the exact scope list live in **DESIGN.md Appendix C**.
+Design notes on the Slack adapter — why Socket Mode is a hard requirement and
+how each scope maps to an adapter capability — live in **DESIGN.md Appendix C**.
 
 > **Finding a user's Slack ID** (for `architects` in the config): open their
 > profile → **⋯** → **Copy member ID**. It looks like `U0123ABC`; Condotto writes
@@ -546,9 +562,10 @@ first). Worktrees are disposable; their branches live in your real repos.
 
 ## Further reading
 
-- **[DESIGN.md](DESIGN.md)** — the authoritative product & engineering design
-  (architecture, the two ports, the security model, current capabilities;
-  Appendix C is the full Slack app setup).
+- **[DESIGN.md](DESIGN.md)** — the authoritative engineering design:
+  architecture and the two ports, the security model, the data model, and the
+  verified SDK and Slack facts. This README is the overview; DESIGN.md is the
+  design underneath it and does not repeat it.
 - **[DECISIONS.md](DECISIONS.md)** — the chronological decision & verified-facts
   log.
 - **[CLAUDE.md](CLAUDE.md)** — orientation for working in this codebase.

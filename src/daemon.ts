@@ -40,7 +40,7 @@ function helpText(prog: string): string {
     "",
     "Condotto reads one config file, condotto.toml. Copy condotto.example.toml to",
     "condotto.toml, fill in your Slack tokens, architects, and repos, then run it.",
-    "See the README and DESIGN.md Appendix C (Slack app setup) for the full setup.",
+    "See the README for the full setup, including creating the Slack app.",
   ].join("\n");
 }
 

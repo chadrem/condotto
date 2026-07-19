@@ -1741,3 +1741,35 @@ CLAUDE.md updated. **The DESIGN.md §8 build plan (M0 → M4) is complete — Co
 an installable open-source beta.** Later work (fleet, shared session storage, a
 second surface/harness adapter, the deferred read-only Slack audit channel +
 symlink-realpath confinement) is post-beta, per DESIGN §8 "Later".
+
+## 2026-07-20 — Docs de-duplicated: README owns the overview, DESIGN owns the design
+
+The README and DESIGN.md had drifted into carrying the same content twice — the
+product pitch, the install/setup story, and the full Slack app walkthrough —
+and keeping them in sync was recurring busywork. **Decision: a strict division
+of labor, with each fact living in exactly one document.**
+
+- **README.md** owns the product overview and everything an installer touches:
+  the pitch and use cases, install, Slack app creation (now the only
+  step-by-step), `condotto.toml`, the command reference, the security summary,
+  and the runbook.
+- **DESIGN.md** owns the design: the architecture and its two ports, the
+  security model, the data model, the verified SDK/Slack facts, and the
+  rationale. It assumes the README and no longer repeats it — it is no longer
+  described as "self-contained."
+
+Concretely: DESIGN §1 shrank to the four vision facts the rest of the design
+builds on (first-class implementer, defaults-not-dependencies, the trust
+model, the prototype origin); the one-liner, the three-way-role table, and the
+"why this doesn't exist yet" comparison table now live only in the README's
+top section. §8's Setup paragraph became a README pointer. Appendix C was
+retitled "Slack surface adapter: design notes" — scope→capability mapping, the
+slash-commands-can't-run-in-threads caveat (verified 2026-07-18), Bolt wiring,
+and server-side click verification — with the click-path setup living only in
+the README. Appendix C's stale "create the app in a scratch workspace" advice
+was dropped (superseded by the 2026-07-18 real-workspace decision), as was
+DESIGN's stale "working title" note (the Condotto rename has long since
+landed). CLAUDE.md and the README's cross-references were updated to match.
+(Same day, earlier: the README's top section above "Contents" was rewritten as
+the marketing-facing overview — tagline, aha, use cases, guardrails,
+differentiation — which is what made the §1 duplication obvious.)

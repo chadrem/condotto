@@ -450,7 +450,7 @@ export function loadSlackConfig(
   if (!botToken || !appToken) {
     throw new Error(
       `Missing Slack tokens. Set [slack].bot_token and [slack].app_token in ${path} ` +
-        `(or SLACK_BOT_TOKEN / SLACK_APP_TOKEN) — see DESIGN.md Appendix C for the Slack app setup.`,
+        `(or SLACK_BOT_TOKEN / SLACK_APP_TOKEN) — see the README ("Create the Slack app") for setup.`,
     );
   }
   return { botToken, appToken };

@@ -29,7 +29,7 @@ architects = [
 
 # ---------------------------------------------------------------------------
 # Slack app credentials (required to run the daemon).
-# Create the app per DESIGN.md Appendix C. Env overrides: SLACK_BOT_TOKEN / SLACK_APP_TOKEN.
+# Create the app per the README ("Create the Slack app"). Env overrides: SLACK_BOT_TOKEN / SLACK_APP_TOKEN.
 [slack]
 bot_token = "xoxb-your-bot-token"   # Bot User OAuth Token (starts xoxb-)
 app_token = "xapp-your-app-token"   # App-Level Token for Socket Mode (starts xapp-)

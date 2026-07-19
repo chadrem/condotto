@@ -1,18 +1,19 @@
 # Condotto — Product & Engineering Design
 
-*Working title. Alternatives considered: Foreman, Pod. Rename freely — nothing below depends on the name.*
-
 > The thread becomes the condotto. The coding agent becomes the implementer.
 > The software engineer becomes the architect. (Slack and Claude Code are the
 > defaults — both sit behind swappable adapters.)
 
-**How to use this document.** This file is the self-contained design for
-Condotto: the product vision, the verified technical facts, the security model,
-and the current capabilities are all here, including hard-won lessons from a
-working manual prototype (built inside a private Rails monorepo called acme —
-that code is *not* part of this project, but its lessons are). Keep the
-`DECISIONS.md` log current; update this document when reality disagrees
-with it.
+**How to use this document.** Two documents split the work, and neither repeats
+the other. **README.md is the overview**: what Condotto is, who it's for, and
+everything an installer touches — install, Slack app setup, `condotto.toml`,
+day-to-day commands, and the runbook. **This file is the design**: the
+architecture and its two ports, the security model, the data model, the
+verified SDK and Slack facts (including hard-won lessons from a working manual
+prototype, built inside a private Rails monorepo called acme — that code is
+*not* part of this project, but its lessons are), and the rationale behind all
+of it. Read the README first; this document assumes it. Keep the `DECISIONS.md`
+log current; update this document when reality disagrees with it.
 
 **Status of the facts below.** The Claude Agent SDK API surface in §6 and
 Appendix B was verified against the current docs (URLs cited) at the time of
@@ -24,77 +25,49 @@ against a working production integration.
 
 ## 1. Product vision
 
-**One-liner:** The person who knows what to build can build it themselves —
-right there in Slack. Any thread can be assigned a dedicated, persistent Claude
-Code session running on a real development computer — with the real repo, the
-real toolchain, and the real deploy path — and the thread becomes a three-way
-working conversation between product, engineering, and the AI implementer.
+The pitch lives in the README's top section: any Slack thread can carry a
+persistent Claude Code session on a real dev machine, so the people who know
+what to build can build it themselves, alongside the engineers, with an
+architect approving the consequential moves. This section keeps only the
+vision-level facts the rest of the design builds on.
 
-**Two deliberate generalizations.** Slack is the *default surface*, not a
-dependency: humans may reach Condotto through Microsoft Teams, email, SMS, or a
-custom web app, and the core never imports a Slack type. Likewise Claude Code
-is the *default harness*, not a dependency: the implementer sits behind a
-harness interface other coding agents can implement. Both seams are defined in
-§3 ("The two seams"). v1 ships exactly one adapter on each seam — Slack and
-Claude Code — but the core is written against the interfaces from day one.
+**The implementer must be first-class.** The north star is a person with
+domain expertise but limited coding skill — a product manager first — shipping
+real work. That is only real if the implementer is a full-strength Claude Code
+agent: best model, high reasoning effort, subagents/workflows, the team's
+skills — not a toy. Exposing those capabilities to the thread (behind the
+gate) is a product requirement, not an optimization; it is what turns "a
+chatbot that edits files" into "a PM shipping a feature with an engineer
+riding shotgun."
 
-**The three-way conversation model:**
+**Slack and Claude Code are defaults, not dependencies.** Humans may reach
+Condotto through Microsoft Teams, email, SMS, or a custom web app; other
+coding agents may serve as the implementer. Both are seams — the surface port
+and the harness port, defined in §3 ("The two seams") — and the core never
+imports a platform type. v1 ships exactly one adapter on each seam, but the
+core is written against the interfaces from day one.
 
-| Role | Who | Does |
-|---|---|---|
-| **Product** (PM) | Slack humans | Describes what and why; answers domain questions; reviews outcomes |
-| **Architect** (engineer/EM) | Slack humans with command authority | Decides how; approves dangerous actions; owns merges and deploys |
-| **Implementer** | Claude Code session | Writes the code, runs the tests, posts progress, asks good questions, ships when told |
-
-**North star (the real power).** The point is to let people with **domain
-expertise but not coding skill — product managers first — build features
-themselves**, in the surface they already live in (Slack), while a software
-engineer (the architect) guides and guards in the *same thread*. The PM drives
-the *what* and *why* in plain language; the implementer does the coding; the
-architect approves the consequential moves and keeps quality/safety honest. For
-that to be real, the implementer must be a **first-class Claude Code agent** —
-best model, high reasoning effort, subagents/workflows, the team's skills — not a
-toy. Exposing those capabilities to the thread is
-what turns "a chatbot that edits files" into "a PM shipping a feature with an
-engineer riding shotgun."
-
-**Distribution & trust model.** Condotto ships as **open source** — source,
-prebuilt binaries, and install docs — for a technical **architect** to
-self-host for a small, mutually-trusting team (a startup's PM plus a couple of
-engineers, or a squad inside a larger org). The architect is an expert in the
-*tech* (coding, servers, the toolchain) but need not be the *domain* expert on
-the product; Condotto is how they empower the domain experts — who hold the
-product knowledge and vary in coding depth — to do real engineering
-(prototyping, design, speccing features, fixing bugs) in the surface they
-already live in. The "empower domain experts" mechanic already exists (grant +
-auto-approve); the product's remaining job is to package it. Because
-**everyone with Slack-and-repo access is trusted, enforcing that boundary is
-the installer's responsibility** — documented, not engineered against. Condotto
-therefore invests in mechanical gating, unforgeable framing, and audit (defense
-against mistakes, prompt injection from thread *content*, and accidental blast
-radius) but deliberately does **not** try to isolate against a hostile insider
-or run as multi-tenant SaaS.
-
-**Why this doesn't exist yet.** Anthropic ships three adjacent things, none of
-which is this:
-
-| Product | Runs where | Session model | Gap vs. Condotto |
-|---|---|---|---|
-| Claude Tag (`@Claude` in Slack) | Anthropic-hosted ephemeral sandbox | No persistence across idle; no per-thread resumable sessions | No real dev machine, no local toolchain, no ad-hoc `npm install`, no deploys from your infra |
-| Claude Code on the web | Anthropic-hosted sandbox | Per-task | Not your machine, not your credentials, not your deploy path |
-| Claude Code CLI | Your machine | Full sessions, resumable | One human at one terminal; no Slack surface, no multi-session management |
-
-Condotto is the missing quadrant: **persistent, multi-session coding agents on
-your own development computer, with chat threads (Slack first) as the entire
-user interface.**
+**Distribution & trust model.** Condotto ships as **open source** for a
+technical **architect** to self-host for a small, mutually-trusting team (a
+startup's PM plus a couple of engineers, or a squad inside a larger org). The
+architect is an expert in the *tech* but need not be the *domain* expert;
+Condotto is how they empower the domain experts to do real engineering in the
+surface they already live in. Because **everyone with Slack-and-repo access is
+trusted, enforcing that boundary is the installer's responsibility** —
+documented, not engineered against. Condotto therefore invests in mechanical
+gating, unforgeable framing, and audit (defense against mistakes, prompt
+injection from thread *content*, and accidental blast radius) but deliberately
+does **not** try to isolate against a hostile insider or run as multi-tenant
+SaaS. This one decision drives most of §4.
 
 **Origin.** This was prototyped manually inside a production Rails company
-(acme): a CLI that read/wrote Slack threads (messages, screenshots,
-@-mentions), a polling watcher that streamed thread messages into a live
-Claude Code session, and a written authority protocol (only the EM's verified
-Slack user ID could authorize builds/deploys). It worked well enough to be
-worth productizing. Condotto replaces the human session-conductor with a
-daemon, and replaces the honor-system protocol with mechanical enforcement.
+(acme): a CLI that read/wrote Slack threads, a polling watcher that streamed
+thread messages into a live Claude Code session, and a written authority
+protocol (only the EM's verified Slack user ID could authorize
+builds/deploys). It worked well enough to be worth productizing. Condotto
+replaces the human session-conductor with a daemon, and replaces the
+honor-system protocol with mechanical enforcement. The transferable lessons
+are Appendix A.
 
 ---
 
@@ -727,12 +700,10 @@ Condotto is feature-complete and installable. Everything below is live; each
 capability is independently demoable, and `DECISIONS.md` is the chronological log
 of how it was built and verified.
 
-**Setup.** Bun 1.2+ (`curl -fsSL https://bun.sh/install | bash`); `bun add
-@anthropic-ai/claude-agent-sdk` (SQLite needs no package — `bun:sqlite` is built
-in) and `bun add @slack/bolt`; auth via the machine's existing Claude subscription
-login (no `ANTHROPIC_API_KEY` needed; on a box with no keychain login, `claude
-setup-token` → `CLAUDE_CODE_OAUTH_TOKEN`). The Slack app (exact scopes + Socket
-Mode) is **Appendix C**.
+**Setup.** Install, Slack app creation, `condotto.toml`, and the runbook are
+the README's job — not repeated here. Appendix C keeps the Slack adapter's
+design notes (scope→capability mapping, verified platform caveats, Bolt
+wiring).
 
 **Build-time safety.** Condotto runs shell commands and can deploy. When
 *developing Condotto itself*, point it only at a **throwaway git repo** — never a
@@ -841,7 +812,7 @@ shape crosses the port.
    **validates at boot** — missing or malformed required fields fail fast with an
    actionable message, never a half-started daemon.
 2. **Install/setup docs** — a README/runbook: install Bun or grab the binary →
-   create the Slack app (Appendix C) → copy and fill `condotto.example.toml` → run,
+   create the Slack app → copy and fill `condotto.example.toml` → run,
    *and* how the grant + auto-approve trust model lets the architect empower domain
    experts. It also documents reading the SQLite audit log locally.
 3. **Worktree cleanup** — a real teardown (`git worktree remove` + branch delete +
@@ -1141,44 +1112,33 @@ Foundry via `CLAUDE_CODE_USE_BEDROCK=1` / `CLAUDE_CODE_USE_VERTEX=1` /
 
 ---
 
-## Appendix C — Slack surface adapter: app setup
+## Appendix C — Slack surface adapter: design notes
 
-Create a Slack app (https://api.slack.com/apps → "From scratch") in a
-**scratch workspace** you control. Condotto uses **Socket Mode**, so there is no
-request URL to host.
+The step-by-step app setup — Socket Mode, the full scope list, event
+subscriptions, the `/condotto` slash command, interactivity, inviting the
+bot — lives in the README ("Create the Slack app"). This appendix keeps what
+the adapter's *design* depends on.
 
-**Enable Socket Mode.** App settings → Socket Mode → toggle on. This generates
-an **app-level token** (`xapp-…`) with `connections:write`. Bolt needs it as
-`appToken`. (The bot token below is separate.)
+**Socket Mode is a hard requirement** (§3 "Why Socket Mode"). Two separate
+credentials: the app-level token (`xapp-…`, `connections:write`) opens the
+outbound WebSocket, and the bot token (`xoxb-…`) authorizes Web API calls.
+There is never a public request URL; Slack's "Request URL" fields are
+placeholders under Socket Mode.
 
-**Bot token scopes** (OAuth & Permissions → Bot Token Scopes). Install to the
-workspace to mint the bot token (`xoxb-…`, Bolt's `token`):
-- `chat:write` — post replies and approval requests.
-- `chat:write.customize` — per-session display names (`username`/`icon` on
-  post), so parallel sessions are distinguishable (§9.4). Optional but wanted.
-- `commands` — the `/condotto …` slash commands.
-- `app_mentions:read` — `@Condotto take this` assignment path.
-- `channels:history`, `groups:history` — read thread messages (public /
-  private channels). Add `im:history`/`mpim:history` only if you support DMs.
-- `reactions:read` — only if you use an emoji-reaction assignment trigger.
-- `files:read` — download attachments (screenshots) a human drops in a thread.
-- `files:write` — upload files/screenshots the session produces.
-- `users:read` — resolve user IDs ↔ names for mentions and role display.
+**Scopes map to adapter capabilities**, not a grab-bag: posting and editing →
+`chat:write` (plus `chat:write.customize` for per-session display names,
+§9.4); commands and approvals → `commands` + Interactivity (`block_actions`
+arrive over the socket); the mention path → `app_mentions:read`; thread reads
+→ `channels:history`/`groups:history` (add `im:history`/`mpim:history` only if
+DMs are supported); attachments → `files:read`/`files:write`; principal
+resolution → `users:read`. Add `reactions:read` plus the `reaction_added`
+event only if the emoji-reaction assignment trigger (§9.3) is ever built.
 
-**Event subscriptions** (Event Subscriptions → on; over Socket Mode, no URL).
-Subscribe to bot events: `message.channels`, `message.groups` (+ `.im`/`.mpim`
-if used), `app_mention`, and `reaction_added` (only if emoji assignment).
-
-**Slash command:** create `/condotto` (Socket Mode delivers it; the "request
-URL" field can be a placeholder). Bolt handles subcommands (`assign`, `status`,
-`stop`) by parsing the command text. **Caveat (verified 2026-07-18):** custom
-slash commands cannot be invoked inside message threads, so `/condotto assign`
-always creates a *new* conversation (the daemon posts an anchor message that
-becomes the thread root); assigning an existing thread is done with
-`@Condotto assign` in that thread.
-
-**Interactivity:** enable it (required for the Approve/Deny **buttons**);
-Socket Mode delivers `block_actions` events — no URL needed.
+**Custom slash commands cannot be invoked inside message threads** (verified
+2026-07-18, DECISIONS.md). This platform fact shaped the assignment UX (§2,
+journey 1): `/condotto assign` always roots a *new* conversation via an anchor
+message whose `ts` becomes the thread root, and an *existing* thread is
+claimed with `@Condotto assign` mentioned inside it.
 
 **Bolt wiring (shape):**
 ```typescript
