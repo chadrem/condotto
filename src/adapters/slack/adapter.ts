@@ -108,6 +108,7 @@ export function parseMentionCommand(
   if (first === "assign" && words.length <= 2) return { name: "assign", args: words.length === 2 ? words[1]! : "" };
   if (first === "take" && second === "this" && third === undefined) return { name: "assign", args: "" };
   if (first === "stop" && words.length === 1) return { name: "stop", args: "" };
+  if (first === "stop" && second === "clean" && words.length === 2) return { name: "stop", args: "clean" };
   if (first === "status" && words.length === 1) return { name: "status", args: "" };
   if (first === "land" && words.length === 1) return { name: "land", args: "" };
   if (first === "deploy" && words.length === 1) return { name: "deploy", args: "" };

@@ -1,5 +1,5 @@
 import { beforeAll, beforeEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, existsSync } from "node:fs";
+import { mkdtempSync, existsSync, readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Store } from "../src/core/store";
@@ -49,11 +49,20 @@ interface World {
   harness: FakeHarness;
   runner: FakeCommandRunner;
   manager: SessionManager;
+  worktreesRoot: string;
 }
 
 function makeWorld(
   store?: Store,
-  opts: { costCap?: number; maxConcurrentTurns?: number; identityStrength?: "verified" | "weak" } = {},
+  opts: {
+    costCap?: number;
+    maxConcurrentTurns?: number;
+    identityStrength?: "verified" | "weak";
+    /** Isolated worktree root (M4 §3 GC tests count orphans within it). Default: shared. */
+    worktreesRoot?: string;
+    /** M4 §3: `stop clean` retention window. */
+    worktreeRetentionMs?: number;
+  } = {},
 ): World {
   const s = store ?? new Store(":memory:");
   s.upsertRepo({
@@ -68,13 +77,15 @@ function makeWorld(
   const surface = new FakeSurface(opts.identityStrength ?? "verified");
   const harness = new FakeHarness();
   const runner = new FakeCommandRunner();
-  const manager = new SessionManager(s, harness, new WorktreeManager(worktreesRoot), () => {}, {
+  const root = opts.worktreesRoot ?? worktreesRoot;
+  const manager = new SessionManager(s, harness, new WorktreeManager(root), () => {}, {
     defaultCostCapUsd: opts.costCap ?? 10,
     maxConcurrentTurns: opts.maxConcurrentTurns,
     commandRunner: runner,
+    worktreeRetentionMs: opts.worktreeRetentionMs,
   });
   manager.registerSurface(surface);
-  return { store: s, surface, harness, runner, manager };
+  return { store: s, surface, harness, runner, manager, worktreesRoot: root };
 }
 
 const member: Principal = { surface: "fake", externalId: "U_MEMBER" };
@@ -1540,5 +1551,203 @@ describe("role delegation — grant/revoke (M3.8)", () => {
     expect(msg).not.toContain("comes from config"); // must not misdirect to config
     expect(msg).toContain("everywhere"); // hints at the correct scope
     expect(w.store.isArchitect(abby, "C1")).toBe(true); // the grant is intact
+  });
+});
+
+// ---------------------------------------------------------------------------
+// M4 §3 — worktree cleanup. Heavy tests around the retention/GC invariant
+// (DESIGN §8-(3), §2 journeys 5 & 6). These drive REAL git worktrees, so the
+// teardown is observed on disk, not mocked. Each uses an isolated worktree root
+// so orphan counting is exact.
+
+describe("worktree cleanup — GC & the park-and-resume invariant (M4 §3)", () => {
+  /** A world with its own worktree root (clean orphan counting) + a retention window. */
+  function isolatedWorld(retentionMs?: number): World {
+    const root = mkdtempSync(join(tmpdir(), "conduit-gc-root-"));
+    return makeWorld(undefined, { worktreesRoot: root, worktreeRetentionMs: retentionMs });
+  }
+  /** Capture git stdout (the module `run` helper ignores it). */
+  async function gitOut(args: string[]): Promise<string> {
+    const proc = Bun.spawn(["git", ...args], { stdout: "pipe", stderr: "pipe" });
+    const [out] = await Promise.all([new Response(proc.stdout).text(), proc.exited]);
+    return out;
+  }
+  const assign = (w: World, id: string) =>
+    w.manager.handleEvent({ kind: "command", conv: conv(id), author: architect, name: "assign", args: "" });
+  const FAR_FUTURE = Date.now() + 3650 * 24 * 3600 * 1000; // ~10y — well past any window
+
+  test("a plain `stop` keeps the worktree; the GC never collects it (journey 5/6)", async () => {
+    const w = isolatedWorld();
+    await assign(w, "gc-plain");
+    const s = w.store.getSessionByConversation("fake", "gc-plain")!;
+    expect(existsSync(s.worktree_path)).toBe(true);
+
+    await w.manager.handleEvent({ kind: "command", conv: conv("gc-plain"), author: architect, name: "stop", args: "" });
+    expect(w.store.getSession(s.id)!.cleanup_at).toBeNull(); // never scheduled
+    expect(w.surface.posts.at(-1)!.text).toContain("Worktree preserved");
+
+    // Even sweeping far in the future, a plain-stopped tree is untouched.
+    const res = await w.manager.collectWorktrees(FAR_FUTURE);
+    expect(res).toEqual({ cleaned: 0, orphans: 0 });
+    expect(existsSync(s.worktree_path)).toBe(true);
+    expect(w.store.getSession(s.id)!.status).toBe("stopped");
+  });
+
+  test("a parked (resting) session's worktree is never collected", async () => {
+    const w = isolatedWorld();
+    await assign(w, "gc-parked");
+    const s = w.store.getSessionByConversation("fake", "gc-parked")!;
+    expect(s.status).toBe("parked");
+
+    const res = await w.manager.collectWorktrees(FAR_FUTURE);
+    expect(res).toEqual({ cleaned: 0, orphans: 0 });
+    expect(existsSync(s.worktree_path)).toBe(true);
+    expect(w.store.getSession(s.id)!.status).toBe("parked");
+  });
+
+  test("`stop clean` keeps the worktree during the retention window", async () => {
+    const w = isolatedWorld(60_000); // 60s grace
+    await assign(w, "gc-clean-window");
+    const s = w.store.getSessionByConversation("fake", "gc-clean-window")!;
+    await w.manager.handleEvent({ kind: "command", conv: conv("gc-clean-window"), author: architect, name: "stop", args: "clean" });
+    expect(w.surface.posts.at(-1)!.text).toMatch(/marked for cleanup/i);
+    expect(w.store.getSession(s.id)!.cleanup_at).not.toBeNull();
+
+    // GC at "now" — before the window elapses — collects nothing.
+    const res = await w.manager.collectWorktrees(Date.now());
+    expect(res.cleaned).toBe(0);
+    expect(existsSync(s.worktree_path)).toBe(true);
+    expect(w.store.getSession(s.id)).not.toBeNull();
+  });
+
+  test("`stop clean` past the interval removes the worktree, branch, and session row (discard)", async () => {
+    const w = isolatedWorld(1000);
+    await assign(w, "gc-discard");
+    const s = w.store.getSessionByConversation("fake", "gc-discard")!;
+    expect(await gitOut(["-C", repoPath, "worktree", "list", "--porcelain"])).toContain(s.worktree_path);
+    await w.manager.handleEvent({ kind: "command", conv: conv("gc-discard"), author: architect, name: "stop", args: "clean" });
+
+    const res = await w.manager.collectWorktrees(Date.now() + 5000); // past the window
+    expect(res.cleaned).toBe(1);
+    // Disk: worktree gone; git: neither the worktree nor the branch remain.
+    expect(existsSync(s.worktree_path)).toBe(false);
+    expect(await gitOut(["-C", repoPath, "worktree", "list", "--porcelain"])).not.toContain(s.worktree_path);
+    expect(await gitOut(["-C", repoPath, "branch", "--list"])).not.toContain(s.branch);
+    // Row discarded → the thread is unassigned; a fresh assign starts a NEW session.
+    expect(w.store.getSession(s.id)).toBeNull();
+    expect(w.store.getSessionByConversation("fake", "gc-discard")).toBeNull();
+    await assign(w, "gc-discard");
+    const s2 = w.store.getSessionByConversation("fake", "gc-discard")!;
+    expect(s2.id).not.toBe(s.id);
+    expect(existsSync(s2.worktree_path)).toBe(true);
+  });
+
+  test("reactivating a clean-stopped session cancels the scheduled teardown (journey 6)", async () => {
+    const w = isolatedWorld(1000);
+    await assign(w, "gc-reactivate");
+    const s = w.store.getSessionByConversation("fake", "gc-reactivate")!;
+    await w.manager.handleEvent({ kind: "command", conv: conv("gc-reactivate"), author: architect, name: "stop", args: "clean" });
+    expect(w.store.getSession(s.id)!.cleanup_at).not.toBeNull();
+
+    // Re-assign the SAME thread — same session, cleanup cancelled.
+    await assign(w, "gc-reactivate");
+    const s2 = w.store.getSession(s.id)!;
+    expect(s2.id).toBe(s.id);
+    expect(s2.status).toBe("parked");
+    expect(s2.cleanup_at).toBeNull();
+    expect(w.surface.posts.at(-1)!.text).toContain("reactivated");
+
+    // Even a far-future sweep now finds nothing due — the worktree lives on.
+    const res = await w.manager.collectWorktrees(FAR_FUTURE);
+    expect(res.cleaned).toBe(0);
+    expect(existsSync(s.worktree_path)).toBe(true);
+    expect(w.store.getSession(s.id)).not.toBeNull();
+  });
+
+  test("`stop clean` on an already-plain-stopped session schedules teardown (advertised recovery works)", async () => {
+    const w = isolatedWorld(1000);
+    await assign(w, "gc-late-clean");
+    const s = w.store.getSessionByConversation("fake", "gc-late-clean")!;
+    // Plain stop first (keeps the tree), then LATER decide to reclaim the disk.
+    await w.manager.handleEvent({ kind: "command", conv: conv("gc-late-clean"), author: architect, name: "stop", args: "" });
+    expect(w.store.getSession(s.id)!.cleanup_at).toBeNull();
+    await w.manager.handleEvent({ kind: "command", conv: conv("gc-late-clean"), author: architect, name: "stop", args: "clean" });
+    // The advertised recovery action is real — cleanup is now scheduled.
+    expect(w.store.getSession(s.id)!.cleanup_at).not.toBeNull();
+    expect(w.surface.posts.at(-1)!.text).toMatch(/marked for cleanup/i);
+    const res = await w.manager.collectWorktrees(Date.now() + 5000);
+    expect(res.cleaned).toBe(1);
+    expect(existsSync(s.worktree_path)).toBe(false);
+  });
+
+  test("a redundant plain `stop` on an already-stopped session is a clear no-op, not 'No active session'", async () => {
+    const w = isolatedWorld();
+    await assign(w, "gc-restop");
+    await w.manager.handleEvent({ kind: "command", conv: conv("gc-restop"), author: architect, name: "stop", args: "" });
+    await w.manager.handleEvent({ kind: "command", conv: conv("gc-restop"), author: architect, name: "stop", args: "" });
+    const msg = w.surface.posts.at(-1)!.text;
+    expect(msg).toContain("already stopped");
+    expect(msg).not.toContain("No active session");
+  });
+
+  test("the assign-race orphan leak is closed — the loser's worktree is torn down", async () => {
+    const w = isolatedWorld();
+    const c = conv("gc-race");
+    // Two architects assign the SAME fresh thread concurrently: both read no
+    // session, both provision a worktree, one insert wins and one hits the UNIQUE
+    // constraint. The loser must remove its now-orphaned worktree (M4 §3 fix).
+    await Promise.all([
+      w.manager.handleEvent({ kind: "command", conv: c, author: architect, name: "assign", args: "" }),
+      w.manager.handleEvent({ kind: "command", conv: c, author: architect, name: "assign", args: "" }),
+    ]);
+
+    const sessions = w.store.listSessions({ surfaceId: "fake" });
+    expect(sessions.length).toBe(1); // exactly one winner
+    const winner = sessions[0]!;
+    expect(existsSync(winner.worktree_path)).toBe(true);
+    // No orphan directory lingers under the root — only the winner's tree.
+    expect(readdirSync(w.worktreesRoot).sort()).toEqual([winner.id]);
+    expect(w.surface.transcript().some((t) => t.includes("just assigned by someone else"))).toBe(true);
+  });
+
+  test("the GC sweep reclaims an orphan directory but leaves a live session's tree", async () => {
+    const w = isolatedWorld();
+    await assign(w, "gc-orphan-keep");
+    const live = w.store.getSessionByConversation("fake", "gc-orphan-keep")!;
+    // Provision a worktree whose session id has NO row (models a crash between
+    // `git worktree add` and the DB insert).
+    const orphanId = `orphan-${crypto.randomUUID()}`;
+    const orphan = await new WorktreeManager(w.worktreesRoot).create({
+      repoPath,
+      defaultBranch: "main",
+      sessionId: orphanId,
+    });
+    expect(existsSync(orphan.path)).toBe(true);
+
+    // orphanMinAgeMs: 0 collects the fresh orphan immediately (grace is exercised
+    // in the next test); the live parked session's tree must stay untouched.
+    const res = await w.manager.collectWorktrees(Date.now(), { orphanMinAgeMs: 0 });
+    expect(res).toEqual({ cleaned: 0, orphans: 1 });
+    expect(existsSync(orphan.path)).toBe(false); // orphan reclaimed
+    expect(existsSync(live.worktree_path)).toBe(true); // live tree untouched
+    expect(w.store.getSession(live.id)!.status).toBe("parked");
+  });
+
+  test("the orphan grace protects a just-created tree (the GC-vs-create race), then collects it once aged", async () => {
+    const w = isolatedWorld(); // default 10-min orphan grace
+    // Model an in-flight assign: a worktree exists on disk but no row yet.
+    const orphan = await new WorktreeManager(w.worktreesRoot).create({
+      repoPath,
+      defaultBranch: "main",
+      sessionId: `orphan-${crypto.randomUUID()}`,
+    });
+    // A sweep at "now" must NOT reclaim it — its row could be a beat away.
+    const kept = await w.manager.collectWorktrees(Date.now());
+    expect(kept.orphans).toBe(0);
+    expect(existsSync(orphan.path)).toBe(true);
+    // A sweep well past the grace reclaims the genuinely-abandoned tree.
+    const swept = await w.manager.collectWorktrees(Date.now() + 20 * 60 * 1000);
+    expect(swept.orphans).toBe(1);
+    expect(existsSync(orphan.path)).toBe(false);
   });
 });

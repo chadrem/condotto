@@ -1377,3 +1377,100 @@ two about spike-file comments (not shipped code).
 (build scripts), `scripts/build-binary.ts` (new), `.gitignore` (`dist/`, `*.bun-build`),
 `tests/store.test.ts` (+5 migration tests), `tests/version.test.ts` (new), `spikes/m4/` (new: the
 three spike entrypoints). **Next: M4 §3 — worktree cleanup.**
+
+## 2026-07-19 — M4 §3 done: worktree cleanup (real teardown + assign-race fix + retention GC)
+
+**Implementation (DESIGN.md §8 M4 deliverable 3).** Real worktree teardown, the assign-race
+orphan-leak fix, and a retention/GC policy that holds the park-and-resume invariant (§2 journey 5).
+296 tests (274 → 296, +22), `tsc` + `check-ports` clean, and verified by **driving the full
+lifecycle against a throwaway git repo** (below), not just `bun test`.
+
+**(1) Real teardown (`worktrees.ts`).** `WorktreeManager.remove({repoPaths, sessionId, branch?})`
+runs `git worktree remove --force` + `git branch -D` + `git worktree prune`, **best-effort and
+idempotent** — a missing dir, an already-deleted branch, or an unregistered worktree are all
+no-errors, so the GC never crashes on one bad tree and a re-run is a clean no-op. `--force`/`-D`
+because a disposable worktree normally has uncommitted work + unmerged commits; a physical `rm`
+backstop reclaims a dir git never registered (a partially-created tree). `repoPaths` is a set: the
+one owning repo for a known session, or every configured repo for an orphan whose owner is unknown
+(a path is a worktree of at most one repo, so the non-owners no-op). A **path-confinement guard**
+refuses any path not *strictly under* the worktree root — both an escape (`../x`) and the root
+itself (an empty/`.` id resolves to root and would rm every tree). `listExisting()` returns each
+session-id dir + its mtime (for the GC's orphan grace, below).
+
+**(2) Assign-race orphan-leak fix (`session-manager.ts`).** `assign` provisions the worktree BEFORE
+the `(surface,conversation)` UNIQUE insert; the loser of a race caught its `ConflictError` and left
+its worktree to leak (the old code literally said "cleanup tooling arrives with M4"). Now the loser
+tears its own worktree down immediately — precise (it holds the exact repo + branch) — and audits a
+`worktree_orphan_removed`. The GC orphan sweep is the backstop for a crash between `worktree add` and
+the insert.
+
+**(3) Retention/GC (`session-manager.ts` + `store.ts`).** A new nullable `sessions.cleanup_at`
+column (migration **v2**, plain forward `ALTER TABLE ADD COLUMN` — the runner guarantees
+exactly-once, so no `ensureColumn` gymnastics) records an explicit-clean-stop schedule.
+`collectWorktrees(now?, {orphanMinAgeMs?})` has two targets:
+  - **Clean-stopped, past retention** — a session ended with `@Conduit stop clean` whose grace window
+    elapsed: remove worktree + branch, then `deleteSession` DISCARDS the row (approvals + turns
+    dropped in a transaction; the **audit_log is KEPT** — no FK, so the security trail survives a
+    discard). Serialized through the per-session FIFO and **re-read there**, so a teardown can never
+    race an in-flight turn or a reactivation that just cancelled the cleanup.
+  - **Orphan directories** (no session row) — the assign-race backstop + crash-stranded trees.
+
+  A **plain `stop` keeps its worktree forever** (`cleanup_at` NULL — invisible to the GC) for
+  reactivation (journey 6); the `status = 'stopped'` guard is baked into `sessionsDueForCleanup`'s
+  query so a live/parked worktree can never surface. Reactivation (`assign` on a stopped session)
+  **clears `cleanup_at`**, cancelling a pending teardown, and re-reads under the FIFO to bail
+  gracefully if the GC discarded the row first (no false "reactivated"). Command surface:
+  `@Conduit stop clean` (slack adapter `parseMentionCommand` gets one strict arity rule); default
+  retention 24h (a `SessionManagerOptions` override).
+
+**(4) The GC-vs-create race (found in self-review, before the workflow, and independently
+re-confirmed by 3 review lenses).** An in-flight `assign` creates its worktree on disk a beat before
+its DB row exists; a periodic orphan sweep could interleave at that await, see a row-less dir, and
+delete a LIVE session's worktree. Fixed with an **orphan grace period** (`orphanMinAgeMs`, default
+10 min ≫ any assign): the sweep skips a just-created tree, so only a genuinely-aged orphan is
+collected. The daemon's **boot sweep passes `orphanMinAgeMs: 0`** — no surface is live yet, so no
+assign can be mid-flight and any crash-orphan is safe to reclaim immediately.
+
+**(5) Wiring (`daemon.ts`).** A boot sweep (before surfaces go live) + an hourly `setInterval`
+(`unref()` so it never keeps the process alive; a re-entrancy guard skips a tick while the prior
+sweep runs; `clearInterval` on shutdown).
+
+**Verified by running it:** a drive script built the real `Store`+`WorktreeManager`+`SessionManager`
+against a throwaway git repo and watched the full lifecycle — worktree **created** (registered in
+git) → **parked** → **`stop clean`** (kept inside the window) → **reactivated** (cleanup cancelled;
+far-future GC still keeps it) → **`stop clean`** again → **collected only past the window** (removed
+from disk, deregistered in git, branch deleted, row discarded, thread unassigned). All assertions ✓.
+
+**Heavy invariant tests.** `tests/worktrees.test.ts` (new, 9): real create/remove, force-teardown of
+a dirty tree, idempotent re-run, unregistered-orphan reclaim, multi-repo owner selection,
+`listExisting` (+ mtime), the path-escape refusal, and the refuse-the-root guard (empty/`.` id can't
+rm the whole root). `tests/session-manager.test.ts` (+11): plain-stop keeps + never collected; a
+parked tree never collected; `stop clean` kept in-window; past-window removes worktree/branch/row
+(fresh assign starts a NEW session); reactivation cancels cleanup; the orphan grace protects a
+just-created tree then collects it once aged; the assign-race orphan leak is closed (concurrent
+assigns → one winner, no orphan dir); the orphan sweep reclaims an orphan while keeping a live tree;
+`stop clean` on an already-plain-stopped session schedules teardown; and a redundant plain re-stop is
+a clear no-op. `tests/store.test.ts` (+3): `cleanup_at` round-trip, `sessionsDueForCleanup` (stopped
++ past only), `deleteSession` (drops turns/approvals, keeps audit); migration-version bump to 2 (+
+the v0-adoption test drops `cleanup_at` to faithfully reconstruct the pre-runner schema).
+`tests/adapter-slack.test.ts` (+1): `stop clean` parses; stray/over-arity stays conversation.
+
+**Adversarial review** (5 lenses — invariant, teardown/fs-safety, migration/store, concurrency,
+UX/test-honesty — refute-by-default verification, run as a multi-agent workflow). **1 confirmed
+(low), 4 refuted.** Confirmed: the plain-stop message advertised `@Conduit stop clean` as a recovery
+action, but the command was rejected on an already-stopped session (a dead-end). Fixed the *better*
+way — `stop clean` now schedules teardown on an already-stopped session too, so the advertised
+recovery is real (and a redundant plain re-stop gives a clear "already stopped" reply instead of "no
+active session"). Refuted (correctly, against the working tree): the 3 GC-vs-create race findings
+(the `orphanMinAgeMs` mtime grace, added in self-review before the workflow, already closes it) and
+the `path === root` escape carve-out (no reachable caller passes an empty/`.` id) — but that latent
+footgun was still **hardened** (the guard now refuses the root itself; cheap, catastrophic if ever
+hit). Every park-and-resume, retention, teardown-confinement, and migration invariant held.
+
+**Files:** `src/core/worktrees.ts` (remove + listExisting + confinement guard), `src/core/store.ts`
+(cleanup_at + migration v2 + mark/clear/due/deleteSession), `src/core/session-manager.ts` (stop
+clean incl. already-stopped, orphan-leak fix, reactivation cancel + race guard, collectWorktrees +
+orphan grace, retentionLabel), `src/daemon.ts` (boot + periodic GC), `src/adapters/slack/adapter.ts`
+(`stop clean` parse), `tests/worktrees.test.ts` (new), `tests/session-manager.test.ts`,
+`tests/store.test.ts`, `tests/adapter-slack.test.ts`. **Next: M4 §4 — daemon-wide `/conduit status`
++ slash fixes.**

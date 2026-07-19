@@ -55,6 +55,12 @@ describe("parseMentionCommand — existing forms still parse (regression)", () =
     expect(parse("stop")).toEqual({ name: "stop", args: "" });
   });
 
+  test("`stop clean` parses to the clean variant; a stray arg stays conversation (M4 §3)", () => {
+    expect(parse("stop clean")).toEqual({ name: "stop", args: "clean" });
+    expect(parse("stop please")).toBeNull(); // not a command → conversation
+    expect(parse("stop clean now")).toBeNull(); // over-arity → conversation
+  });
+
   test("ordinary prose and a missing bot id are not commands", () => {
     expect(parse("take a look at src/x.ts please")).toBeNull();
     expect(parseMentionCommand("grant <@U0ABBY> architect", null)).toBeNull(); // no bot id yet

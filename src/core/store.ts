@@ -42,6 +42,15 @@ export interface SessionRow {
    * `@Conduit auto-approve on|off`.
    */
   auto_approve: number;
+  /**
+   * M4 §3 worktree GC: when non-null, this session was explicitly stopped with
+   * the `clean` variant and its worktree becomes collectible at this ISO
+   * timestamp (the stop time + retention interval). NULL is the resting state —
+   * a live/parked session, or a plain `stop` that keeps its worktree for
+   * reactivation (DESIGN §2 journey 6). The GC NEVER collects a NULL row's
+   * worktree, which is how the park-and-resume invariant (§2 journey 5) is held.
+   */
+  cleanup_at: string | null;
   created_at: string;
   last_active_at: string;
 }
@@ -285,6 +294,18 @@ function migrateBaselineV1(db: Database): void {
   ensureColumn(db, "approvals", "initiated_by", "TEXT");
 }
 
+/**
+ * Migration **v2** (M4 §3 worktree GC): schedule column for the worktree garbage
+ * collector. `cleanup_at` is set only by an explicit `@Conduit stop clean` (to
+ * stop-time + retention interval); the GC collects the worktree once due and then
+ * discards the session row. A plain stop leaves it NULL — never collected. Plain
+ * forward DDL: unlike the baseline it only ever runs on a store already at v1, so
+ * no `ensureColumn` gymnastics are needed (the runner guarantees exactly-once).
+ */
+function migrateV2(db: Database): void {
+  db.run(`ALTER TABLE sessions ADD COLUMN cleanup_at TEXT`);
+}
+
 /** Add `column` to `table` only if absent (idempotent ALTER — SQLite has no
  *  `ADD COLUMN IF NOT EXISTS`). Used by the baseline migration to evolve tables
  *  a pre-runner DB already created. */
@@ -323,8 +344,10 @@ export class Store {
   private migrate(): void {
     const migrations: Array<(db: Database) => void> = [
       migrateBaselineV1, // v1: the M0–M3.8 schema as one idempotent baseline.
-      // v2+: append new migrations here. They only ever run on a store already
-      // at v1, so they can be plain forward DDL — no IF NOT EXISTS gymnastics.
+      migrateV2, // v2: sessions.cleanup_at for the M4 §3 worktree GC.
+      // v3+: append new migrations here. They only ever run on a store already
+      // at the prior version, so they can be plain forward DDL — no IF NOT EXISTS
+      // gymnastics.
     ];
 
     const current = this.userVersion();
@@ -442,7 +465,7 @@ export class Store {
   createSession(
     s: Omit<
       SessionRow,
-      "created_at" | "last_active_at" | "budget_limit_usd" | "model" | "effort" | "subagents" | "workflows" | "workflow_write" | "auto_approve"
+      "created_at" | "last_active_at" | "budget_limit_usd" | "model" | "effort" | "subagents" | "workflows" | "workflow_write" | "auto_approve" | "cleanup_at"
     > & {
       budget_limit_usd?: number | null;
       model?: string | null;
@@ -508,6 +531,7 @@ export class Store {
       workflows,
       workflow_write: 0,
       auto_approve: autoApprove,
+      cleanup_at: null,
       created_at: now,
       last_active_at: now,
     };
@@ -648,6 +672,58 @@ export class Store {
       )
       .get({ id });
     return row?.total ?? 0;
+  }
+
+  // -- worktree GC (M4 §3) --------------------------------------------------
+
+  /**
+   * Schedule this session's worktree for collection at `cleanupAt` (ISO) — set by
+   * an explicit `@Conduit stop clean`. Only a `stopped` session is ever marked;
+   * the GC re-checks status before acting. Reactivation clears it via
+   * `clearSessionCleanup`, so a within-window resume cancels the teardown.
+   */
+  markSessionForCleanup(id: string, cleanupAt: string): void {
+    this.db.query(`UPDATE sessions SET cleanup_at = $at WHERE id = $id`).run({ id, at: cleanupAt });
+  }
+
+  /** Cancel a scheduled worktree cleanup (a clean-stopped session was reactivated). */
+  clearSessionCleanup(id: string): void {
+    this.db.query(`UPDATE sessions SET cleanup_at = NULL WHERE id = $id`).run({ id });
+  }
+
+  /**
+   * Sessions whose worktree is due for collection: explicitly clean-stopped
+   * (`cleanup_at` set) and past that instant. The `status = 'stopped'` guard bakes
+   * the park-and-resume invariant (§2 journey 5) into the query itself — a
+   * live/parked row can never surface here even if a `cleanup_at` somehow lingered.
+   * ISO-8601 UTC strings compare lexically == chronologically, so the `<=` is safe.
+   */
+  sessionsDueForCleanup(nowIso: string): SessionRow[] {
+    const rows = this.db
+      .query<RawSessionRow, { now: string }>(
+        `SELECT * FROM sessions
+         WHERE status = 'stopped' AND cleanup_at IS NOT NULL AND cleanup_at <= $now
+         ORDER BY cleanup_at ASC`,
+      )
+      .all({ now: nowIso });
+    return rows.map((r) => inflate(r)!) as SessionRow[];
+  }
+
+  /**
+   * Delete a session and its operational rows (approvals, turns) in one
+   * transaction — used by the GC to discard a clean-stopped session once its
+   * worktree is gone. The `audit_log` is deliberately KEPT (it has no FK to
+   * sessions): the durable security/decision trail must survive a discard, even
+   * though the conversational turn history and approval ledger rows do not. FK
+   * ordering matters — children before the parent — or the parent delete is
+   * blocked (`foreign_keys = ON`).
+   */
+  deleteSession(id: string): void {
+    this.db.transaction(() => {
+      this.db.query(`DELETE FROM approvals WHERE session_id = $id`).run({ id });
+      this.db.query(`DELETE FROM turns WHERE session_id = $id`).run({ id });
+      this.db.query(`DELETE FROM sessions WHERE id = $id`).run({ id });
+    })();
   }
 
   // -- turns ----------------------------------------------------------------

@@ -151,7 +151,7 @@ function threadCommandHelp(): string {
     `• \`@Conduit grant @user architect [everywhere]\` · \`@Conduit revoke @user\` — delegate authority (this channel, or everywhere)`,
     `• \`@Conduit land\` / \`@Conduit deploy\` — run the repo's ship path (gated)`,
     `• \`@Conduit budget <usd>\` — raise this thread's cost budget`,
-    `• \`@Conduit status\` — list sessions · \`@Conduit stop\` — end this session`,
+    `• \`@Conduit status\` — list sessions · \`@Conduit stop\` — end this session (keeps the worktree; \`stop clean\` discards it)`,
   ].join("\n");
 }
 
@@ -186,6 +186,21 @@ export interface SessionManagerOptions {
    * repo sets no `default_auto_approve`. On by default (DESIGN §4:441-444).
    */
   defaultAutoApprove?: boolean;
+  /**
+   * How long after an explicit `@Conduit stop clean` the GC keeps the worktree
+   * before collecting it (M4 §3). A grace window: the clean-stopped session stays
+   * reactivatable until it elapses (a reactivation cancels the teardown). Default
+   * 24h. A plain `stop` is never scheduled, so this never applies to it.
+   */
+  worktreeRetentionMs?: number;
+  /**
+   * Grace period an orphan directory (a worktree with no session row) must exceed
+   * before the GC collects it (M4 §3). Guards the GC-vs-create race: an in-flight
+   * assign creates its worktree on disk a beat before its DB row exists, so a
+   * just-created tree must never be mistaken for an orphan. Default 10 min — vastly
+   * longer than an assign, so a real crash-orphan still ages out promptly.
+   */
+  orphanMinAgeMs?: number;
 }
 
 /** Prefix marking an approval whose action the daemon runs itself (land/deploy) */
@@ -227,6 +242,8 @@ export class SessionManager {
   private readonly defaultModel: string;
   private readonly defaultEffort: string;
   private readonly defaultAutoApprove: boolean;
+  private readonly worktreeRetentionMs: number;
+  private readonly orphanMinAgeMs: number;
   private readonly turnSlots: Semaphore;
   private readonly commandRunner: CommandRunnerLike;
 
@@ -241,6 +258,10 @@ export class SessionManager {
     this.defaultModel = opts.defaultModel ?? "opus";
     this.defaultEffort = opts.defaultEffort ?? "high";
     this.defaultAutoApprove = opts.defaultAutoApprove ?? true;
+    // 24h default: long enough that a hasty `stop clean` can still be recovered
+    // (re-assign the thread), short enough to reclaim disk on a real cadence.
+    this.worktreeRetentionMs = opts.worktreeRetentionMs ?? 24 * 60 * 60 * 1000;
+    this.orphanMinAgeMs = opts.orphanMinAgeMs ?? 10 * 60 * 1000;
     this.turnSlots = new Semaphore(Math.max(1, opts.maxConcurrentTurns ?? 6));
     this.commandRunner = opts.commandRunner ?? new CommandRunner();
   }
@@ -391,7 +412,7 @@ export class SessionManager {
         await this.status(event.conv);
         break;
       case "stop":
-        await this.stopSession(event.conv, event.author);
+        await this.stopSession(event.conv, event.author, event.args);
         break;
       case "budget":
         await this.setBudget(event.conv, event.author, event.args);
@@ -460,7 +481,21 @@ export class SessionManager {
       // Serialize through the FIFO so it cannot overlap an in-flight turn.
       const entry = this.entryFor(existing.id);
       entry.chain = entry.chain.then(async () => {
+        // Re-read under the FIFO: the worktree GC (M4 §3) may have discarded a
+        // clean-stopped session in the tiny window between our top-of-method read
+        // and this link. If so, there is nothing to reactivate — the tree/branch
+        // are gone; ask for a fresh assign rather than post a false "reactivated".
+        const cur = this.store.getSession(existing.id);
+        if (!cur) {
+          await surface.post(conv, {
+            text: `That session was just cleaned up. Run \`@Conduit assign ${existing.repo_id}\` to start a fresh one.`,
+          });
+          return;
+        }
         this.store.updateSessionStatus(existing.id, "parked");
+        // A clean-stopped session being reactivated cancels its scheduled teardown
+        // (M4 §3) — the worktree lives on for the resumed work (journey 6).
+        this.store.clearSessionCleanup(existing.id);
         // Drop any approval left pending from before the stop — it refers to an
         // abandoned turn and would otherwise wedge the reactivated session (#7).
         this.store.expirePendingApprovals(existing.id);
@@ -468,6 +503,7 @@ export class SessionManager {
           sessionId: existing.id,
           actor: principalKey(author),
           event: "session_reactivated",
+          ...(cur.cleanup_at ? { detail: { cleanupCancelled: true } } : {}),
         });
         await surface.post(conv, {
           text:
@@ -526,8 +562,18 @@ export class SessionManager {
       });
     } catch (err) {
       if (err instanceof ConflictError) {
-        // Lost an assign race. The provisioned worktree is orphaned; cleanup
-        // tooling arrives with M4 worktree management.
+        // Lost an assign race: the worktree we just created (at our own losing
+        // session id) has no session row and would leak (M4 §3). Tear it down
+        // immediately — precise, since we hold the exact repo + branch. Best-effort:
+        // the GC orphan sweep is the backstop if this fails.
+        await this.worktrees
+          .remove({ repoPaths: [repo.path], sessionId, branch: worktree.branch })
+          .catch((e) => this.log(`[assign] orphan worktree cleanup failed for ${sessionId}: ${e}`));
+        this.store.audit({
+          actor: principalKey(author),
+          event: "worktree_orphan_removed",
+          detail: { sessionId, reason: "assign_race", worktree: worktree.path },
+        });
         await surface.post(conv, { text: "This thread was just assigned by someone else." });
         return;
       }
@@ -620,10 +666,16 @@ export class SessionManager {
     await surface.post(conv, { text: `Sessions in this channel:\n${lines.join("\n")}` });
   }
 
-  private async stopSession(conv: ConversationRef, author: Principal): Promise<void> {
+  /**
+   * `@Conduit stop [clean]` (architect-only, DESIGN §2 journey 6). Plain `stop`
+   * ends the session but KEEPS its worktree for reactivation (journey 6 / §2 j5);
+   * `stop clean` additionally schedules the worktree for teardown a retention
+   * interval later (M4 §3) — a grace window in which a re-assign still recovers it.
+   */
+  private async stopSession(conv: ConversationRef, author: Principal, args: string): Promise<void> {
     const surface = this.surfaceFor(conv);
     const session = this.store.getSessionByConversation(conv.surfaceId, conv.conversationId);
-    if (!session || session.status === "stopped") {
+    if (!session) {
       await surface.post(conv, { text: "No active session in this thread." });
       return;
     }
@@ -633,24 +685,155 @@ export class SessionManager {
       await surface.post(conv, { text: "Only architects can stop sessions." });
       return;
     }
-    // Mark stopped immediately (in-flight turn output may still land), but keep
-    // the live entry and its FIFO — deleting mid-turn would let a later
-    // reactivation start a second concurrent turn on the same session.
-    this.store.updateSessionStatus(session.id, "stopped");
-    // Expire any approval left pending — the session is gone; nothing should be
-    // resumable via a late click (#7). handleApprovalDecision also guards on
-    // status, but clearing the row keeps hasPendingApproval/audit honest.
-    this.store.expirePendingApprovals(session.id);
-    const entry = this.live.get(session.id);
-    if (entry) entry.harness = null;
-    this.store.audit({
-      sessionId: session.id,
-      actor: principalKey(author),
-      event: "session_stopped",
-    });
-    await surface.post(conv, {
-      text: `Session stopped. Worktree preserved at ${session.worktree_path}.`,
-    });
+    const clean = args.trim().toLowerCase() === "clean";
+    const wasStopped = session.status === "stopped";
+    // Already stopped: a plain re-stop is a no-op, but `stop clean` can STILL
+    // schedule teardown of the still-preserved worktree — so an architect who
+    // plain-stopped can reclaim the disk later without re-assigning (this is the
+    // recovery action the plain-stop message advertises; review 2026-07-19).
+    if (wasStopped && !clean) {
+      await surface.post(conv, {
+        text:
+          `This session is already stopped — its worktree is preserved. ` +
+          `\`@Conduit stop clean\` to discard it, or re-assign this thread to resume.`,
+      });
+      return;
+    }
+    if (!wasStopped) {
+      // Mark stopped immediately (in-flight turn output may still land), but keep
+      // the live entry and its FIFO — deleting mid-turn would let a later
+      // reactivation start a second concurrent turn on the same session.
+      this.store.updateSessionStatus(session.id, "stopped");
+      // Expire any approval left pending — the session is gone; nothing should be
+      // resumable via a late click (#7). handleApprovalDecision also guards on
+      // status, but clearing the row keeps hasPendingApproval/audit honest.
+      this.store.expirePendingApprovals(session.id);
+      const entry = this.live.get(session.id);
+      if (entry) entry.harness = null;
+    }
+    if (clean) {
+      const cleanupAt = new Date(Date.now() + this.worktreeRetentionMs).toISOString();
+      this.store.markSessionForCleanup(session.id, cleanupAt);
+      this.store.audit({
+        sessionId: session.id,
+        actor: principalKey(author),
+        event: "session_stopped",
+        detail: { clean: true, cleanupAt, ...(wasStopped ? { alreadyStopped: true } : {}) },
+      });
+      await surface.post(conv, {
+        text:
+          `${wasStopped ? "Worktree marked for cleanup" : "Session stopped and marked for cleanup"} — ` +
+          `I'll remove the worktree and branch \`${session.branch}\` after ${this.retentionLabel()}. ` +
+          `Re-assign this thread before then (\`@Conduit assign ${session.repo_id}\`) to keep it.`,
+      });
+    } else {
+      this.store.audit({
+        sessionId: session.id,
+        actor: principalKey(author),
+        event: "session_stopped",
+      });
+      await surface.post(conv, {
+        text:
+          `Session stopped. Worktree preserved at ${session.worktree_path} — re-assign this ` +
+          `thread anytime to resume, or \`@Conduit stop clean\` to discard it.`,
+      });
+    }
+  }
+
+  /** Human label for the worktree retention window (M4 §3 stop-clean messaging). */
+  private retentionLabel(): string {
+    const hours = this.worktreeRetentionMs / 3_600_000;
+    if (hours >= 1) {
+      const h = Number.isInteger(hours) ? hours : Number(hours.toFixed(1));
+      return `${h} hour${h === 1 ? "" : "s"}`;
+    }
+    const mins = Math.max(1, Math.round(this.worktreeRetentionMs / 60_000));
+    return `${mins} minute${mins === 1 ? "" : "s"}`;
+  }
+
+  /**
+   * Worktree garbage collection (M4 §3, DESIGN §8-(3)). Reclaims disk from
+   * worktrees no longer bound to a live or parked session, and NEVER touches one
+   * that is — the park-and-resume invariant (§2 journey 5). Two collection targets:
+   *
+   *   1. **Clean-stopped, past retention** — a session explicitly ended with
+   *      `@Conduit stop clean` whose grace window has elapsed. Remove its worktree
+   *      + branch, then discard the (deliberately abandoned) session row. Serialized
+   *      through the per-session FIFO and re-read there, so a teardown can never race
+   *      an in-flight turn or a reactivation that just cancelled the cleanup.
+   *   2. **Orphan directories** — a worktree dir with no session row at all: the
+   *      assign-race leak's backstop, plus any tree stranded by a crash between
+   *      `git worktree add` and the DB insert. No row ⇒ no turns ⇒ no FIFO needed.
+   *
+   * A plain `stop` (cleanup_at NULL) is invisible here — its worktree is kept for
+   * reactivation (journey 6). Idempotent and best-effort (one bad tree never aborts
+   * the sweep); safe to call at boot and on a timer. `now` is injectable for tests;
+   * `opts.orphanMinAgeMs` overrides the orphan grace per call (the daemon's boot
+   * sweep passes 0 — no surface is live yet, so no assign can be mid-flight).
+   */
+  async collectWorktrees(
+    now: number = Date.now(),
+    opts: { orphanMinAgeMs?: number } = {},
+  ): Promise<{ cleaned: number; orphans: number }> {
+    const repos = this.store.listRepos();
+    const allRepoPaths = repos.map((r) => r.path);
+    const orphanMinAgeMs = opts.orphanMinAgeMs ?? this.orphanMinAgeMs;
+    let cleaned = 0;
+    let orphans = 0;
+
+    // (1) Clean-stopped sessions past their retention interval.
+    for (const due of this.store.sessionsDueForCleanup(new Date(now).toISOString())) {
+      const entry = this.entryFor(due.id);
+      entry.chain = entry.chain
+        .then(async () => {
+          // Re-read inside the FIFO: a reactivation may have landed and cleared
+          // cleanup_at (or an earlier sweep already collected it).
+          const s = this.store.getSession(due.id);
+          if (!s || s.status !== "stopped" || s.cleanup_at === null) return;
+          if (new Date(s.cleanup_at).getTime() > now) return; // window pushed out
+          const repo = this.store.getRepo(s.repo_id);
+          const res = await this.worktrees.remove({
+            repoPaths: repo ? [repo.path] : allRepoPaths,
+            sessionId: s.id,
+            branch: s.branch,
+          });
+          this.store.deleteSession(s.id);
+          this.live.delete(s.id);
+          this.store.audit({
+            sessionId: s.id,
+            actor: "system",
+            event: "worktree_cleaned",
+            detail: { branch: s.branch, worktree: s.worktree_path, removed: res.removed },
+          });
+          cleaned++;
+        })
+        .catch((e) => this.log(`[gc] cleanup of session ${due.id} failed: ${e}`));
+      await entry.chain;
+    }
+
+    // (2) Orphan directories with no session row.
+    for (const { name, mtimeMs } of this.worktrees.listExisting()) {
+      if (this.store.getSession(name)) continue; // has a row → governed by (1)/status
+      // Grace: a just-created tree may be an assign whose DB row isn't inserted
+      // yet — never mistake it for an orphan (the GC-vs-create race).
+      if (now - mtimeMs < orphanMinAgeMs) continue;
+      try {
+        const res = await this.worktrees.remove({ repoPaths: allRepoPaths, sessionId: name });
+        this.store.audit({
+          actor: "system",
+          event: "worktree_orphan_removed",
+          detail: { sessionId: name, reason: "no_session_row", removed: res.removed },
+        });
+        orphans++;
+      } catch (e) {
+        this.log(`[gc] orphan removal of ${name} failed: ${e}`);
+      }
+    }
+
+    if (cleaned || orphans) {
+      this.log(`[gc] worktree cleanup: ${cleaned} clean-stopped, ${orphans} orphan(s) removed`);
+    }
+    return { cleaned, orphans };
   }
 
   /** `@Conduit budget <usd>` — architect raises/lowers the thread cost cap (M3). */

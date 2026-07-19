@@ -13,6 +13,11 @@ import { SlackAdapter } from "./adapters/slack/adapter";
 
 const log = (msg: string) => console.log(`${new Date().toISOString()} ${msg}`);
 
+/** How often the daemon sweeps for collectible worktrees (M4 §3). A boot sweep
+ *  plus this tick reclaim clean-stopped (past-retention) and orphaned trees; the
+ *  sweep never touches a live/parked worktree (§2 journey 5). */
+const WORKTREE_GC_INTERVAL_MS = 60 * 60 * 1000; // hourly
+
 /** The program name to show in `--help`: the compiled binary's own filename
  *  (from `process.execPath` — argv[1] is a `$bunfs` path when compiled), else
  *  the canonical `conduit` under `bun run`. */
@@ -140,6 +145,21 @@ async function main(): Promise<void> {
       `architect auto-approve ${config.defaultAutoApprove ? "ON" : "off"} by default`,
   );
 
+  // Worktree GC (M4 §3): sweep once at boot — before any surface is live, so a
+  // reactivation can't race the initial teardown — then hand off to a timer below.
+  // Never touches a live/parked worktree (§2 journey 5); best-effort, never fatal.
+  {
+    const { cleaned, orphans } = await manager
+      // orphanMinAgeMs: 0 — no surface is live yet, so no assign can be mid-flight;
+      // a crash-orphan of any age is safe to reclaim immediately at boot.
+      .collectWorktrees(Date.now(), { orphanMinAgeMs: 0 })
+      .catch((e) => {
+        log(`[daemon] initial worktree GC failed: ${e}`);
+        return { cleaned: 0, orphans: 0 };
+      });
+    if (cleaned || orphans) log(`[daemon] boot worktree GC: ${cleaned} clean-stopped, ${orphans} orphan(s) reclaimed`);
+  }
+
   // Surface credentials belong to the adapter, not the core domain config — the
   // composition root gets them from conduit.toml (via loadSlackConfig, validated
   // above) and hands them straight over.
@@ -156,8 +176,24 @@ async function main(): Promise<void> {
   const parked = store.listSessions({ surfaceId: slack.id }).length;
   log(`[daemon] ready — db=${config.dbPath}, sessions on record: ${parked}`);
 
+  // Periodic worktree GC (M4 §3). unref() so it never keeps the process alive; a
+  // re-entrancy guard skips a tick if the prior sweep is still running (git spawns).
+  let gcRunning = false;
+  const gcTimer = setInterval(() => {
+    if (gcRunning) return;
+    gcRunning = true;
+    void manager
+      .collectWorktrees()
+      .catch((e) => log(`[daemon] worktree GC failed: ${e}`))
+      .finally(() => {
+        gcRunning = false;
+      });
+  }, WORKTREE_GC_INTERVAL_MS);
+  gcTimer.unref?.();
+
   const shutdown = async (signal: string) => {
     log(`[daemon] ${signal} — shutting down`);
+    clearInterval(gcTimer);
     await slack.stop().catch(() => {});
     store.close();
     process.exit(0);

@@ -196,6 +196,57 @@ describe("store sessions", () => {
   });
 });
 
+describe("store worktree GC (M4 §3)", () => {
+  test("cleanup_at defaults null on create and round-trips via mark/clear", () => {
+    const store = memoryStore();
+    const s = store.createSession({ ...baseSession, id: "g1", conversation_id: "1" });
+    expect(s.cleanup_at).toBeNull();
+    expect(store.getSession("g1")!.cleanup_at).toBeNull();
+
+    store.markSessionForCleanup("g1", "2026-07-20T00:00:00.000Z");
+    expect(store.getSession("g1")!.cleanup_at).toBe("2026-07-20T00:00:00.000Z");
+    store.clearSessionCleanup("g1");
+    expect(store.getSession("g1")!.cleanup_at).toBeNull();
+  });
+
+  test("sessionsDueForCleanup returns only stopped rows past their cleanup_at", () => {
+    const store = memoryStore();
+    // Due: stopped + a past timestamp.
+    store.createSession({ ...baseSession, id: "due", conversation_id: "1", status: "stopped" });
+    store.markSessionForCleanup("due", "2020-01-01T00:00:00.000Z");
+    // Not yet due: stopped + a future timestamp.
+    store.createSession({ ...baseSession, id: "future", conversation_id: "2", status: "stopped" });
+    store.markSessionForCleanup("future", "2999-01-01T00:00:00.000Z");
+    // Never scheduled: a plain-stopped session (cleanup_at null) is never collected.
+    store.createSession({ ...baseSession, id: "kept", conversation_id: "3", status: "stopped" });
+    // Belt-and-braces: a non-stopped row with a past cleanup_at must NOT surface —
+    // the invariant is baked into the query (a live/parked worktree is never GC'd).
+    store.createSession({ ...baseSession, id: "parked", conversation_id: "4", status: "parked" });
+    store.markSessionForCleanup("parked", "2020-01-01T00:00:00.000Z");
+
+    const due = store.sessionsDueForCleanup("2026-07-19T00:00:00.000Z");
+    expect(due.map((s) => s.id)).toEqual(["due"]);
+  });
+
+  test("deleteSession removes the row + its turns/approvals but keeps the audit trail", () => {
+    const store = memoryStore();
+    store.createSession({ ...baseSession, id: "d1", conversation_id: "1" });
+    store.insertTurn({ sessionId: "d1", direction: "out", text: "hi", costUsd: 0.5 });
+    store.createApproval({ id: "ap1", sessionId: "d1", toolUseId: "t1", toolName: "Write", toolInput: {} });
+    store.audit({ sessionId: "d1", actor: "system", event: "worktree_cleaned" });
+
+    store.deleteSession("d1");
+
+    expect(store.getSession("d1")).toBeNull();
+    expect(store.getApproval("ap1")).toBeNull();
+    expect(store.sessionCostUsd("d1")).toBe(0); // turns gone
+    // The security/decision trail survives the discard (audit_log has no FK).
+    expect(store.listAudit("d1").some((e) => e.event === "worktree_cleaned")).toBe(true);
+    // The conversation is free again — a fresh assign gets a brand-new session.
+    expect(store.getSessionByConversation("slack", "1")).toBeNull();
+  });
+});
+
 describe("store cost accounting (M3)", () => {
   test("sessionCostUsd sums per-turn cost and is 0 for a fresh session", () => {
     const store = memoryStore();
@@ -413,7 +464,7 @@ describe("store schema migrations (M4 §2)", () => {
   // The current schema version == the number of migrations in the runner. Bump
   // this constant in lockstep whenever a migration is appended — the tests below
   // pin the runner's behavior to it.
-  const CURRENT_SCHEMA_VERSION = 1;
+  const CURRENT_SCHEMA_VERSION = 2;
 
   const migPath = (name: string): string => join(mkdtempSync(join(tmpdir(), "conduit-mig-")), name);
   const userVersion = (path: string): number => {
@@ -453,7 +504,13 @@ describe("store schema migrations (M4 §2)", () => {
     store.close();
 
     const raw = new Database(path);
-    raw.run("PRAGMA user_version = 0"); // rewind the stamp to the pre-M4-§2 state
+    // Faithfully reconstruct the real pre-runner state: the live store predated
+    // BOTH the runner (stamp 0) AND every post-v1 column. Drop the v2 addition so
+    // re-migration re-adds it — exactly what the true upgrade does (a v0 store that
+    // never had cleanup_at). Without this the rewound store would still carry the
+    // column and migrateV2's plain ADD COLUMN would (wrongly) see a duplicate.
+    raw.run("ALTER TABLE sessions DROP COLUMN cleanup_at");
+    raw.run("PRAGMA user_version = 0"); // rewind the stamp to the pre-runner state
     raw.close();
     expect(userVersion(path)).toBe(0);
 
