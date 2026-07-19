@@ -1103,3 +1103,87 @@ feature tests missed (they only covered direct revoke of a config architect, not
 grant-flip-then-revoke path). Re-confirms the ultracode habit: adversarially verify
 security-relevant diffs before shipping, and let refute-by-default kill the false positives
 (3 of 6 reported findings were duplicates/over-severity, correctly collapsed).
+
+## 2026-07-19 — Milestone 4 reframed: installable open-source beta, not "dedicated box & hardening"
+
+Working with the architect (Chad), M4's scope was rethought once the product's audience and
+distribution model were pinned down. The old §8 M4 ("dedicated box + scoped daemon credentials,
+session process isolation if needed, read-only audit channel, worktree cleanup, real deploy paths
+behind a gating review") was written when the residual injection→in-worktree-RCE→exfil window
+(M3.8 watch-list) looked load-bearing. Under the sharpened framing that window is bounded to a
+level a trusted team accepts, and most of M4's old weight either moves to the installer or drops.
+**No code changed yet — this is the plan.**
+
+**The framing (now recorded in DESIGN.md §1 "Distribution & trust model").** Conduit is
+open-source, self-hosted software: the deliverable is source + prebuilt binaries + install docs.
+The installer is a technical **architect** (expert in coding/servers, not necessarily the
+product's domain) who stands Conduit up for a small, mutually-trusting team and uses it to empower
+the *domain* experts (deep product knowledge, varying coding depth) to do real engineering —
+prototyping, design, speccing, bug fixes — through Slack. **Everyone with Slack-and-repo access is
+trusted, and enforcing that boundary is the installer's job, documented, not engineered against.**
+The "empower domain experts" mechanic already exists (M3.8 grant + auto-approve); M4 adds no new
+authority machinery, only packaging + the docs that explain the model.
+
+**What was cut and why:**
+- **Dedicated-box provisioning** — the installer runs their own box/dev env; not our code.
+- **Session process isolation** — its only justification was bounding a hostile/wedged session's
+  blast radius across a *trust* boundary that doesn't exist here. In-process `query()` stays; the
+  daemon-wide semaphore already bounds *load*. (§7 always called this a "v1.5 call.")
+- **Real deploy paths** — out of M4's scope entirely (deploy isn't even in the domain-expert value
+  list). The `CommandRunner` land/deploy plumbing already exists and runs an optional per-repo
+  command string through the gate; wiring a *real* target + the credential-scoping tangle is a
+  separate, later concern.
+- The env-scrub/credential concern is **downgraded, not dropped**: it's the team's own creds,
+  workspace, and box, so it's cheap hygiene (a one-line `options.env` scrub + the existing policy
+  floor as defense-in-depth), not the milestone's spine.
+
+**What M4 is now** (full list in DESIGN.md §8): single `conduit.toml`, install docs, worktree
+cleanup, `bun build --compile` binaries, operator `/conduit status` + the two slash-gap fixes + a
+sample service unit, plus env-scrub and background-task cost/cancellation as cheap riders.
+**Deferred past M4:** the read-only audit channel and symlink-realpath confinement (interim for the
+latter: don't let `ln -s` auto-approve).
+
+**Config decision — single `conduit.toml` (TOML).** Consolidates the scattered `.env` +
+`conduit.repos.json` + `conduit.roles.json` + `CONDUIT_*` into one file: `[slack]` tokens,
+`architects`, `[[repos]]`, `[defaults]` (model/effort/auto-approve/cost cap), and paths.
+**Format: TOML**, chosen over JSONC after a Bun-1.3.14 spike — `Bun.TOML.parse` is a built-in
+*string* parser (zero deps, clean try/catch errors), whereas Bun parses JSONC only via the
+module-import loader (`Bun.file().json()` and `JSON.parse` both throw on comments), so JSONC would
+cost either an awkward dynamic-import pattern or a `jsonc-parser` dep. TOML also reads best for
+Conduit's shallow config and is the format an architect expects (Cargo/pyproject). **Secrets live
+in the one file** (gitignored, single-tenant, the architect owns the box) with **env-var
+overrides** for anyone who prefers to keep tokens out of the file. Runtime grants still persist in
+SQLite (`roles.source='grant'`); config architects seed from `[architects]` on boot (the existing
+`clearConfigRoles` reseed is unchanged). The consolidation is the biggest adoption lever — one
+file to fill instead of four.
+
+**Build specifics settled during the 2026-07-19 consistency audit** (a completeness critic
+surfaced buildability gaps in the reframed §8 M4; these close them — judgment calls noted):
+- **Config is the single source of truth** — the legacy `.env`/`conduit.repos.json`/
+  `conduit.roles.json`/`CONDUIT_*` readers are *removed*, not kept for backward-compat; a manual
+  cutover covers the one live instance (Acme). Discovery at `./conduit.toml` (override
+  `--config`/`CONDUIT_CONFIG`); **boot-time validation** fails fast on missing/malformed required
+  fields. Ship a tracked, commented `conduit.example.toml`; `.gitignore` the real file (secrets
+  live in it). `[[repos]]` enumerates the §5 fields; a `[paths]` block holds worktree root + DB.
+- **Binary** exposes `--config`/`--version`/`--help` and runs an **ordered SQLite `user_version`
+  migration** on boot, so an in-place binary upgrade over a persistent store never strands it.
+- **Worktree GC respects park-and-resume** — it never collects a worktree bound to a live/parked
+  session (only unreferenced ones, or a set interval after an *explicit* stop). Default `stop`
+  keeps the tree (reactivation); an explicit clean variant removes it.
+- **`stop` targeting** is in-thread `@Conduit stop` (custom slash commands can't run in a thread);
+  channel-level `/conduit stop` lists or points to the thread.
+- **Env-scrub is a denylist** (drop `SLACK_*`/`CONDUIT_*`, preserve `PATH`/`HOME` + toolchain), not
+  a wholesale `options.env` replacement (which would strip the toolchain and break agent builds).
+- **Background-task spend** counts against the per-thread runaway cap; cancellation via architect
+  `@Conduit cancel` + auto-cancel on cap breach.
+- **§4 reconciled:** "Credentials & blast radius" no longer frames scoped daemon creds as an M4
+  build item (it's the installer's documented setup) and now notes the M4 agent-shell env-scrub;
+  the "if you sell this" line was softened (Conduit is OSS, not SaaS).
+- **`/conduit status` is daemon-wide** (across all channels, architect-only) — decided 2026-07-19.
+  This changes today's channel-scoped `status`, so the operator view lists every session on the box.
+
+**Consequences:** DESIGN.md §1 (new "Distribution & trust model"), §2 (non-goal #3 sharpened), §4
+(credentials reconciled), §8 (M4 rewritten + build specifics folded in, plus two stale "until M4"
+forward-references fixed in build-time-safety and the M3 summary); CLAUDE.md M4 "Next up" +
+build-time-safety lines updated. Build starts with the `conduit.toml` refactor (`config.ts` /
+`daemon.ts` / `types.ts`) since the README documents it.

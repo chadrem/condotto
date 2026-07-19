@@ -59,6 +59,23 @@ toy. Exposing those capabilities to the thread is Milestone 3.5, and it is
 what turns "a chatbot that edits files" into "a PM shipping a feature with an
 engineer riding shotgun."
 
+**Distribution & trust model.** Conduit ships as **open source** — source,
+prebuilt binaries, and install docs — for a technical **architect** to
+self-host for a small, mutually-trusting team (a startup's PM plus a couple of
+engineers, or a squad inside a larger org). The architect is an expert in the
+*tech* (coding, servers, the toolchain) but need not be the *domain* expert on
+the product; Conduit is how they empower the domain experts — who hold the
+product knowledge and vary in coding depth — to do real engineering
+(prototyping, design, speccing features, fixing bugs) in the surface they
+already live in. The "empower domain experts" mechanic already exists (grant +
+auto-approve, M3.8); the product's remaining job is to package it. Because
+**everyone with Slack-and-repo access is trusted, enforcing that boundary is
+the installer's responsibility** — documented, not engineered against. Conduit
+therefore invests in mechanical gating, unforgeable framing, and audit (defense
+against mistakes, prompt injection from thread *content*, and accidental blast
+radius) but deliberately does **not** try to isolate against a hostile insider
+or run as multi-tenant SaaS.
+
 **Why this doesn't exist yet.** Anthropic ships three adjacent things, none of
 which is this:
 
@@ -157,7 +174,10 @@ web UI. The journeys themselves are surface-agnostic.)
 
 - Not a general chatbot. A thread must be explicitly assigned to get a session.
 - Not autonomous shipping. Every state-changing action is gated by default.
-- Not multi-tenant SaaS. v1 is one org, one (or few) dev machines, self-hosted.
+- Not multi-tenant SaaS, and not hardened against a hostile insider. Conduit is
+  open-source, self-hosted software for one trusted team on their own
+  machine(s); who gets Slack-and-repo access — and thus the trust boundary — is
+  the installer's call, not something the daemon polices.
 - Not a replacement for code review. The architect still owns merges.
 
 ---
@@ -502,16 +522,21 @@ prompt.
 
 ### Credentials & blast radius
 
-- The daemon holds `ANTHROPIC_API_KEY` and, per repo, the git/deploy
-  credentials. On the dedicated box (v1), these are **scoped to the daemon** —
-  its own GitHub deploy key with least-privilege repo access, its own
-  cloud role — never a human's personal keychain.
+- The daemon holds the Slack tokens and its Claude auth, plus — if a repo
+  configures them — that repo's git/deploy credentials. The operator should
+  **scope these to the daemon** (its own least-privilege GitHub deploy key, its
+  own cloud role — never a human's personal keychain); on a self-hosted box that
+  scoping is the installer's setup, documented in the runbook, not the daemon's
+  code. The agent's own shell is **env-scrubbed** (M4) so an in-worktree command
+  cannot read the daemon's Slack/cloud secrets — only the Claude auth the SDK
+  needs survives.
 - Every worktree is disposable and isolated; the hard-deny set prevents writes
   outside it.
 - **Audit everything.** Every tool call (allowed, gated, denied), every
   approval and who clicked it, every deploy, mirrored to an append-only audit
-  log and optionally a read-only Slack log channel. If you sell this, the audit
-  trail *is* the sale.
+  log and (deferred past M4) a read-only Slack log channel. The audit trail is
+  load-bearing, not a nicety — for a trusted team it's how you reconstruct what
+  the agent did and who approved it.
 
 ### Cost governance
 
@@ -713,9 +738,11 @@ Socket Mode setup) is only needed from M1; that setup is **Appendix C**.
 **Build-time safety (applies to every milestone).** You are building a tool
 that runs shell commands and can deploy. While *building* it: point it only at
 a **throwaway git repo** — never a real production repo or real deploy path —
-until M4 hardening is done and an architect (the human running this) has
-reviewed the gating. Wire the deploy/land commands (M3) as **no-ops or
-`echo`** first; make them real only after the approval loop is proven. The
+and wire the deploy/land commands (M3) as **no-ops or `echo`**. The approval
+loop is now proven (M2/M3/M3.8), so an *operating* team that points its install
+at a real repo and a real per-repo deploy command is making its own call —
+guarding *who* has Slack-and-repo access is the installer's responsibility (§1),
+not a hardening milestone. The
 daemon's whole risk surface is "text from Slack → shell on a real machine";
 treat your own dev loop with the same suspicion the product treats its users.
 (Slack side: development runs in the real company workspace by explicit
@@ -792,7 +819,8 @@ holds and its findings were fixed). Per-repo test/land/deploy commands
 (`repos.test_cmd`/`land_cmd`/`deploy_cmd`); land/deploy are architect-ordered
 (`@Conduit land`/`deploy`) and run by the **daemon** through the Approve/Deny gate
 via a core `CommandRunner` in the worktree — never the agent's shell — echo/no-op
-on `testrepo` until M4. The repo's test command auto-runs (folded into the
+on `testrepo` (a real land/deploy command is the operating team's per-repo
+config, out of M4). The repo's test command auto-runs (folded into the
 effective allowlist). Streaming progress is one throttled, trailing-flushed status
 message. Concurrency is a daemon-wide turn semaphore over the per-session FIFO
 (in-process `query()` verified under load). Cost governance is two-layer:
@@ -929,10 +957,72 @@ shape crosses the port. **Demo: an architect grants a PM architect-in-channel; t
 approves a gated action and drives their own auto-approved turns; the grant survives a
 daemon restart.**
 
-**Milestone 4 — Dedicated box & hardening.** Move to the always-on machine with
-scoped daemon credentials. Session process isolation if needed. Read-only Slack
-audit channel. `/conduit status`, `/conduit stop`, worktree cleanup.
-Operational docs.
+**Milestone 4 — Installable open-source beta (polish & packaging).** The scope
+narrowed sharply from the original "dedicated box & hardening" once the audience
+was pinned down (2026-07-19, DECISIONS.md): Conduit ships as open source for a
+*trusted* small team whose architect self-hosts it, so the milestone is
+**making it installable, operable, and polished**, not building tenant-grade
+isolation.
+
+- **(1) A single `conduit.toml`** (TOML via Bun's built-in `Bun.TOML.parse`,
+  zero deps) — the **single source of truth**, replacing today's scattered
+  `.env` + `conduit.repos.json` + `conduit.roles.json` + `CONDUIT_*` (the legacy
+  readers are removed; a short migration note covers the one live instance). It
+  carries `[slack]` tokens, `architects`, `[defaults]`
+  (model/effort/auto-approve/cost cap), a `[paths]` block (worktree root, SQLite
+  DB), and `[[repos]]` entries enumerating the §5 repo fields (`name`, `path`,
+  `default_branch`, `trusted`, `safe_bash_allowlist`, `land_cmd`, `deploy_cmd`,
+  `policy_overrides`); env vars override any value. Secrets live in the file, so
+  the repo tracks a commented **`conduit.example.toml`** and `.gitignore`s the
+  real one. The daemon discovers it at `./conduit.toml` (override with
+  `--config <path>`/`CONDUIT_CONFIG`) and **validates at boot** — missing or
+  malformed required fields fail fast with an actionable message, never a
+  half-started daemon.
+- **(2) Install/setup docs** — a README/runbook: install Bun or grab the binary
+  → create the Slack app (Appendix C) → copy and fill `conduit.example.toml` →
+  run, *and* how the grant + auto-approve trust model lets the architect empower
+  domain experts. Since the read-only audit channel is deferred, it also
+  documents reading the SQLite audit log locally.
+- **(3) Worktree cleanup** — a real teardown (`git worktree remove` + branch
+  delete + `git worktree prune`) and a fix for the assign-race orphan leak (a
+  worktree created before the losing DB insert). The retention/GC policy
+  **respects the park-and-resume invariant** (§2 journey 5): it never touches a
+  worktree still bound to a live or parked session — only ones with no session
+  row, or a set interval after an *explicit* `stop`. Default `stop` keeps the
+  worktree for reactivation (journey 6); an explicit clean variant removes it.
+- **(4) `bun build --compile` binaries** (macOS/Linux) with a minimal CLI
+  (`--config`, `--version`, `--help`) + a release story. Because operators
+  upgrade a binary in place over a persistent SQLite store, boot runs an
+  **ordered schema migration** (SQLite `user_version`) so an upgrade never
+  strands an existing install.
+- **(5) A daemon-wide operator `/conduit status`** (across all channels,
+  architect-only: uptime, active/parked counts, in-flight-vs-cap, pending
+  approvals, config summary) and fixes for the two
+  slash gaps: `status` currently posts publicly (make it ephemeral) and `stop`
+  is a no-op — since custom slash commands can't run inside a thread, stop is
+  targeted via in-thread **`@Conduit stop`** (mirroring `@Conduit assign`), with
+  channel-level `/conduit stop` listing sessions or pointing to the thread. Ship
+  a sample launchd/systemd unit.
+
+Plus two cheap riders: **env-scrub the agent's shell** — a *denylist* through
+the SDK's `options.env` that drops the daemon's `SLACK_*`/`CONDUIT_*` secrets
+while preserving `PATH`/`HOME` and the repo toolchain's environment (the policy
+floor stays as defense-in-depth); and **background-task cost accounting +
+cancellation** — background workflow spend counts against the per-thread runaway
+cap, and a wedged/over-cap workflow is cancellable (architect `@Conduit cancel`,
+plus auto-cancel on cap breach) instead of silently spending after the turn
+parks.
+
+**Explicitly cut:** dedicated-box provisioning (the installer does it), session
+process isolation (unnecessary for a trusted team — in-process `query()` stays;
+the semaphore bounds load), and real deploy paths (out of M4 entirely; the
+`CommandRunner` plumbing already runs an optional per-repo command through the
+gate). **Deferred past M4:** the read-only Slack audit channel and
+symlink-realpath (vs. lexical) confinement (large, and only fully closed by
+OS-level sandboxing we're not building — interim: don't let `ln -s`
+auto-approve). **Demo: a new team grabs a binary or clones the repo, copies
+`conduit.example.toml`, fills it, runs `./conduit`, and is collaborating in a
+thread minutes later.**
 
 **Later — fleet, shared session storage (SDK `SessionStore`), draft mode,
 per-repo policy UIs, second surface adapter (Teams / email / web app), second
