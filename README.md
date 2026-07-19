@@ -1,17 +1,24 @@
 # Condotto
 
-**Slack threads become tickets that work themselves.** Assign any thread a
-dedicated, persistent [Claude Code](https://claude.com/claude-code) session
-running on your own development machine — with the real repo, the real
-toolchain, and the real deploy path — and the thread turns into a three-way
-working conversation between product, engineering, and an AI implementer.
+**Now the person who knows what to build can build it themselves — right there
+in Slack.** Assign any thread a **dedicated, persistent
+[Claude Code](https://claude.com/claude-code) session running on your own
+development machine** — the real repo, the real toolchain, the real deploy
+path — and the person who understands the problem builds the fix themselves, in
+plain language, while a software engineer (the *architect*) rides shotgun in the
+same thread and approves every consequential move. The product manager who filed
+the bug fixes it herself; the support lead pulls the report she needs straight
+from production — because **every write, shell command, production read, and
+deploy pauses un-executed until the architect approves**, and each one lands in
+an append-only audit log. Work that used to mean pulling an engineer aside now
+happens in the open, in the channel: gated, audited, and done as a team.
 
-The point is to let people with **domain expertise but not deep coding skill —
-product managers first — build features themselves**, in the surface they
-already live in (Slack), while a software engineer (the *architect*) guides and
-gates in the *same thread*. The PM drives the *what* and *why* in plain language;
-the implementer writes the code, runs the tests, and posts progress; the
-architect approves the consequential moves and keeps quality and safety honest.
+Under the hood it's a **three-way working conversation**. The domain expert —
+**a product manager first** — drives the *what* and *why* in plain language; the
+AI implementer writes the code, runs the tests, and posts progress; and the
+*architect* keeps quality and safety honest, approving the consequential moves.
+Your product people ship real features and fixes; your engineers spend their
+time guiding instead of ticket-taking.
 
 > Condotto is the missing quadrant: **persistent, multi-session coding agents on
 > your own computer, with chat threads as the entire user interface.** Claude in

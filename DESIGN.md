@@ -25,11 +25,11 @@ against a working production integration.
 
 ## 1. Product vision
 
-**One-liner:** Slack threads become tickets that work themselves. Any thread
-can be assigned a dedicated, persistent Claude Code session running on a real
-development computer — with the real repo, the real toolchain, and the real
-deploy path — and the thread becomes a three-way working conversation between
-product, engineering, and the AI implementer.
+**One-liner:** The person who knows what to build can build it themselves —
+right there in Slack. Any thread can be assigned a dedicated, persistent Claude
+Code session running on a real development computer — with the real repo, the
+real toolchain, and the real deploy path — and the thread becomes a three-way
+working conversation between product, engineering, and the AI implementer.
 
 **Two deliberate generalizations.** Slack is the *default surface*, not a
 dependency: humans may reach Condotto through Microsoft Teams, email, SMS, or a
