@@ -142,19 +142,21 @@ function inflateApproval(row: RawApprovalRow | null): ApprovalRow | null {
   return { ...row, tool_input: toolInput };
 }
 
-export class Store {
-  private db: Database;
-
-  constructor(path: string) {
-    this.db = new Database(path, { create: true, strict: true });
-    this.db.run("PRAGMA journal_mode = WAL;");
-    this.db.run("PRAGMA foreign_keys = ON;");
-    this.db.run("PRAGMA busy_timeout = 5000;"); // fail slow, not sporadically, if a second process appears
-    this.migrate();
-  }
-
-  private migrate(): void {
-    this.db.run(`
+/**
+ * Schema baseline — migration **v1** of the ordered `user_version` runner (M4 §2).
+ * The full M0–M3.8 schema, expressed **idempotently** (`CREATE TABLE IF NOT
+ * EXISTS` + `ensureColumn`) so it lands the same result whether it runs on:
+ *   - a brand-new empty DB (creates every table + column), or
+ *   - the pre-runner store, which sat at `user_version` 0 with every column
+ *     already added by the old ad-hoc bootstrap — here every statement is a
+ *     no-op and the runner simply stamps it to v1.
+ * That idempotent shape is exactly what makes adopting the version runner over
+ * the existing live store lossless. Do NOT "tidy" it into inline-columned
+ * `CREATE`s, and do NOT add new schema here — a NEW change is a NEW migration
+ * appended to the `migrations` list, never an edit to this baseline.
+ */
+function migrateBaselineV1(db: Database): void {
+  db.run(`
       CREATE TABLE IF NOT EXISTS repos (
         id TEXT PRIMARY KEY,
         name TEXT NOT NULL UNIQUE,
@@ -240,56 +242,112 @@ export class Store {
       );
     `);
 
-    // Idempotent column adds for DBs created by an earlier milestone (the M1
-    // approvals table predates tool_use_id). CREATE TABLE IF NOT EXISTS never
-    // alters an existing table, so evolve columns explicitly, then build any
-    // index that references them.
-    this.ensureColumn("approvals", "tool_use_id", "TEXT");
-    this.db.run(
-      `CREATE INDEX IF NOT EXISTS idx_approvals_tooluse ON approvals (session_id, tool_use_id);`,
-    );
+  // Idempotent column adds for DBs created by an earlier milestone (the M1
+  // approvals table predates tool_use_id). CREATE TABLE IF NOT EXISTS never
+  // alters an existing table, so evolve columns explicitly, then build any
+  // index that references them.
+  ensureColumn(db, "approvals", "tool_use_id", "TEXT");
+  db.run(
+    `CREATE INDEX IF NOT EXISTS idx_approvals_tooluse ON approvals (session_id, tool_use_id);`,
+  );
 
-    // M3: per-repo test command + cost cap, and a per-session cost ceiling.
-    // (deploy_cmd/land_cmd already exist from the M1 repos schema above.)
-    this.ensureColumn("repos", "test_cmd", "TEXT");
-    this.ensureColumn("repos", "cost_cap_usd", "REAL");
-    this.ensureColumn("sessions", "budget_limit_usd", "REAL");
+  // M3: per-repo test command + cost cap, and a per-session cost ceiling.
+  // (deploy_cmd/land_cmd already exist from the M1 repos schema above.)
+  ensureColumn(db, "repos", "test_cmd", "TEXT");
+  ensureColumn(db, "repos", "cost_cap_usd", "REAL");
+  ensureColumn(db, "sessions", "budget_limit_usd", "REAL");
 
-    // M3.5: per-session harness capability state + per-repo defaults/trust. NOT
-    // NULL flags carry a DEFAULT so pre-M3.5 rows migrate cleanly (subagents/
-    // workflows/trusted default off — the conservative posture).
-    this.ensureColumn("sessions", "model", "TEXT");
-    this.ensureColumn("sessions", "effort", "TEXT");
-    this.ensureColumn("sessions", "subagents", "INTEGER NOT NULL DEFAULT 0");
-    this.ensureColumn("sessions", "workflows", "INTEGER NOT NULL DEFAULT 0");
-    // M3.6 Tier 3: the worktree-write opt-in for workflow/escaped calls.
-    this.ensureColumn("sessions", "workflow_write", "INTEGER NOT NULL DEFAULT 0");
-    this.ensureColumn("repos", "default_model", "TEXT");
-    this.ensureColumn("repos", "default_effort", "TEXT");
-    this.ensureColumn("repos", "trusted", "INTEGER NOT NULL DEFAULT 0");
+  // M3.5: per-session harness capability state + per-repo defaults/trust. NOT
+  // NULL flags carry a DEFAULT so pre-M3.5 rows migrate cleanly (subagents/
+  // workflows/trusted default off — the conservative posture).
+  ensureColumn(db, "sessions", "model", "TEXT");
+  ensureColumn(db, "sessions", "effort", "TEXT");
+  ensureColumn(db, "sessions", "subagents", "INTEGER NOT NULL DEFAULT 0");
+  ensureColumn(db, "sessions", "workflows", "INTEGER NOT NULL DEFAULT 0");
+  // M3.6 Tier 3: the worktree-write opt-in for workflow/escaped calls.
+  ensureColumn(db, "sessions", "workflow_write", "INTEGER NOT NULL DEFAULT 0");
+  ensureColumn(db, "repos", "default_model", "TEXT");
+  ensureColumn(db, "repos", "default_effort", "TEXT");
+  ensureColumn(db, "repos", "trusted", "INTEGER NOT NULL DEFAULT 0");
 
-    // M3.8: architect self-approve (per-session flag, DEFAULT 1 so it is ON by
-    // default and existing sessions adopt it on upgrade — the deliberate posture
-    // choice, 2026-07-19) + per-repo default. Runtime role grants that survive the
-    // boot reseed (`source` separates config-seeded rows, wiped+reseeded each boot,
-    // from runtime grants, kept; granted_by/granted_at are grant provenance). And
-    // the initiating principal on an approval, so a defer→resume is governed by the
-    // original initiator, not the approving decider.
-    this.ensureColumn("sessions", "auto_approve", "INTEGER NOT NULL DEFAULT 1");
-    this.ensureColumn("repos", "default_auto_approve", "INTEGER");
-    this.ensureColumn("roles", "source", "TEXT NOT NULL DEFAULT 'config'");
-    this.ensureColumn("roles", "granted_by", "TEXT");
-    this.ensureColumn("roles", "granted_at", "TEXT");
-    this.ensureColumn("approvals", "initiated_by", "TEXT");
+  // M3.8: architect self-approve (per-session flag, DEFAULT 1 so it is ON by
+  // default and existing sessions adopt it on upgrade — the deliberate posture
+  // choice, 2026-07-19) + per-repo default. Runtime role grants that survive the
+  // boot reseed (`source` separates config-seeded rows, wiped+reseeded each boot,
+  // from runtime grants, kept; granted_by/granted_at are grant provenance). And
+  // the initiating principal on an approval, so a defer→resume is governed by the
+  // original initiator, not the approving decider.
+  ensureColumn(db, "sessions", "auto_approve", "INTEGER NOT NULL DEFAULT 1");
+  ensureColumn(db, "repos", "default_auto_approve", "INTEGER");
+  ensureColumn(db, "roles", "source", "TEXT NOT NULL DEFAULT 'config'");
+  ensureColumn(db, "roles", "granted_by", "TEXT");
+  ensureColumn(db, "roles", "granted_at", "TEXT");
+  ensureColumn(db, "approvals", "initiated_by", "TEXT");
+}
+
+/** Add `column` to `table` only if absent (idempotent ALTER — SQLite has no
+ *  `ADD COLUMN IF NOT EXISTS`). Used by the baseline migration to evolve tables
+ *  a pre-runner DB already created. */
+function ensureColumn(db: Database, table: string, column: string, ddl: string): void {
+  const cols = db.query<{ name: string }, []>(`PRAGMA table_info(${table})`).all();
+  if (!cols.some((c) => c.name === column)) {
+    db.run(`ALTER TABLE ${table} ADD COLUMN ${column} ${ddl}`);
+  }
+}
+
+export class Store {
+  private db: Database;
+
+  constructor(path: string) {
+    this.db = new Database(path, { create: true, strict: true });
+    this.db.run("PRAGMA journal_mode = WAL;");
+    this.db.run("PRAGMA foreign_keys = ON;");
+    this.db.run("PRAGMA busy_timeout = 5000;"); // fail slow, not sporadically, if a second process appears
+    this.migrate();
   }
 
-  private ensureColumn(table: string, column: string, ddl: string): void {
-    const cols = this.db
-      .query<{ name: string }, []>(`PRAGMA table_info(${table})`)
-      .all();
-    if (!cols.some((c) => c.name === column)) {
-      this.db.run(`ALTER TABLE ${table} ADD COLUMN ${column} ${ddl}`);
+  /**
+   * Ordered, append-only schema migrations (M4 §2). Entry `i` (0-based) carries
+   * a store from `user_version` i to i+1; `migrations.length` IS the current
+   * schema version. Because an operator upgrades a binary in place over a
+   * persistent SQLite store, this list is the contract that never strands an
+   * install. RULES:
+   *   - NEVER edit, delete, or reorder a shipped entry — only APPEND. Editing a
+   *     past migration diverges freshly-created DBs from upgraded ones.
+   *   - Each step + its version bump run in ONE transaction. `bun:sqlite` makes
+   *     DDL and `PRAGMA user_version` transactional (verified, M4 §2 spike), so a
+   *     crash mid-upgrade rolls the whole step back and the next boot retries it.
+   *   - A store from a NEWER binary (version > what we know) is refused, not
+   *     silently run against — downgrades are unsupported.
+   */
+  private migrate(): void {
+    const migrations: Array<(db: Database) => void> = [
+      migrateBaselineV1, // v1: the M0–M3.8 schema as one idempotent baseline.
+      // v2+: append new migrations here. They only ever run on a store already
+      // at v1, so they can be plain forward DDL — no IF NOT EXISTS gymnastics.
+    ];
+
+    const current = this.userVersion();
+    if (current > migrations.length) {
+      throw new Error(
+        `conduit database schema is at version ${current}, but this Conduit build only ` +
+          `understands up to ${migrations.length}. You are running an OLDER binary against a ` +
+          `store written by a NEWER one — upgrade the binary (downgrade migrations are not supported).`,
+      );
     }
+    for (let v = current; v < migrations.length; v++) {
+      const step = migrations[v]!;
+      // v + 1 is an internal loop counter, never user input; PRAGMA forbids
+      // bound parameters, so interpolating it here is safe.
+      this.db.transaction(() => {
+        step(this.db);
+        this.db.run(`PRAGMA user_version = ${v + 1}`);
+      })();
+    }
+  }
+
+  private userVersion(): number {
+    return this.db.query<{ user_version: number }, []>("PRAGMA user_version").get()!.user_version;
   }
 
   close(): void {

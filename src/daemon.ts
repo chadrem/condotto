@@ -1,16 +1,43 @@
 import { existsSync } from "node:fs";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { loadConfig, loadSlackConfig } from "./core/config";
 import { Store } from "./core/store";
 import { WorktreeManager } from "./core/worktrees";
 import { SessionManager } from "./core/session-manager";
 import { principalKey } from "./core/types";
+import { VERSION } from "./version";
 import { ClaudeCodeAdapter } from "./adapters/claude-code/adapter";
 import { SlackAdapter } from "./adapters/slack/adapter";
 
 // Conduit daemon: one long-lived Bun process wiring surfaces -> core -> harness.
 
 const log = (msg: string) => console.log(`${new Date().toISOString()} ${msg}`);
+
+/** The program name to show in `--help`: the compiled binary's own filename
+ *  (from `process.execPath` — argv[1] is a `$bunfs` path when compiled), else
+ *  the canonical `conduit` under `bun run`. */
+function invokedAs(): string {
+  const compiled = import.meta.url.includes("$bunfs") || import.meta.url.includes("~BUN");
+  return compiled ? basename(process.execPath) : "conduit";
+}
+
+function helpText(prog: string): string {
+  return [
+    `conduit ${VERSION} — turn Slack threads into tickets that work themselves`,
+    "",
+    "Usage:",
+    `  ${prog} [options]`,
+    "",
+    "Options:",
+    "  --config <path>   Path to conduit.toml (default: ./conduit.toml; env CONDUIT_CONFIG)",
+    "  --version, -v     Print the version and exit",
+    "  --help, -h        Print this help and exit",
+    "",
+    "Conduit reads one config file, conduit.toml. Copy conduit.example.toml to",
+    "conduit.toml, fill in your Slack tokens, architects, and repos, then run it.",
+    "See the README and DESIGN.md Appendix C (Slack app setup) for the full setup.",
+  ].join("\n");
+}
 
 /** Minimal `--config <path>` / `--config=<path>` argv scan (M4 §1; the rest of
  *  the CLI — --version/--help — is M4 §2). Env `CONDUIT_CONFIG` also works. A
@@ -32,6 +59,19 @@ function parseConfigArg(argv: string[]): string | undefined {
 }
 
 async function main(): Promise<void> {
+  // Informational CLI (M4 §2) short-circuits before any config work, so
+  // `--help`/`--version` always succeed — even without a valid conduit.toml, and
+  // regardless of a malformed `--config` elsewhere on the line.
+  const argv = process.argv;
+  if (argv.includes("--help") || argv.includes("-h")) {
+    console.log(helpText(invokedAs()));
+    return;
+  }
+  if (argv.includes("--version") || argv.includes("-v")) {
+    console.log(`conduit ${VERSION}`);
+    return;
+  }
+
   // Single source of truth is conduit.toml (M4 §1). A bad --config flag, a
   // missing file, malformed TOML, or a bad required field throws here with an
   // actionable message — never a half-started daemon.

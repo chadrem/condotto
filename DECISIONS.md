@@ -1253,3 +1253,127 @@ box by the cutover; they never ran without a testrepo + auth anyway, so no chang
 + messages), `conduit.example.toml` (new, tracked), `.gitignore`, `tests/config.test.ts`
 (rewritten, 32 tests), plus stale-reference fixes in `src/core/session-manager.ts`,
 `src/core/store.ts`, and `DESIGN.md` §2. **Next: M4 §2 — binary + schema migrations.**
+
+## 2026-07-19 — M4 §2 spike: `bun build --compile` bundles `bun:sqlite`; the SDK's native CLI does NOT auto-embed (fix = `pathToClaudeCodeExecutable`)
+
+**Spike (DESIGN.md §8 M4 deliverable 4; scripts in `spikes/m4/`, run on Bun 1.3.14 / macOS
+arm64 / subscription OAuth, no `ANTHROPIC_API_KEY`).** Compiled two single-file binaries with
+`bun build --compile` and ran the *binaries* (never `bun run`). Findings:
+
+1. **`bun:sqlite` bundles cleanly.** A round-trip (`CREATE`/`INSERT`/`SELECT`) works from the
+   compiled binary with no native-module step. **And `PRAGMA user_version` is transactional**:
+   inside a `db.transaction(...)`, a DDL + a `PRAGMA user_version = N` bump commit together, and a
+   throwing transaction rolls BOTH back (verified the table and the version both revert). This is
+   the contract the §2 migration runner rests on — a crash mid-upgrade cannot leave a half-applied
+   schema at a bumped version.
+
+2. **The Agent SDK's JS bundles, but its native `claude` subprocess does NOT auto-embed.** The
+   `binary-smoke` binary starts the SDK fine, then dies: *"Native CLI binary for darwin-arm64 not
+   found. Reinstall @anthropic-ai/claude-agent-sdk without --omit=optional, or set
+   options.pathToClaudeCodeExecutable."* Root cause: the real Claude Code runtime ships as a **236MB
+   optional per-platform package** (`@anthropic-ai/claude-agent-sdk-darwin-arm64/claude`, an
+   `os`/`cpu`-gated `optionalDependency`) that the SDK resolves at runtime relative to its own
+   `import.meta.url`. In a compiled binary that URL is `file:///$bunfs/root/...` (Bun's virtual FS),
+   the 236MB file was never bundled, and a child process can't exec a `$bunfs` path anyway. `bun
+   build --compile` only bundles the JS it can statically see (the base Bun runtime binary is ~60MB;
+   the SDK JS barely moves the needle).
+
+3. **The blessed fix works end-to-end.** The SDK ships `@anthropic-ai/claude-agent-sdk/extract`
+   (`extractFromBunfs`) precisely for this. `binary-embed` embeds the native CLI with `import claude
+   from ".../claude" with { type: "file" }` (Bun bakes the 236MB in → a 297MB binary), calls
+   `extractFromBunfs()` at boot (copies it to a content-hash temp path, e.g.
+   `/tmp/claude-501/claude-agent-sdk-<hash>/claude`), and passes that as
+   `pathToClaudeCodeExecutable`. Result: a **headless `query()` succeeds from the compiled binary on
+   subscription OAuth** (`subtype=success`, reply `"READY"`, ~$0.018). So the compiled-binary path
+   is viable; the daemon just has to tell the SDK where its native CLI lives.
+
+4. **Compiled-binary detection.** `import.meta.url` starts with `file:///$bunfs/` in a compiled
+   binary vs. a real path under `bun run` — a reliable, documented signal (`Bun.embeddedFiles` is
+   empty unless you embed, so it's not usable). `process.execPath` is the exe itself when compiled
+   (vs. the `bun` binary under `bun run`), which is why the sidecar lookup must be gated on the
+   `$bunfs` signal — otherwise a dev box with Claude Code installed at `/opt/homebrew/bin/claude`
+   next to `bun` would get picked up.
+
+**Design consequence (shapes the §2 implementation):** the release is a **binary + its native
+`claude` companion**, not a lone 60MB file — the SDK's real runtime is a separate 236MB artifact.
+Two supported ways to supply it, resolved in the adapter: (a) `CONDUIT_CLAUDE_CLI=<path>` env
+override (point at any installed `claude`), and (b) a `claude` **sidecar next to the compiled
+binary** (the default release bundle), used only when the `$bunfs` signal says we're compiled. The
+true single-file **embed** (finding 3) is proven and documented as the optional recipe, but not the
+default: it needs the target platform's native package present at build time and produces a 297MB,
+per-platform artifact (the `type: "file"` specifier is platform-specific, so a cross-platform build
+needs per-target codegen — a CI concern). Under `bun run` (dev / clone-and-run) nothing changes —
+the SDK finds `claude` in `node_modules` and the adapter returns `undefined`. This is a spike-driven
+addition to §2's touch list (the kickoff listed `daemon.ts`/`store.ts`/`package.json`; a working
+binary also needs the claude-code adapter's `pathToClaudeCodeExecutable` wiring).
+
+## 2026-07-19 — M4 §2 done: binary + schema migrations
+
+**Implementation (DESIGN.md §8 M4 deliverable 4).** Three parts + a release story. 274 tests
+(268 → 274: +5 migration, +1 version), `tsc` + `check-ports` clean, and verified by **actually
+building a binary and running it** (below).
+
+**(1) Ordered `user_version` schema-migration runner (`store.ts`).** `migrate()` is now an
+append-only `migrations[]` where entry *i* carries a store from `user_version` *i* to *i+1*, and
+`migrations.length` IS the current version. Each step + its `PRAGMA user_version = N` bump run in one
+`db.transaction()` (transactional under bun:sqlite — spike-proven), so a crash mid-upgrade rolls the
+whole step back and reboot retries it. Migration **v1** is the *entire* M0–M3.8 schema expressed
+**idempotently** (the old `CREATE IF NOT EXISTS` block + every `ensureColumn`, moved verbatim into a
+module-level `migrateBaselineV1`). That idempotent shape is what makes adoption over the existing
+un-versioned store lossless: a fresh DB gets the full schema and is stamped to 1; the live store
+(which sat at `user_version` 0 with all columns already present) runs the baseline as no-ops and is
+stamped to 1. A store at a version **above** what the binary knows is refused (no silent downgrade).
+Future schema changes append a new entry — **never edit the baseline** (a comment + the tests pin
+this). `ensureColumn` became a free function taking `db`.
+
+**(2) CLI (`daemon.ts` + `src/version.ts`).** `--version`/`-v` and `--help`/`-h` short-circuit at
+the top of `main()` **before any config load**, so they work without a valid `conduit.toml` and
+regardless of a malformed `--config` elsewhere on the line. Version is a single compiled-in constant
+in `src/version.ts` (a `bun build --compile` binary has no `package.json` beside it —
+`--compile-autoload-package-json` is off), kept in lockstep with `package.json` by
+`tests/version.test.ts`. `--help`'s program name comes from `basename(process.execPath)` when
+compiled (argv[1] is a `$bunfs` path) else the literal `conduit`.
+
+**(3) Native-CLI wiring (`adapters/claude-code/adapter.ts`).** `resolveClaudeCliPath()` sets the
+SDK's `pathToClaudeCodeExecutable` — priority `CONDUIT_CLAUDE_CLI` env → a `claude`/`claude.exe`
+sidecar next to `process.execPath` (gated on the `$bunfs` compiled-binary signal) → `undefined`
+(dev). Lazy-memoized so `--help`/`--version` never emit its warning. Under `bun run` it returns
+`undefined` and behavior is unchanged.
+
+**(4) Release story (`scripts/build-binary.ts` + `package.json` + `.gitignore`).** `bun run build`
+compiles the daemon and bundles the native `claude` beside it into `dist/<platform>/{conduit,
+claude}`; `build:darwin-*`/`build:linux-*` cross-target the four macOS/Linux binaries. Host builds
+**discover** the installed native package by scanning `node_modules/@anthropic-ai/claude-agent-sdk-*`
+(glibc/musl-proof — `process.arch` can't tell them apart); a cross-target maps the target to its
+package and warns (non-fatal) if that platform's native isn't present (build it on a matching
+runner, or set `CONDUIT_CLAUDE_CLI`). `dist/` and Bun's `*.bun-build` scratch files are gitignored.
+
+**Verified by running it (not just `bun test`):** built `dist/darwin-arm64/{conduit(62MB),
+claude(236MB)}`; the compiled binary's `--version`/`-v`/`--help`/`-h` and the fail-fast config-error
+path (`--config /nonexistent`, bare `--config`) all correct + exit(1). **Migration proven on a copy
+of the live `conduit.sqlite`:** `user_version` 0 → 1 with sessions/repos/roles/audit counts
+unchanged (1/2/1/109), idempotent on re-open. **Sidecar resolution proven from a CLEAN CWD** (no
+`node_modules` up-tree, stripped PATH, no API key): no-sidecar → the SDK's "Native CLI binary not
+found" error; sidecar-beside-binary → headless `"READY"`; `CONDUIT_CLAUDE_CLI` → `"READY"`. (An
+earlier "it works without a sidecar" was a test artifact — the SDK also falls back to a
+CWD-relative `node_modules`, so running the binary from the repo root masked the requirement.)
+
+**Adversarial review** (5 dimensions — migration, CLI, adapter, build, code-vs-claims — refute-by-
+default verification, run as a multi-agent workflow). **2 confirmed, both low, both fixed before
+commit; 5 refuted.** (1) The adapter probed a `claude` sidecar but the build script writes
+`claude.exe` on Windows — the two halves of the same milestone disagreed on the Windows layout →
+adapter sidecar name is now platform-aware. (2) A native build on a **musl/Alpine** host computed
+the glibc package key and missed the installed `-musl` `claude`, silently emitting an incomplete
+bundle with a misleading message → host builds now **discover** the installed package by scanning
+rather than guessing from `process.arch`. Both are out of the shipped macOS/Linux-glibc matrix
+(bounded latent bugs), but the fixes make the adapter and build script internally consistent. Refuted
+(correctly): "test name overclaims runner atomicity" (conditioned on a future refactor),
+"incomplete-bundle exits 0" (intended for cross-target + loud warning), "`CONDUIT_CLAUDE_CLI` honored
+under `bun run` contradicts the contract" (intentional — only the *sidecar* is compiled-gated), and
+two about spike-file comments (not shipped code).
+
+**Files:** `src/core/store.ts` (migration runner + baseline), `src/daemon.ts` (CLI), `src/version.ts`
+(new), `src/adapters/claude-code/adapter.ts` (`pathToClaudeCodeExecutable` wiring), `package.json`
+(build scripts), `scripts/build-binary.ts` (new), `.gitignore` (`dist/`, `*.bun-build`),
+`tests/store.test.ts` (+5 migration tests), `tests/version.test.ts` (new), `spikes/m4/` (new: the
+three spike entrypoints). **Next: M4 §3 — worktree cleanup.**

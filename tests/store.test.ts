@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { Database } from "bun:sqlite";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -405,5 +406,90 @@ describe("store roles — runtime grants (M3.8)", () => {
     expect(store.isArchitect("slack:U_GRANT", "C1")).toBe(true);
     expect(store.getRoleRow("slack:U_GRANT", "C1")!.source).toBe("grant");
     store.close();
+  });
+});
+
+describe("store schema migrations (M4 §2)", () => {
+  // The current schema version == the number of migrations in the runner. Bump
+  // this constant in lockstep whenever a migration is appended — the tests below
+  // pin the runner's behavior to it.
+  const CURRENT_SCHEMA_VERSION = 1;
+
+  const migPath = (name: string): string => join(mkdtempSync(join(tmpdir(), "conduit-mig-")), name);
+  const userVersion = (path: string): number => {
+    const db = new Database(path, { readonly: true });
+    const v = db.query<{ user_version: number }, []>("PRAGMA user_version").get()!.user_version;
+    db.close();
+    return v;
+  };
+
+  test("a fresh DB is stamped to the current schema version", () => {
+    const path = migPath("fresh.sqlite");
+    new Store(path).close();
+    expect(userVersion(path)).toBe(CURRENT_SCHEMA_VERSION);
+  });
+
+  test("re-opening an already-migrated DB is a no-op — version unchanged, data intact", () => {
+    const path = migPath("reopen.sqlite");
+    let store = new Store(path);
+    store.upsertRepo({ name: "r", path: "/tmp/r", defaultBranch: "main" });
+    store.close();
+    store = new Store(path); // migrate() runs but has nothing to do
+    expect(store.getRepo("r")?.name).toBe("r");
+    store.close();
+    expect(userVersion(path)).toBe(CURRENT_SCHEMA_VERSION);
+  });
+
+  test("adopting the runner over a pre-runner store (user_version 0, full schema) is lossless", () => {
+    // Faithful to the LIVE conduit.sqlite: the old ad-hoc bootstrap left every
+    // table + column present but user_version at 0 (it never stamped). Build that
+    // exact state, seed rows, then open with Store — it must carry to v1 and touch
+    // no data.
+    const path = migPath("legacy.sqlite");
+    let store = new Store(path);
+    store.upsertRepo({ name: "legacy", path: "/tmp/legacy", defaultBranch: "main", trusted: true });
+    store.createSession({ ...baseSession, id: "sL", conversation_id: "1.9" });
+    store.setRole("slack:U_KEEP", "architect", "C9", "grant", "slack:U_BY");
+    store.close();
+
+    const raw = new Database(path);
+    raw.run("PRAGMA user_version = 0"); // rewind the stamp to the pre-M4-§2 state
+    raw.close();
+    expect(userVersion(path)).toBe(0);
+
+    store = new Store(path);
+    expect(userVersion(path)).toBe(CURRENT_SCHEMA_VERSION);
+    expect(store.getRepo("legacy")?.trusted).toBe(1);
+    expect(store.getSession("sL")?.conversation_id).toBe("1.9");
+    expect(store.isArchitect("slack:U_KEEP", "C9")).toBe(true);
+    store.close();
+  });
+
+  test("a store from a newer binary (version above the known max) is refused, not run", () => {
+    const path = migPath("future.sqlite");
+    new Store(path).close();
+    const raw = new Database(path);
+    raw.run(`PRAGMA user_version = ${CURRENT_SCHEMA_VERSION + 1}`);
+    raw.close();
+    expect(() => new Store(path)).toThrow(/older binary against a store written by a newer one/i);
+  });
+
+  test("a mid-migration failure leaves the version stamp untouched (transactional step)", () => {
+    // Prove the per-step transaction contract directly against bun:sqlite (the
+    // property the runner relies on): a DDL + version bump that throws must roll
+    // BOTH back, so a crashed upgrade is retried cleanly rather than half-applied.
+    const db = new Database(":memory:");
+    const ver = () => db.query<{ user_version: number }, []>("PRAGMA user_version").get()!.user_version;
+    expect(ver()).toBe(0);
+    expect(() =>
+      db.transaction(() => {
+        db.run("CREATE TABLE half (x INTEGER)");
+        db.run("PRAGMA user_version = 1");
+        throw new Error("boom");
+      })(),
+    ).toThrow("boom");
+    expect(ver()).toBe(0);
+    expect(db.query("SELECT name FROM sqlite_master WHERE name='half'").get()).toBeNull();
+    db.close();
   });
 });

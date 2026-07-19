@@ -1,4 +1,7 @@
 import { query } from "@anthropic-ai/claude-agent-sdk";
+import { extractFromBunfs } from "@anthropic-ai/claude-agent-sdk/extract";
+import { existsSync } from "node:fs";
+import { dirname, join } from "node:path";
 import type {
   GateFn,
   HarnessAdapter,
@@ -207,6 +210,63 @@ function asHandle(handle: SessionHandle): ClaudeCodeHandle {
   return { v: 1, sessionId: h.sessionId ?? null };
 }
 
+/** True when running inside a `bun build --compile` binary: its module URLs live
+ *  in Bun's virtual FS (`/$bunfs/` POSIX, `~BUN` Windows) rather than on disk. */
+function isCompiledBinary(): boolean {
+  return import.meta.url.includes("$bunfs") || import.meta.url.includes("~BUN");
+}
+
+/**
+ * The native `claude` CLI the SDK spawns as its runtime subprocess.
+ *
+ * Under `bun run` (dev / clone-and-run) the SDK resolves it from `node_modules`
+ * itself — return `undefined` and change nothing. A `bun build --compile` binary
+ * can't: the SDK resolves its native CLI relative to a `$bunfs` path no child
+ * process can exec, and the 236MB per-platform package was never bundled (M4 §2
+ * spike). So when compiled, point the SDK at a real `claude`, in priority order:
+ *   1. CONDUIT_CLAUDE_CLI — explicit operator override (any installed `claude`,
+ *      or a custom sidecar path). `extractFromBunfs` is a no-op on a real path
+ *      and future-proofs an embedded (`type: "file"` → `$bunfs`) path pointed here.
+ *   2. a `claude` sidecar next to the compiled binary — the default release
+ *      bundle (`conduit` + `claude` shipped together).
+ * Gated on the compiled-binary signal so a dev box with Claude Code installed
+ * next to `bun` (e.g. /opt/homebrew/bin/claude) is never silently picked up.
+ */
+function resolveClaudeCliPath(): string | undefined {
+  const override = process.env.CONDUIT_CLAUDE_CLI?.trim();
+  if (override) {
+    const resolved = extractFromBunfs(override);
+    if (existsSync(resolved)) return resolved;
+    console.warn(
+      `[claude-code] CONDUIT_CLAUDE_CLI="${override}" does not exist — ignoring it and falling ` +
+        `back to the SDK's own CLI resolution.`,
+    );
+  }
+  if (isCompiledBinary()) {
+    // Name must match what scripts/build-binary.ts ships beside the binary
+    // (claude.exe on Windows, claude elsewhere) — Node's existsSync is a literal
+    // path check, not a PATHEXT lookup.
+    const claudeName = process.platform === "win32" ? "claude.exe" : "claude";
+    const sidecar = join(dirname(process.execPath), claudeName);
+    if (existsSync(sidecar)) return sidecar;
+    console.warn(
+      `[claude-code] running as a compiled binary but found no '${claudeName}' CLI beside it ` +
+        `(${dirname(process.execPath)}) and CONDUIT_CLAUDE_CLI is unset — the agent runtime will ` +
+        `fail to start. Ship the native '${claudeName}' next to the binary or set CONDUIT_CLAUDE_CLI.`,
+    );
+  }
+  return undefined;
+}
+
+// Resolved lazily on first turn (not at module load) so `--help`/`--version` in
+// a compiled binary never emit the resolution warning. The path is process-
+// stable (execPath/env don't change mid-run), so memoize the first result —
+// `undefined` included.
+let claudeCliPathMemo: { value: string | undefined } | undefined;
+function claudeCliPath(): string | undefined {
+  return (claudeCliPathMemo ??= { value: resolveClaudeCliPath() }).value;
+}
+
 class ClaudeCodeSession implements HarnessSession {
   constructor(
     private _handle: ClaudeCodeHandle,
@@ -316,6 +376,9 @@ class ClaudeCodeSession implements HarnessSession {
       options: {
         cwd: this.cwd,
         resume: this._handle.sessionId ?? undefined,
+        // Point the SDK at the native `claude` CLI when running as a compiled
+        // binary (M4 §2); omitted under `bun run`, where the SDK finds it itself.
+        ...(claudeCliPath() ? { pathToClaudeCodeExecutable: claudeCliPath()! } : {}),
         systemPrompt: { type: "preset", preset: "claude_code", append: this.system },
         allowedTools,
         disallowedTools,
