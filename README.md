@@ -1,6 +1,6 @@
 # Condotto
 
-**Collaborative AI coding that empowers your whole team, in Slack.**
+**Empower your whole team to build software with AI, right in Slack.**
 
 Condotto gives any Slack thread its own persistent
 [Claude Code](https://claude.com/claude-code) session, running on your own dev
