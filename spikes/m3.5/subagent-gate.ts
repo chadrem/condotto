@@ -18,7 +18,7 @@ import { existsSync } from "node:fs";
 import { loadConfig } from "../../src/core/config";
 import { WorktreeManager } from "../../src/core/worktrees";
 
-const STATE_PATH = join(homedir(), "tmp", "conduit-m35-subagent-spike.json");
+const STATE_PATH = join(homedir(), "tmp", "condotto-m35-subagent-spike.json");
 
 const config = loadConfig();
 const repo = config.repos.find((r) => r.name === "testrepo") ?? config.repos[0]!;
@@ -51,7 +51,7 @@ const gateHook = async (input: any, toolUseID: string | undefined) => {
       hookSpecificOutput: {
         hookEventName: "PreToolUse",
         permissionDecision: "defer",
-        permissionDecisionReason: "Gated by Conduit (subagent spike): awaiting approval",
+        permissionDecisionReason: "Gated by Condotto (subagent spike): awaiting approval",
       },
     };
   }

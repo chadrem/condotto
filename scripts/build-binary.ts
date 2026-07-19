@@ -1,12 +1,12 @@
 #!/usr/bin/env bun
-// Build a Conduit release with `bun build --compile` (M4 §2).
+// Build a Condotto release with `bun build --compile` (M4 §2).
 //
 // A release is TWO files shipped together:
-//   dist/<platform>/conduit   — the compiled daemon (a ~60MB Bun binary)
+//   dist/<platform>/condotto   — the compiled daemon (a ~60MB Bun binary)
 //   dist/<platform>/claude    — the SDK's native runtime CLI (~236MB) the daemon
 //                               spawns; it can't be bundled into the binary (M4
 //                               §2 spike / DECISIONS.md), so it rides alongside.
-// At runtime the daemon finds `claude` next to itself, or via CONDUIT_CLAUDE_CLI.
+// At runtime the daemon finds `claude` next to itself, or via CONDOTTO_CLAUDE_CLI.
 //
 // Usage:
 //   bun run scripts/build-binary.ts                    # host platform
@@ -81,7 +81,7 @@ if (bunTarget) {
 
 const isWindows = platformKey.startsWith("win");
 const outDir = join(ROOT, "dist", platformKey);
-const exeName = isWindows ? "conduit.exe" : "conduit";
+const exeName = isWindows ? "condotto.exe" : "condotto";
 const claudeName = isWindows ? "claude.exe" : "claude";
 
 console.log(`[build] platform ${platformKey}  ->  dist/${platformKey}/`);
@@ -116,6 +116,6 @@ if (nativeClaude) {
       `        os/cpu-gated optional dep and isn't installed on this host. To finish the bundle:\n` +
       `          • run this build ON a ${platformKey} machine / CI runner (recommended), or\n` +
       `          • drop that platform's 'claude' into dist/${platformKey}/, or\n` +
-      `          • at runtime, set CONDUIT_CLAUDE_CLI to an installed claude.`,
+      `          • at runtime, set CONDOTTO_CLAUDE_CLI to an installed claude.`,
   );
 }

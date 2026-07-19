@@ -6,8 +6,8 @@
 //       machine's subscription OAuth (no ANTHROPIC_API_KEY), exactly as the
 //       daemon does.
 //
-// Build:  bun build --compile spikes/m4/binary-smoke.ts --outfile /tmp/conduit-spike
-// Run:    /tmp/conduit-spike          (run the BINARY, never `bun run`)
+// Build:  bun build --compile spikes/m4/binary-smoke.ts --outfile /tmp/condotto-spike
+// Run:    /tmp/condotto-spike          (run the BINARY, never `bun run`)
 //
 // Faithful to production: same `query()` shape as the claude-code adapter
 // (claude_code systemPrompt preset, subscription auth). Exits non-zero on any
@@ -82,7 +82,7 @@ function fail(msg: string): never {
   if (process.env.ANTHROPIC_API_KEY) {
     console.log("[spike] NOTE: ANTHROPIC_API_KEY is set — the spike wants to prove SUBSCRIPTION auth");
   }
-  const cwd = mkdtempSync(join(tmpdir(), "conduit-spike-"));
+  const cwd = mkdtempSync(join(tmpdir(), "condotto-spike-"));
   let sessionId = "";
   let reply = "";
   let subtype = "";

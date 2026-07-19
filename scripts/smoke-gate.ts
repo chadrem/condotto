@@ -16,7 +16,7 @@ import { ClaudeCodeAdapter } from "../src/adapters/claude-code/adapter";
 import { evaluate } from "../src/core/policy";
 import type { GateFn, ToolCall } from "../src/core/types";
 
-const STATE_PATH = join(homedir(), "tmp", "conduit-m2-smoke.json");
+const STATE_PATH = join(homedir(), "tmp", "condotto-m2-smoke.json");
 
 const config = loadConfig();
 const repo = config.repos.find((r) => r.name === "testrepo") ?? config.repos[0]!;
@@ -41,7 +41,7 @@ const gate: GateFn = async (call) => {
 const adapter = new ClaudeCodeAdapter();
 const session = await adapter.create({
   cwd: worktree.path,
-  system: "You are Conduit (M2 smoke). Be terse.",
+  system: "You are Condotto (M2 smoke). Be terse.",
 });
 
 let deferred: ToolCall | null = null;

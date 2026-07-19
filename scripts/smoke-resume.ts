@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { ClaudeCodeAdapter } from "../src/adapters/claude-code/adapter";
 import type { GateFn } from "../src/core/types";
 
-const STATE_PATH = join(homedir(), "tmp", "conduit-smoke-state.json");
+const STATE_PATH = join(homedir(), "tmp", "condotto-smoke-state.json");
 const READ_ONLY = new Set(["Read", "Glob", "Grep", "TodoWrite"]);
 
 const gate: GateFn = async (call) => {
@@ -21,7 +21,7 @@ const state = await Bun.file(STATE_PATH).json();
 console.log(`[smoke] resuming with handle: ${JSON.stringify(state.handle).slice(0, 200)}`);
 
 const adapter = new ClaudeCodeAdapter();
-const session = await adapter.resume(state.handle, state.cwd, "You are Conduit (M1 smoke test). You are read-only. Be terse.");
+const session = await adapter.resume(state.handle, state.cwd, "You are Condotto (M1 smoke test). You are read-only. Be terse.");
 
 let reply = "";
 for await (const ev of session.turn(

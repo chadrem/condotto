@@ -7,7 +7,7 @@
 // background workflow's sub-agent tool calls route through our PreToolUse hook with
 // `agent_id`, where the read-only subagent policy confines them (spike 2026-07-18).
 //   Run: bun run smoke:workflows   (needs testrepo + subscription auth)
-// Set CONDUIT_SMOKE_WRITE=1 to also exercise the Tier 3 worktree-write opt-in: the
+// Set CONDOTTO_SMOKE_WRITE=1 to also exercise the Tier 3 worktree-write opt-in: the
 // workflow's agents WRITE inside the worktree (allowed, confined) while an
 // out-of-worktree write stays hard-denied.
 import { existsSync } from "node:fs";
@@ -18,7 +18,7 @@ import { ClaudeCodeAdapter } from "../src/adapters/claude-code/adapter";
 import { evaluate } from "../src/core/policy";
 import type { GateFn } from "../src/core/types";
 
-const WRITE_MODE = process.env.CONDUIT_SMOKE_WRITE === "1";
+const WRITE_MODE = process.env.CONDOTTO_SMOKE_WRITE === "1";
 
 const config = loadConfig();
 const repo = config.repos.find((r) => r.name === "testrepo") ?? config.repos[0]!;
@@ -75,7 +75,7 @@ const adapter = new ClaudeCodeAdapter();
 const session = await adapter.create({
   cwd: worktree.path,
   system:
-    "You are Conduit (M3.6 workflow smoke). You may launch multi-agent workflows (the Workflow tool) " +
+    "You are Condotto (M3.6 workflow smoke). You may launch multi-agent workflows (the Workflow tool) " +
     "for parallel read-only investigation. Be terse.",
 });
 

@@ -21,7 +21,7 @@ export interface CommandRunnerLike {
 
 /**
  * The daemon's OWN secrets — never handed to a repo's deploy command. A real
- * deploy needs its own scoped credentials (M4), not Conduit's chat/AI tokens;
+ * deploy needs its own scoped credentials (M4), not Condotto's chat/AI tokens;
  * scrubbing these keeps a misbehaving deploy command from exfiltrating them.
  */
 export const DEFAULT_SCRUB_ENV = [

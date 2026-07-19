@@ -9,7 +9,7 @@ import { WorktreeManager } from "../src/core/worktrees";
 import { ClaudeCodeAdapter } from "../src/adapters/claude-code/adapter";
 import type { GateFn } from "../src/core/types";
 
-const STATE_PATH = join(homedir(), "tmp", "conduit-smoke-state.json");
+const STATE_PATH = join(homedir(), "tmp", "condotto-smoke-state.json");
 const READ_ONLY = new Set(["Read", "Glob", "Grep", "TodoWrite"]);
 
 const gate: GateFn = async (call) => {
@@ -35,7 +35,7 @@ const adapter = new ClaudeCodeAdapter();
 const session = await adapter.create({
   cwd: worktree.path,
   system:
-    "You are Conduit (M1 smoke test). You are read-only. Be terse: answer in at most two sentences.",
+    "You are Condotto (M1 smoke test). You are read-only. Be terse: answer in at most two sentences.",
 });
 
 for await (const ev of session.turn(

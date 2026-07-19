@@ -32,7 +32,7 @@ const q = query({
     "`export const meta = {...}` using agent(). Report the agent's result verbatim.",
   options: {
     cwd: wt.path,
-    systemPrompt: { type: "preset", preset: "claude_code", append: "Conduit diag5. Workflow tool available. Terse." },
+    systemPrompt: { type: "preset", preset: "claude_code", append: "Condotto diag5. Workflow tool available. Terse." },
     // TEST: grant the read tools via allowedTools (so workflow agents have them in
     // their toolset without a ToolSearch load). Does Grep work now, and do reads
     // still reach our hook (confinement) under bypassPermissions?

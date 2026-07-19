@@ -24,7 +24,7 @@ const gate: GateFn = async (call) =>
 
 async function runOne(i: number): Promise<{ i: number; ok: boolean; sessionId: string | null; reply: string }> {
   const worktree = await worktrees.create({ repoPath: repo.path, defaultBranch: repo.defaultBranch, sessionId: crypto.randomUUID() });
-  const session = await adapter.create({ cwd: worktree.path, system: "You are Conduit (concurrency smoke). Be terse." });
+  const session = await adapter.create({ cwd: worktree.path, system: "You are Condotto (concurrency smoke). Be terse." });
   let sessionId: string | null = null;
   let reply = "";
   for await (const ev of session.turn(

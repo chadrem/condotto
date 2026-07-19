@@ -3,7 +3,7 @@
 // on one session — Opus/high, then a mid-session switch to Fable/low — and confirms
 // each completes with a reply and no error. This exercises the exact SDK model IDs
 // the adapter maps to (claude-opus-4-8 / claude-fable-5) and the effort levels.
-//   Run: bun run smoke:model   (needs ~/tmp/conduit-testrepo + subscription auth)
+//   Run: bun run smoke:model   (needs ~/tmp/condotto-testrepo + subscription auth)
 import { loadConfig } from "../src/core/config";
 import { WorktreeManager } from "../src/core/worktrees";
 import { ClaudeCodeAdapter } from "../src/adapters/claude-code/adapter";
@@ -26,7 +26,7 @@ const adapter = new ClaudeCodeAdapter();
 console.log(`[smoke] adapter supportedModels=${adapter.capabilities.supportedModels.join(",")} supportedEfforts=${adapter.capabilities.supportedEfforts.join(",")}`);
 const session = await adapter.create({
   cwd: worktree.path,
-  system: "You are Conduit (M3.5 smoke). Answer in one short sentence, no tools.",
+  system: "You are Condotto (M3.5 smoke). Answer in one short sentence, no tools.",
 });
 
 const cases: { model: string; effort: string }[] = [

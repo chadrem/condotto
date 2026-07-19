@@ -39,7 +39,7 @@ export interface SessionRow {
    * M3.8 architect self-approve: when 1, a gated tool call on a turn initiated by
    * an architect runs without the Approve click (the hard-deny floor still
    * applies). Default 1 (on) — an architect toggles it per thread with
-   * `@Conduit auto-approve on|off`.
+   * `@Condotto auto-approve on|off`.
    */
   auto_approve: number;
   /**
@@ -111,8 +111,8 @@ export type ApprovalDecision = "pending" | "approved" | "denied" | "expired";
 
 /**
  * Where a role mapping came from (M3.8). `config` rows are wiped + reseeded from
- * `conduit.toml` (`architects`/`[[roles]]`) / `CONDUIT_ARCHITECTS` on every boot
- * (config stays authoritative); `grant` rows are runtime `@Conduit grant`
+ * `condotto.toml` (`architects`/`[[roles]]`) / `CONDOTTO_ARCHITECTS` on every boot
+ * (config stays authoritative); `grant` rows are runtime `@Condotto grant`
  * delegations that survive restart.
  */
 export type RoleSource = "config" | "grant";
@@ -296,7 +296,7 @@ function migrateBaselineV1(db: Database): void {
 
 /**
  * Migration **v2** (M4 §3 worktree GC): schedule column for the worktree garbage
- * collector. `cleanup_at` is set only by an explicit `@Conduit stop clean` (to
+ * collector. `cleanup_at` is set only by an explicit `@Condotto stop clean` (to
  * stop-time + retention interval); the GC collects the worktree once due and then
  * discards the session row. A plain stop leaves it NULL — never collected. Plain
  * forward DDL: unlike the baseline it only ever runs on a store already at v1, so
@@ -353,7 +353,7 @@ export class Store {
     const current = this.userVersion();
     if (current > migrations.length) {
       throw new Error(
-        `conduit database schema is at version ${current}, but this Conduit build only ` +
+        `condotto database schema is at version ${current}, but this Condotto build only ` +
           `understands up to ${migrations.length}. You are running an OLDER binary against a ` +
           `store written by a NEWER one — upgrade the binary (downgrade migrations are not supported).`,
       );
@@ -608,27 +608,27 @@ export class Store {
       .run({ id, now: new Date().toISOString() });
   }
 
-  /** Raise/lower a session's cost ceiling (architect `@Conduit budget`, M3). */
+  /** Raise/lower a session's cost ceiling (architect `@Condotto budget`, M3). */
   setSessionBudgetLimit(id: string, usd: number): void {
     this.db.query(`UPDATE sessions SET budget_limit_usd = $usd WHERE id = $id`).run({ id, usd });
   }
 
-  /** Set a session's model token (M3.5, `@Conduit model`). null = daemon default. */
+  /** Set a session's model token (M3.5, `@Condotto model`). null = daemon default. */
   setSessionModel(id: string, model: string | null): void {
     this.db.query(`UPDATE sessions SET model = $model WHERE id = $id`).run({ id, model });
   }
 
-  /** Set a session's effort token (M3.5, `@Conduit effort`). null = daemon default. */
+  /** Set a session's effort token (M3.5, `@Condotto effort`). null = daemon default. */
   setSessionEffort(id: string, effort: string | null): void {
     this.db.query(`UPDATE sessions SET effort = $effort WHERE id = $id`).run({ id, effort });
   }
 
-  /** Toggle a session's subagent tools (M3.5 Tier B, `@Conduit subagents`). */
+  /** Toggle a session's subagent tools (M3.5 Tier B, `@Condotto subagents`). */
   setSessionSubagents(id: string, on: boolean): void {
     this.db.query(`UPDATE sessions SET subagents = $v WHERE id = $id`).run({ id, v: on ? 1 : 0 });
   }
 
-  /** Toggle a session's architect self-approve (M3.8, `@Conduit auto-approve`). */
+  /** Toggle a session's architect self-approve (M3.8, `@Condotto auto-approve`). */
   setSessionAutoApprove(id: string, on: boolean): void {
     this.db.query(`UPDATE sessions SET auto_approve = $v WHERE id = $id`).run({ id, v: on ? 1 : 0 });
   }
@@ -678,7 +678,7 @@ export class Store {
 
   /**
    * Schedule this session's worktree for collection at `cleanupAt` (ISO) — set by
-   * an explicit `@Conduit stop clean`. Only a `stopped` session is ever marked;
+   * an explicit `@Condotto stop clean`. Only a `stopped` session is ever marked;
    * the GC re-checks status before acting. Reactivation clears it via
    * `clearSessionCleanup`, so a within-window resume cancels the teardown.
    */
@@ -887,7 +887,7 @@ export class Store {
   }
 
   /**
-   * Boot reconcile (M3.8): remove only config-seeded rows so runtime `@Conduit
+   * Boot reconcile (M3.8): remove only config-seeded rows so runtime `@Condotto
    * grant` delegations (source='grant') survive the restart, then the daemon
    * reseeds config rows. Removing a principal from config still revokes their
    * config authority; grants are a separate, additive namespace.

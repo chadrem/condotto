@@ -49,7 +49,7 @@ const adapter = new ClaudeCodeAdapter();
 const session = await adapter.create({
   cwd: worktree.path,
   system:
-    "You are Conduit (M3.5 Tier B smoke). You may delegate read-only work to the 'explorer' subagent " +
+    "You are Condotto (M3.5 Tier B smoke). You may delegate read-only work to the 'explorer' subagent " +
     "via the Agent tool. Be terse.",
 });
 

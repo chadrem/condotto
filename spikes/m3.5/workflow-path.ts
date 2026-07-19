@@ -2,7 +2,7 @@
 // heaviest capability). Two load-bearing questions, tested through the REAL
 // claude-code adapter + the REAL policy engine (exactly what the daemon runs):
 //
-//   Q1 (availability): does the Workflow tool actually work under Conduit's adapter
+//   Q1 (availability): does the Workflow tool actually work under Condotto's adapter
 //       options (settingSources:[] isolation, Workflow un-disallowed, no
 //       enableWorkflows setting)? Or is the tool unavailable there?
 //   Q2 (SECURITY — the load-bearing one): when a workflow fans out agents, do those
@@ -47,7 +47,7 @@ let sawAgentIdCall = false; // any call carrying agent_id (subagent/workflow-age
 let workflowAgentReadAllowed = false;
 let workflowAgentWriteDenied = false;
 
-// The REAL Conduit gate: policy engine with subagents + workflows enabled.
+// The REAL Condotto gate: policy engine with subagents + workflows enabled.
 const gate: GateFn = async (call) => {
   const d = evaluate(call, {
     worktree: worktree.path,
@@ -73,7 +73,7 @@ const adapter = new ClaudeCodeAdapter();
 const session = await adapter.create({
   cwd: worktree.path,
   system:
-    "You are Conduit (M3.5 workflow spike). You have the Workflow tool for multi-agent " +
+    "You are Condotto (M3.5 workflow spike). You have the Workflow tool for multi-agent " +
     "orchestration. Be terse.",
 });
 

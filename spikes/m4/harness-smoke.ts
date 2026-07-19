@@ -1,6 +1,6 @@
 // M4 §2 verification: prove the SHIPPED claude-code adapter's sidecar CLI
 // resolution works inside a `bun build --compile` binary — i.e. the real release
-// path (conduit + a `claude` sidecar), not just the isolated spike.
+// path (condotto + a `claude` sidecar), not just the isolated spike.
 //
 // Build: bun build --compile spikes/m4/harness-smoke.ts --outfile <dir>/harness-smoke
 // Setup: put a `claude` next to it (symlink is fine), then run with no key:
@@ -17,7 +17,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 const adapter = new ClaudeCodeAdapter();
-const cwd = mkdtempSync(join(tmpdir(), "conduit-harness-"));
+const cwd = mkdtempSync(join(tmpdir(), "condotto-harness-"));
 const session = await adapter.create({ cwd, system: "You are a headless smoke test." });
 const gate = async (): Promise<GateDecision> => ({ decision: "allow" });
 

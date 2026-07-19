@@ -19,14 +19,14 @@ const gateHook = async (input: any, toolUseID: string | undefined) => {
     hookSpecificOutput: {
       hookEventName: "PreToolUse",
       permissionDecision: "defer",
-      permissionDecisionReason: "Gated by Conduit: awaiting architect approval",
+      permissionDecisionReason: "Gated by Condotto: awaiting architect approval",
     },
   };
 };
 
 for await (const m of query({
   prompt:
-    "Create a file named hello.txt whose entire content is exactly: hello from conduit\n" +
+    "Create a file named hello.txt whose entire content is exactly: hello from condotto\n" +
     "Use a single Write tool call. Do not read anything first, do not do anything else.",
   options: {
     cwd: REPO,

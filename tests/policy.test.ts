@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { evaluate, bashHardDeny, offendingPath, productionDataConcern, parseWorkflowMeta, describeCall } from "../src/core/policy";
 import type { ToolCall } from "../src/core/types";
 
-const WORKTREE = "/tmp/conduit-wt/session-abc";
+const WORKTREE = "/tmp/condotto-wt/session-abc";
 
 function ctx(allowlist: string[] = []) {
   return { worktree: WORKTREE, safeBashAllowlist: allowlist };
@@ -43,7 +43,7 @@ describe("policy: read-only tools", () => {
   });
 
   test("a worktree path prefix collision does not count as inside", () => {
-    // /tmp/conduit-wt/session-abcDEF must not be treated as under session-abc.
+    // /tmp/condotto-wt/session-abcDEF must not be treated as under session-abc.
     expect(evaluate(call("Read", { file_path: `${WORKTREE}-evil/x` }), ctx()).action).toBe("deny");
   });
 });

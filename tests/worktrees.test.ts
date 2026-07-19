@@ -24,7 +24,7 @@ let repoPath: string;
 let root: string;
 
 beforeEach(async () => {
-  const base = mkdtempSync(join(tmpdir(), "conduit-wt-"));
+  const base = mkdtempSync(join(tmpdir(), "condotto-wt-"));
   repoPath = join(base, "repo");
   root = join(base, "worktrees");
   await run(["git", "init", "-q", "-b", "main", repoPath]);
@@ -43,14 +43,14 @@ describe("WorktreeManager.create + remove (M4 §3)", () => {
     expect(existsSync(info.path)).toBe(true);
     expect(existsSync(join(info.path, "README.md"))).toBe(true);
     expect(await worktreeList()).toContain(info.path);
-    expect(await branchList()).toContain(info.branch.replace("conduit/", "")); // branch listed
+    expect(await branchList()).toContain(info.branch.replace("condotto/", "")); // branch listed
 
     const res = await wm.remove({ repoPaths: [repoPath], sessionId: "sess-aaaaaaaa-1", branch: info.branch });
     expect(res).toEqual({ removed: true, deregistered: true, branchDeleted: true });
     expect(existsSync(info.path)).toBe(false);
     // Git no longer knows the worktree or the branch, and prune left nothing stale.
     expect(await worktreeList()).not.toContain(info.path);
-    expect(await branchList()).not.toContain(info.branch.replace("conduit/", ""));
+    expect(await branchList()).not.toContain(info.branch.replace("condotto/", ""));
   });
 
   test("remove force-tears-down a worktree with uncommitted + untracked changes", async () => {
@@ -94,7 +94,7 @@ describe("WorktreeManager.create + remove (M4 §3)", () => {
   test("remove tries only the owning repo across several candidates", async () => {
     // Two repos; the worktree belongs to repoPath. Passing both repos' paths must
     // still tear it down (the non-owner no-ops) — this is the orphan-sweep shape.
-    const other = join(mkdtempSync(join(tmpdir(), "conduit-wt-other-")), "repo");
+    const other = join(mkdtempSync(join(tmpdir(), "condotto-wt-other-")), "repo");
     await run(["git", "init", "-q", "-b", "main", other]);
     await Bun.write(join(other, "f"), "x\n");
     await run(["git", "-C", other, "add", "-A"]);
@@ -120,7 +120,7 @@ describe("WorktreeManager.create + remove (M4 §3)", () => {
   });
 
   test("remove refuses a path-escaping session id — nothing outside the root is touched", async () => {
-    const base = mkdtempSync(join(tmpdir(), "conduit-wt-escape-"));
+    const base = mkdtempSync(join(tmpdir(), "condotto-wt-escape-"));
     const insideRoot = join(base, "worktrees");
     const wm = new WorktreeManager(insideRoot);
     // A sibling file outside the root that a naive rm(root/../victim) would hit.

@@ -31,7 +31,7 @@ async function run(label: string, prompt: string, writeDecision: "ask" | "defer"
     prompt,
     options: {
       cwd: wt.path,
-      systemPrompt: { type: "preset", preset: "claude_code", append: `Conduit ${label}. Terse. Do exactly as asked.` },
+      systemPrompt: { type: "preset", preset: "claude_code", append: `Condotto ${label}. Terse. Do exactly as asked.` },
       allowedTools: [],
       disallowedTools: ["ExitPlanMode", "SlashCommand", "WebFetch", "WebSearch", "Agent", "Task", "Workflow"],
       permissionMode: "bypassPermissions",

@@ -5,7 +5,7 @@ last. Each entry: what was decided/learned, the evidence, and consequences.
 
 ## 2026-07-16 — Auth: subscription OAuth, no API key (verified)
 
-**Decision:** Conduit authenticates via the dev machine's Claude subscription
+**Decision:** Condotto authenticates via the dev machine's Claude subscription
 (Max) login — not `ANTHROPIC_API_KEY`. There is no API key in this deployment.
 
 **Evidence:** a headless `query()` via `@anthropic-ai/claude-agent-sdk`
@@ -78,7 +78,7 @@ subscription OAuth, no API key, throwaway git repo. Scripts preserved in
 2. **System prompt:** the SDK's default system prompt carries no environment
    context — the model didn't know its cwd and invented `/home/user/hello.txt`.
    The harness adapter should pass `systemPrompt: { type: "preset", preset:
-   "claude_code" }` (+ appended Conduit protocol) so the agent knows its
+   "claude_code" }` (+ appended Condotto protocol) so the agent knows its
    worktree. (The `cwd` option itself worked; the recovered write landed in
    the right repo.)
 3. The gate-phase model issued the Write twice (both hook-deferred; the second
@@ -90,19 +90,19 @@ subscription OAuth, no API key, throwaway git repo. Scripts preserved in
 
 **Fact (contradicts DESIGN.md §2 journey 1 as written):** Slack does not offer
 custom slash commands inside message threads — only at channel top level — and
-the command payload carries no thread context. `/conduit assign` "in a thread"
+the command payload carries no thread context. `/condotto assign` "in a thread"
 is therefore impossible. Sources: Slack's implementing-slash-commands doc and
 community reports (checked 2026-07-18).
 
 **Decision (M1):** two assignment paths, both implemented in `adapters/slack/`:
 
-- `/conduit assign [repo]` (top level) creates a **new** conversation: the
+- `/condotto assign [repo]` (top level) creates a **new** conversation: the
   adapter posts an anchor message and that message's `ts` becomes the thread
   root / `conversation_id`. Humans converse in the anchor's thread.
-- `@Conduit assign` mentioned **inside an existing thread** assigns that thread
+- `@Condotto assign` mentioned **inside an existing thread** assigns that thread
   (`app_mention` events do carry `thread_ts`). A top-level mention roots its
-  own thread. `@Conduit stop` / `@Conduit status` are the thread-scoped forms;
-  `/conduit stop` replies with a hint since it cannot know a thread.
+  own thread. `@Condotto stop` / `@Condotto status` are the thread-scoped forms;
+  `/condotto stop` replies with a hint since it cannot know a thread.
 
 **Consequences:** DESIGN.md §2 journey 1 and Appendix C updated. The
 `ConversationRef` flow is unchanged — the core never knew about slash-command
@@ -133,7 +133,7 @@ behind the surface port) remains available per §6.
   tool outside that set via the `PreToolUse` hook. The double layer is
   deliberate — it seeds M2's deny-by-default backstop and keeps the harness
   port's gate contract real from the first commit.
-- **The Conduit system-prompt append lives inside the opaque harness handle.**
+- **The Condotto system-prompt append lives inside the opaque harness handle.**
   The SDK's `systemPrompt` is per-`query()` config, so resumed turns must
   re-supply it; storing it in the handle keeps the core ignorant of that
   mechanic (handle: `{v, sessionId, system}`, owned by `adapters/claude-code/`).
@@ -168,7 +168,7 @@ SDK usage) with three-lens adversarial verification confirmed 41 findings
   error; surface delivery failures fall back edit→post and are not confused
   with harness failures; harness attach errors surface in-thread.
 - **Slack correctness:** conversation ids are now `channel:ts` (thread_ts is
-  only unique per channel); strict mention-command parsing ("@Conduit take a
+  only unique per channel); strict mention-command parsing ("@Condotto take a
   look…" is conversation, not an assign); bounded dedup for Slack's
   at-least-once delivery; inline code spans protected in mrkdwn rendering.
 - **A1 framing:** all Unicode line separators (\r, NEL, LS, PS) normalized
@@ -179,7 +179,7 @@ SDK usage) with three-lens adversarial verification confirmed 41 findings
 - Plus: dead-session-id recovery (resume failure restarts fresh instead of
   wedging the thread forever), a 10-minute turn inactivity watchdog with
   `interrupt()`, startup reconciliation parking crash-orphaned `active`
-  sessions, `busy_timeout`, channel-scoped `/conduit status`, and
+  sessions, `busy_timeout`, channel-scoped `/condotto status`, and
   `updatedInput` forwarded through the gate hook.
 
 **Deliberately deferred** (logged, not bugs): append-mode progress for
@@ -190,13 +190,13 @@ timestamps.
 
 ## 2026-07-18 — Development uses the real Slack workspace (architect decision)
 
-**Decision (Chad, the architect/owner):** all Conduit development and testing
+**Decision (Chad, the architect/owner):** all Condotto development and testing
 runs in the real company workspace, Acme (acme.slack.com) — not a
 scratch workspace. Risks are known and accepted. This supersedes the
 scratch-workspace clause of DESIGN.md §8's build-time safety rule.
 
 **What is NOT lifted:** every other guardrail stands unchanged — sessions
-point only at the throwaway git repo (`~/tmp/conduit-testrepo`), never a real
+point only at the throwaway git repo (`~/tmp/condotto-testrepo`), never a real
 repo or deploy path until M4 hardening + gating review; deploy/land commands
 ship as no-ops/`echo` first (M3); M1 sessions remain read-only and
 worktree-confined. Practical mitigation: prefer a dedicated test channel so
@@ -205,12 +205,12 @@ session traffic doesn't land in working team channels.
 **Consequences:** DESIGN.md §8 and CLAUDE.md updated. Sessions and future
 Claude instances must not re-flag the workspace as a safety violation.
 
-## 2026-07-18 — Repo registry: point Conduit at real repos by name
+## 2026-07-18 — Repo registry: point Condotto at real repos by name
 
 **Decision (architect request):** repos are registered in a gitignored
-`conduit.repos.json` (array of `{name, path, defaultBranch?}`; path override
-via `CONDUIT_REPOS_FILE`). The throwaway `testrepo` stays registered by
-default; an entry named `testrepo` overrides it. `/conduit assign <name>`
+`condotto.repos.json` (array of `{name, path, defaultBranch?}`; path override
+via `CONDOTTO_REPOS_FILE`). The throwaway `testrepo` stays registered by
+default; an entry named `testrepo` overrides it. `/condotto assign <name>`
 resolves any registered repo. This pulls "real repo registration" forward
 from post-M4 at the architect's request, for read-only M1 sessions.
 
@@ -218,7 +218,7 @@ from post-M4 at the architect's request, for read-only M1 sessions.
 each session works in a fresh `git worktree`, so the repo's working tree,
 untracked files (`.env`, local configs), and ignored files are never visible
 to the agent; M1 sessions are read-only with reads confined to the worktree.
-Registered repos accumulate `conduit/*` branches + worktree registrations
+Registered repos accumulate `condotto/*` branches + worktree registrations
 (clean with `git worktree prune` and branch deletion). The deploy/land
 no-op rule and M4 gating review still stand before any write access.
 
@@ -292,7 +292,7 @@ approval-aware gate returning allow / gate / deny; a `gate` maps to the SDK
   (reads are shadowed from it, which is exactly why blanket-deny is safe).
 - **Roles**: architect-only for assign / stop / approvals (DESIGN §2);
   conversing is open. Config is authoritative — `clearRoles` + reseed at boot
-  from `CONDUIT_ARCHITECTS` / `conduit.roles.json`, so removing a principal
+  from `CONDOTTO_ARCHITECTS` / `condotto.roles.json`, so removing a principal
   actually revokes.
 - **Deviation from DESIGN §4 examples (logged):** the DEFAULT safe-bash
   allowlist omits `cat`/`ls`. Auto-allowing them via Bash would bypass worktree
@@ -300,8 +300,8 @@ approval-aware gate returning allow / gate / deny; a `gate` maps to the SDK
   go through the confined Read/Grep tools; a repo may opt cat/ls back in per
   repo. Positive Bash-arg confinement is M3/M4.
 
-**Before the live M2 demo:** set `CONDUIT_ARCHITECTS=slack:U…` (or
-`conduit.roles.json`). With no architect configured, assign/stop/approvals are
+**Before the live M2 demo:** set `CONDOTTO_ARCHITECTS=slack:U…` (or
+`condotto.roles.json`). With no architect configured, assign/stop/approvals are
 refused for everyone — the daemon logs a WARNING at boot.
 
 **Verification:** 81 tests green, `tsc` clean, `check-ports` clean; the
@@ -344,19 +344,19 @@ was reactivated under M2; when asked to create a file it refused — "I'm in
 read-only mode this milestone." The M2 approval loop never fired because the
 agent never attempted the write.
 
-**Root cause:** the M1 design froze the Conduit system-prompt append inside the
+**Root cause:** the M1 design froze the Condotto system-prompt append inside the
 opaque harness handle at `create()` time. On resume the adapter replayed that
 stored string — for this session, the **M1 read-only prompt** (confirmed by
-reading `harness_session_handle.system` in the DB). So the M2 `conduitSystemPrompt`
+reading `harness_session_handle.system` in the DB). So the M2 `condottoSystemPrompt`
 reached only newly-created sessions; every pre-existing session kept its old
 posture.
 
-**Fix:** the system prompt is Conduit **policy**, not adapter session state, so
+**Fix:** the system prompt is Condotto **policy**, not adapter session state, so
 the core now supplies the current prompt on **both** create and resume
 (`HarnessAdapter.resume(handle, cwd, system)`); the handle no longer carries it
 (legacy handles' `system` field is ignored). A reactivated session now gets the
 current posture. Regression test in `session-manager.test.ts`. This supersedes
-the M1 note "the Conduit system-prompt append lives inside the opaque harness
+the M1 note "the Condotto system-prompt append lives inside the opaque harness
 handle."
 
 **Caveat for the demo:** the fix corrects the *prompt*, but a reactivated
@@ -368,8 +368,8 @@ demoed against the **throwaway `testrepo`**, not a real registered repo like
 `acme`. The 2026-07-18 repo-registry decision registered real repos for
 **read-only** M1 exploration and explicitly kept "no write access to real repos
 until M4 hardening + gating review." Gated writes land in an isolated
-`conduit/*` worktree branch, but the guardrail is deliberately conservative —
-use `/conduit assign` (defaults to `testrepo`) for the write demo.
+`condotto/*` worktree branch, but the guardrail is deliberately conservative —
+use `/condotto assign` (defaults to `testrepo`) for the write demo.
 
 ## 2026-07-18 — M3 SDK re-verification (budget, result subtypes, terminal reasons)
 
@@ -402,8 +402,8 @@ demoable; 115 tests green, `tsc` + `check-ports` clean; real-harness smokes pass
    `testCmd`, `landCmd`, `deployCmd`, `costCapUsd`; sessions carry
    `budget_limit_usd`. testrepo ships `bun test` and **echo/no-op** land/deploy
    (build-time safety — real deploy path is M4).
-2. **Land/deploy = daemon-owned, gated action.** `@Conduit land`/`deploy`
-   (architect-only) records a `conduit:land`/`conduit:deploy` approval and posts
+2. **Land/deploy = daemon-owned, gated action.** `@Condotto land`/`deploy`
+   (architect-only) records a `condotto:land`/`condotto:deploy` approval and posts
    Approve/Deny (§4: the deploy path is a gated action, so an explicit click is
    required even though the ordering architect is verified). On approval the
    **daemon** runs exactly the repo's configured command via a core
@@ -418,7 +418,7 @@ demoable; 115 tests green, `tsc` + `check-ports` clean; real-harness smokes pass
    prompt.
 4. **Cost budgets + runaway cap (two layers).** (a) The manager blocks a new
    human turn once cumulative `total_cost_usd` reaches the thread budget, pauses,
-   and pings the architect; recovery is `@Conduit budget <usd>` (architect-only).
+   and pings the architect; recovery is `@Condotto budget <usd>` (architect-only).
    (b) The SDK `maxBudgetUsd` is set to the remaining headroom per turn as an
    intra-turn brake; `error_max_budget_usd` surfaces as a clear notice.
    Approval-resume turns are NOT budget-blocked (never strand an approved action).
@@ -429,7 +429,7 @@ demoable; 115 tests green, `tsc` + `check-ports` clean; real-harness smokes pass
 6. **Injection framing hardening (Appendix A1).** A four-lens adversarial
    red-team confirmed the three layers hold (header-only authority + unforgeable
    random-nonce body fence + line quoting) and net authority-forge is backstopped.
-   Closed the gaps it surfaced: defang the literal `[conduit:` protocol sentinel
+   Closed the gaps it surfaced: defang the literal `[condotto:` protocol sentinel
    in body content (kills the one residual quoting-layer escape — a model
    un-escaping a literal `\n`); fold info separators FS/GS/RS/US into line-break
    normalization; add bidi MARKS ALM/LRM/RLM to the strip set. Emoji ZWJ
@@ -442,7 +442,7 @@ demoable; 115 tests green, `tsc` + `check-ports` clean; real-harness smokes pass
    (Slack renders a warning); the system prompt adds the **aggregates-only** rule.
    Real prod creds are M4; M3 is policy + prompt + audit.
 
-**New commands:** `@Conduit land`, `@Conduit deploy`, `@Conduit budget <usd>`
+**New commands:** `@Condotto land`, `@Condotto deploy`, `@Condotto budget <usd>`
 (all architect-only, thread-scoped mentions).
 
 **Deviation / notes.** Land/deploy require an explicit Approve click even though
@@ -459,7 +459,7 @@ Two multi-agent adversarial passes, matching the M1/M2 process.
 Confirmed the three-layer model holds (header-only authority + unforgeable
 random-nonce body fence + line quoting) and net authority-forge is backstopped.
 One residual quoting-layer escape and two completeness gaps were closed (literal
-`\n` un-escape → defang the `[conduit:` sentinel; info separators FS/GS/RS/US into
+`\n` un-escape → defang the `[condotto:` sentinel; info separators FS/GS/RS/US into
 line-break normalization; bidi MARKS ALM/LRM/RLM into the strip set). Emoji ZWJ
 preserved. (Commit 1e56e9a.)
 
@@ -490,7 +490,7 @@ smokes pass.
 
 ## 2026-07-18 — Milestone 3.5 planned: expose full Claude Code power to the thread
 
-**Product driver (sharpens §1).** The north-star for Conduit is empowering people
+**Product driver (sharpens §1).** The north-star for Condotto is empowering people
 with **domain expertise but not coding skill — product managers first — to build
 features themselves** via Slack, with a software engineer (the architect) guiding
 and gating in the *same thread*. For that to be real the implementer must be a
@@ -539,9 +539,9 @@ notional). **Not yet implemented** — this entry records the plan + verified fa
 ## 2026-07-18 — M3.5 Tier A shipped + Tier B spike: subagent defer does NOT resume
 
 **Tier A (model + effort) — done.** Per-session `model`/`effort` columns (opaque
-tokens) with per-repo defaults (`conduit.repos.json`) + a daemon-wide default of
+tokens) with per-repo defaults (`condotto.repos.json`) + a daemon-wide default of
 **Opus + high** (DESIGN §1: a first-class implementer). Architect commands
-`@Conduit model <opus|sonnet|fable>` / `effort <low…max>` (architect-only, audited),
+`@Condotto model <opus|sonnet|fable>` / `effort <low…max>` (architect-only, audited),
 shown in intro/status/help. Ports stayed clean: the core validates a choice by
 membership in `HarnessCapabilities.supportedModels/supportedEfforts` and forwards
 the opaque token via `TurnInput.harness`; the **claude-code adapter** is the only
@@ -600,20 +600,20 @@ demoable; 168 tests green, `tsc` + `check-ports` clean; real-SDK smokes pass
 
 1. **Tier A — model + effort.** Per-session `model`/`effort` (opaque tokens) with
    per-repo defaults + a daemon-wide default of **Opus + high**. Commands
-   `@Conduit model <opus|sonnet|fable>` / `effort <low…max>` (architect-only,
+   `@Condotto model <opus|sonnet|fable>` / `effort <low…max>` (architect-only,
    audited); surfaced in intro/status/reactivation/help. The core validates by
    membership against `HarnessCapabilities.supportedModels/supportedEfforts` and
    forwards the token via `TurnInput.harness`; the adapter maps to SDK ids and
    applies effort. Verified live (`smoke:model`).
 2. **Tier B — subagents + workflows + `ultra`.** Architect opt-in, default off:
-   `@Conduit subagents on|off`, `@Conduit ultra on|off` (= xhigh + subagents +
+   `@Condotto subagents on|off`, `@Condotto ultra on|off` (= xhigh + subagents +
    Workflow tool). Spike-driven design (previous entry): subagents fan out
    **read-only**; a subagent-initiated gated action or nested spawn is **denied**
    in the policy engine (`ToolCall.agentId` marks origin), because defer→resume is
    main-thread-only. The main agent does mutations via the M0-proven
    defer→approve→resume path. Daemon-defined read-only `explorer` subagent is
    defense-in-depth over the gate. Verified live (`smoke:subagents`).
-3. **Tier C — trust-scoped project config.** `trusted: true` in `conduit.repos.json`
+3. **Tier C — trust-scoped project config.** `trusted: true` in `condotto.repos.json`
    loads the repo's own config (`settingSources:["project"]` + `skills:"all"`);
    untrusted (default, incl. testrepo) stays isolated. The §4 gate still applies
    (the PreToolUse hook fires regardless of settingSources, and a hook deny/defer
@@ -658,12 +658,12 @@ only on testrepo, land/deploy echo/no-ops, subagents/trusted opt-in default-off.
 **Why.** The `ultra` preset was specced as `xhigh` + subagents + the **Workflow**
 tool (Claude Code's multi-agent orchestration; "ultracode" = xhigh + workflows).
 Subagents were spiked and shipped, but the Workflow tool had NOT been exercised
-end-to-end under Conduit's gate — so it got its own spike (`spikes/m3.5/
+end-to-end under Condotto's gate — so it got its own spike (`spikes/m3.5/
 workflow-path.ts`, real adapter + real policy engine, subscription auth).
 
 **SDK facts confirmed.** `enableWorkflows`/`disableWorkflows` live on the SDK
 **`Settings`** interface (loaded via `settingSources`), NOT on query `Options`.
-Conduit isolates with `settingSources: []`, yet the Workflow tool was still
+Condotto isolates with `settingSources: []`, yet the Workflow tool was still
 *available* to the model (plan default / not disabled).
 
 **Finding (the load-bearing one).** The Workflow tool ran, and the main agent's
@@ -773,7 +773,7 @@ M3.6 lands.
 
 **Implementation (DESIGN.md §8 Milestone 3.6).** Three tiers, each independently
 demoable; 201 tests green, `tsc` + `check-ports` clean; real-SDK `smoke:workflows`
-(and `CONDUIT_SMOKE_WRITE=1`) plus the five M3.6 spikes.
+(and `CONDOTTO_SMOKE_WRITE=1`) plus the five M3.6 spikes.
 
 1. **Tier 1 — secure read-only workflows.** The adapter re-enables the `Workflow`
    tool when a session turns workflows on, and switches that session to
@@ -785,7 +785,7 @@ demoable; 201 tests green, `tsc` + `check-ports` clean; real-SDK `smoke:workflow
    `escaped` calls (defence-in-depth; still denies batched gated writes). A workflow
    turn yields MULTIPLE results (intermediate "launched" then final synthesized), so
    the adapter buffers the last success and delivers only it. Command
-   `@Conduit workflows on|off` (architect-only, implies subagents); `ultra` re-folds
+   `@Condotto workflows on|off` (architect-only, implies subagents); `ultra` re-folds
    workflows.
 2. **Tier 2 — running-workflow Slack UX.** The workflow LAUNCH is a gated action
    (policy returns gate + a `workflow-launch` concern), approved via the standard
@@ -795,7 +795,7 @@ demoable; 201 tests green, `tsc` + `check-ports` clean; real-SDK `smoke:workflow
    synthesized reply carries a `⚙︎ multi-agent workflow · $X` cost footer. The turn
    watchdog resets on every streamed message; concurrency is unchanged (one workflow
    turn holds one semaphore slot for its whole minutes-long duration — correct).
-3. **Tier 3 — informed worktree-write opt-in.** `@Conduit workflows write on|off`
+3. **Tier 3 — informed worktree-write opt-in.** `@Condotto workflows write on|off`
    (architect-only, default off) posts a mandatory, non-skippable warning and sets
    `PolicyContext.workflowWrite`, which lets confined subagent/workflow/escaped calls
    WRITE (confined to the worktree via `offendingPath`) without per-write approval;
@@ -834,10 +834,10 @@ launch approval + the fan-out concern make the spend an explicit architect decis
 launching a workflow (Approve/Deny showing its name + fan-out); it fans out read-only
 across many files in parallel, streams live status, and posts a synthesized summary —
 gated and worktree-confined throughout; optionally the architect flips
-`@Conduit workflows write on` (acknowledging the warning) for parallel in-worktree
+`@Condotto workflows write on` (acknowledging the warning) for parallel in-worktree
 edits, and reviews the diff before approving the land. On the throwaway `testrepo`.
 
-**New smoke:** `smoke:workflows` (+ `CONDUIT_SMOKE_WRITE=1`); spikes in `spikes/m3.6/`
+**New smoke:** `smoke:workflows` (+ `CONDOTTO_SMOKE_WRITE=1`); spikes in `spikes/m3.6/`
 (`canusetool-confine.ts`, `diag.ts`, `diag2.ts`, `diag3.ts`, `diag4.ts`,
 `diag5-grep.ts`).
 
@@ -966,7 +966,7 @@ a PM authority). Both compose through the **existing** authority read path
 `check-ports` clean.** Verified end-to-end via the fake-harness suite (the real
 SessionManager event→gate→store path), a boot-path script (grant survives reboot,
 config revocation works, auto-approve seeds on), and the migration run against a COPY
-of the live `conduit.sqlite` (existing rows adopt `source='config'` + `auto_approve=1`).
+of the live `condotto.sqlite` (existing rows adopt `source='config'` + `auto_approve=1`).
 
 **(A) Architect auto-approve — the implementation of the §4:441-444 widening.**
 - The policy engine (`policy.ts`) stays **pure and untouched**. Auto-approve depends on
@@ -1006,16 +1006,16 @@ of the live `conduit.sqlite` (existing rows adopt `source='config'` + `auto_appr
   *message* event, so it requires `identityStrength==="verified"` — a forged sender on a
   future spoofable surface (email/SMS) can never auto-approve. Always true on Slack v1.
 - **Default ON** (`sessions.auto_approve` DEFAULT 1; daemon `defaultAutoApprove`=true,
-  `CONDUIT_AUTO_APPROVE=off` to flip; per-repo `default_auto_approve`). The user's stated
+  `CONDOTTO_AUTO_APPROVE=off` to flip; per-repo `default_auto_approve`). The user's stated
   posture overrides the "every other toggle defaults off" convention. Existing sessions
   adopt ON at migration — a deliberate, surfaced posture change (the settings banner
-  shows it). Dial off per thread (`@Conduit auto-approve off`).
+  shows it). Dial off per thread (`@Condotto auto-approve off`).
 - System prompt is **unchanged**: an auto-approved action still runs, so the agent's
   "propose gated actions normally; don't claim done until it runs" rules stay correct;
   keeping the agent gate-agnostic avoids it reasoning about its own authority. Posture is
   a human banner (`settingsBlock`/`capabilitySummary`) concern.
 
-**(B) In-thread role delegation — `@Conduit grant`/`revoke`.**
+**(B) In-thread role delegation — `@Condotto grant`/`revoke`.**
 - **Persistence (the load-bearing decision): a `roles.source` column** (`'config'` |
   `'grant'`) + `granted_by`/`granted_at`. Boot changes `clearRoles()` →
   `clearConfigRoles()` (deletes only `source='config'`), so runtime grants survive the
@@ -1026,7 +1026,7 @@ of the live `conduit.sqlite` (existing rows adopt `source='config'` + `auto_appr
   `source` → ZERO read-path change**; a grant architect is authoritative exactly like a
   config one, so approvals + the architect gate + auto-approve all "just work".
 - **Scope = the current channel by default** ("this project"; a channel ≈ a repo/project
-  in Conduit), `everywhere`/`global` = `'*'`. True per-thread scope is NOT modeled
+  in Condotto), `everywhere`/`global` = `'*'`. True per-thread scope is NOT modeled
   (`isArchitect` is always called with `channelId`) — channel is the finest practical
   grain; a project spanning multiple channels means running the grant in each (stated in
   help). User confirmed channel-only default.
@@ -1114,10 +1114,10 @@ behind a gating review") was written when the residual injection→in-worktree-R
 level a trusted team accepts, and most of M4's old weight either moves to the installer or drops.
 **No code changed yet — this is the plan.**
 
-**The framing (now recorded in DESIGN.md §1 "Distribution & trust model").** Conduit is
+**The framing (now recorded in DESIGN.md §1 "Distribution & trust model").** Condotto is
 open-source, self-hosted software: the deliverable is source + prebuilt binaries + install docs.
 The installer is a technical **architect** (expert in coding/servers, not necessarily the
-product's domain) who stands Conduit up for a small, mutually-trusting team and uses it to empower
+product's domain) who stands Condotto up for a small, mutually-trusting team and uses it to empower
 the *domain* experts (deep product knowledge, varying coding depth) to do real engineering —
 prototyping, design, speccing, bug fixes — through Slack. **Everyone with Slack-and-repo access is
 trusted, and enforcing that boundary is the installer's job, documented, not engineered against.**
@@ -1137,20 +1137,20 @@ authority machinery, only packaging + the docs that explain the model.
   workspace, and box, so it's cheap hygiene (a one-line `options.env` scrub + the existing policy
   floor as defense-in-depth), not the milestone's spine.
 
-**What M4 is now** (full list in DESIGN.md §8): single `conduit.toml`, install docs, worktree
-cleanup, `bun build --compile` binaries, operator `/conduit status` + the two slash-gap fixes + a
+**What M4 is now** (full list in DESIGN.md §8): single `condotto.toml`, install docs, worktree
+cleanup, `bun build --compile` binaries, operator `/condotto status` + the two slash-gap fixes + a
 sample service unit, plus env-scrub and background-task cost/cancellation as cheap riders.
 **Deferred past M4:** the read-only audit channel and symlink-realpath confinement (interim for the
 latter: don't let `ln -s` auto-approve).
 
-**Config decision — single `conduit.toml` (TOML).** Consolidates the scattered `.env` +
-`conduit.repos.json` + `conduit.roles.json` + `CONDUIT_*` into one file: `[slack]` tokens,
+**Config decision — single `condotto.toml` (TOML).** Consolidates the scattered `.env` +
+`condotto.repos.json` + `condotto.roles.json` + `CONDOTTO_*` into one file: `[slack]` tokens,
 `architects`, `[[repos]]`, `[defaults]` (model/effort/auto-approve/cost cap), and paths.
 **Format: TOML**, chosen over JSONC after a Bun-1.3.14 spike — `Bun.TOML.parse` is a built-in
 *string* parser (zero deps, clean try/catch errors), whereas Bun parses JSONC only via the
 module-import loader (`Bun.file().json()` and `JSON.parse` both throw on comments), so JSONC would
 cost either an awkward dynamic-import pattern or a `jsonc-parser` dep. TOML also reads best for
-Conduit's shallow config and is the format an architect expects (Cargo/pyproject). **Secrets live
+Condotto's shallow config and is the format an architect expects (Cargo/pyproject). **Secrets live
 in the one file** (gitignored, single-tenant, the architect owns the box) with **env-var
 overrides** for anyone who prefers to keep tokens out of the file. Runtime grants still persist in
 SQLite (`roles.source='grant'`); config architects seed from `[architects]` on boot (the existing
@@ -1159,43 +1159,43 @@ file to fill instead of four.
 
 **Build specifics settled during the 2026-07-19 consistency audit** (a completeness critic
 surfaced buildability gaps in the reframed §8 M4; these close them — judgment calls noted):
-- **Config is the single source of truth** — the legacy `.env`/`conduit.repos.json`/
-  `conduit.roles.json`/`CONDUIT_*` readers are *removed*, not kept for backward-compat; a manual
-  cutover covers the one live instance (Acme). Discovery at `./conduit.toml` (override
-  `--config`/`CONDUIT_CONFIG`); **boot-time validation** fails fast on missing/malformed required
-  fields. Ship a tracked, commented `conduit.example.toml`; `.gitignore` the real file (secrets
+- **Config is the single source of truth** — the legacy `.env`/`condotto.repos.json`/
+  `condotto.roles.json`/`CONDOTTO_*` readers are *removed*, not kept for backward-compat; a manual
+  cutover covers the one live instance (Acme). Discovery at `./condotto.toml` (override
+  `--config`/`CONDOTTO_CONFIG`); **boot-time validation** fails fast on missing/malformed required
+  fields. Ship a tracked, commented `condotto.example.toml`; `.gitignore` the real file (secrets
   live in it). `[[repos]]` enumerates the §5 fields; a `[paths]` block holds worktree root + DB.
 - **Binary** exposes `--config`/`--version`/`--help` and runs an **ordered SQLite `user_version`
   migration** on boot, so an in-place binary upgrade over a persistent store never strands it.
 - **Worktree GC respects park-and-resume** — it never collects a worktree bound to a live/parked
   session (only unreferenced ones, or a set interval after an *explicit* stop). Default `stop`
   keeps the tree (reactivation); an explicit clean variant removes it.
-- **`stop` targeting** is in-thread `@Conduit stop` (custom slash commands can't run in a thread);
-  channel-level `/conduit stop` lists or points to the thread.
-- **Env-scrub is a denylist** (drop `SLACK_*`/`CONDUIT_*`, preserve `PATH`/`HOME` + toolchain), not
+- **`stop` targeting** is in-thread `@Condotto stop` (custom slash commands can't run in a thread);
+  channel-level `/condotto stop` lists or points to the thread.
+- **Env-scrub is a denylist** (drop `SLACK_*`/`CONDOTTO_*`, preserve `PATH`/`HOME` + toolchain), not
   a wholesale `options.env` replacement (which would strip the toolchain and break agent builds).
 - **Background-task spend** counts against the per-thread runaway cap; cancellation via architect
-  `@Conduit cancel` + auto-cancel on cap breach.
+  `@Condotto cancel` + auto-cancel on cap breach.
 - **§4 reconciled:** "Credentials & blast radius" no longer frames scoped daemon creds as an M4
   build item (it's the installer's documented setup) and now notes the M4 agent-shell env-scrub;
-  the "if you sell this" line was softened (Conduit is OSS, not SaaS).
-- **`/conduit status` is daemon-wide** (across all channels, architect-only) — decided 2026-07-19.
+  the "if you sell this" line was softened (Condotto is OSS, not SaaS).
+- **`/condotto status` is daemon-wide** (across all channels, architect-only) — decided 2026-07-19.
   This changes today's channel-scoped `status`, so the operator view lists every session on the box.
 
 **Consequences:** DESIGN.md §1 (new "Distribution & trust model"), §2 (non-goal #3 sharpened), §4
 (credentials reconciled), §8 (M4 rewritten + build specifics folded in, plus two stale "until M4"
 forward-references fixed in build-time-safety and the M3 summary); CLAUDE.md M4 "Next up" +
-build-time-safety lines updated. Build starts with the `conduit.toml` refactor (`config.ts` /
+build-time-safety lines updated. Build starts with the `condotto.toml` refactor (`config.ts` /
 `daemon.ts` / `types.ts`) since the README documents it.
 
-## 2026-07-19 — M4 §1 complete: single `conduit.toml` (config consolidation)
+## 2026-07-19 — M4 §1 complete: single `condotto.toml` (config consolidation)
 
-**Implementation (DESIGN.md §8 M4 deliverable 1).** Conduit now reads ONE config file,
-`conduit.toml` (TOML via `Bun.TOML.parse`, zero deps), consolidating the former scattered
-`.env` + `conduit.repos.json` + `conduit.roles.json` + `CONDUIT_*`. A faithful superset of the
+**Implementation (DESIGN.md §8 M4 deliverable 1).** Condotto now reads ONE config file,
+`condotto.toml` (TOML via `Bun.TOML.parse`, zero deps), consolidating the former scattered
+`.env` + `condotto.repos.json` + `condotto.roles.json` + `CONDOTTO_*`. A faithful superset of the
 old `config.ts` parsing — a **consolidation, not a behavior change**. 268 tests (config suite 32),
 `tsc` + `check-ports` clean; verified by **actually booting the daemon against the real
-`conduit.toml`** (Slack Socket Mode connected, architect seeded from `architects=[…]`), plus the
+`condotto.toml`** (Slack Socket Mode connected, architect seeded from `architects=[…]`), plus the
 env-override and fail-fast boot paths.
 
 **Schema.** Top-level `architects = [...]`; `[slack]` `bot_token`/`app_token`; `[paths]`
@@ -1204,19 +1204,19 @@ env-override and fail-fast boot paths.
 old reader had — `name`/`path`/`default_branch`/`safe_bash_allowlist`/`test_cmd`/`land_cmd`/
 `deploy_cmd`/`cost_cap_usd`/`default_model`/`default_effort`/`trusted`/`auto_approve`. Snake_case
 (idiomatic TOML — Cargo/pyproject; the old JSON was camelCase, but this is a fresh file format).
-Tracked, commented `conduit.example.toml`; the real `conduit.toml` is gitignored (secrets live in it).
+Tracked, commented `condotto.example.toml`; the real `condotto.toml` is gitignored (secrets live in it).
 
 **Decisions / notes.**
-- **Discovery:** `--config <path>` (daemon argv) > `CONDUIT_CONFIG` env > `./conduit.toml`. A
+- **Discovery:** `--config <path>` (daemon argv) > `CONDOTTO_CONFIG` env > `./condotto.toml`. A
   `--config` with no/empty/flag-shaped value is an error, not a silent fall-through.
 - **Env overrides win over file values** for scalars (tokens, paths, caps, model/effort,
   auto-approve) — the documented M4 rule, so an operator can keep secrets out of the file.
 - **ONE deliberate exception — roles.** On a same-`(principal, scope)` collision the FILE wins
-  over the env `CONDUIT_ARCHITECTS` quick-list (matches the pre-M4 reader). Role assignments are
+  over the env `CONDOTTO_ARCHITECTS` quick-list (matches the pre-M4 reader). Role assignments are
   authority; a demote in the owned file must not be silently re-elevated by a leftover env entry.
   (The naive rewrite had inverted this to env-wins, elevation-only; review finding #1 restored it,
   and a regression test locks it.)
-- **Ports stayed sealed.** `loadConfig` returns the core domain `ConduitConfig` (NO Slack tokens);
+- **Ports stayed sealed.** `loadConfig` returns the core domain `CondottoConfig` (NO Slack tokens);
   a separate `loadSlackConfig` returns bare `{botToken, appToken}` strings for the composition root
   (`daemon.ts`) — no Slack TYPE crosses into core, and no `xoxb-`/`xapp-` literal appears in a
   `src/*.ts` (check-ports forbids both). `policy.ts` untouched.
@@ -1227,30 +1227,30 @@ Tracked, commented `conduit.example.toml`; the real `conduit.toml` is gitignored
   an actionable `Configuration error: …` and exits(1) — never a half-started daemon. Unknown keys
   **warn** (typo protection) rather than throw. `trusted` now validates as a real boolean (was
   silently coerced to false — review finding #4), matching `auto_approve`.
-- **Legacy readers removed** (single source of truth): `CONDUIT_REPOS_FILE`/`CONDUIT_ROLES_FILE`/
-  `conduit.repos.json`/`conduit.roles.json` parsing is gone. The throwaway-`testrepo` default,
-  `CONDUIT_TEST_REPO`, the roles reseed (`clearConfigRoles`), worktree pathing, and all downstream
+- **Legacy readers removed** (single source of truth): `CONDOTTO_REPOS_FILE`/`CONDOTTO_ROLES_FILE`/
+  `condotto.repos.json`/`condotto.roles.json` parsing is gone. The throwaway-`testrepo` default,
+  `CONDOTTO_TEST_REPO`, the roles reseed (`clearConfigRoles`), worktree pathing, and all downstream
   behavior are intact.
-- **Manual cutover of the one live instance (Acme):** `.env` + `conduit.repos.json` →
-  `./conduit.toml` (gitignored), the legacy files moved to `.bak`. A side effect: Bun no longer
-  auto-loads `.env`, so the Slack tokens now reach the adapter straight from `conduit.toml` and no
+- **Manual cutover of the one live instance (Acme):** `.env` + `condotto.repos.json` →
+  `./condotto.toml` (gitignored), the legacy files moved to `.bak`. A side effect: Bun no longer
+  auto-loads `.env`, so the Slack tokens now reach the adapter straight from `condotto.toml` and no
   longer transit `process.env` at all — a small security bonus that anticipates the M4 §5
   agent-shell env-scrub (the `SLACK_*` env-override path still works if an operator prefers it).
 
 **Adversarial review (5 dimensions — parity, security, TOML-edge, correctness, tests/docs — with
 refute-by-default verification, run as a multi-agent workflow).** 8 findings confirmed, ALL
 low-severity, ALL fixed before commit: (1) roles precedence inversion → restored file-wins +
-regression test; (2/6/8) stale `conduit.roles.json` references in the session-manager grant/revoke
-messages, the `store.ts` `RoleSource` comment, and DESIGN §2 → repointed at `conduit.toml`; (3/5)
+regression test; (2/6/8) stale `condotto.roles.json` references in the session-manager grant/revoke
+messages, the `store.ts` `RoleSource` comment, and DESIGN §2 → repointed at `condotto.toml`; (3/5)
 `--config` with no value silently fell back → now errors actionably; (4) `trusted` accepted a
-non-boolean silently → now fails fast; (7) restored the dropped `CONDUIT_ARCHITECTS` comma/space
+non-boolean silently → now fails fast; (7) restored the dropped `CONDOTTO_ARCHITECTS` comma/space
 split test. No high/med findings; the port boundary, the explicit-boolean `trusted`/`auto_approve`
 guards, architect-seeding integrity, and secrets handling all verified clean. (The verifier also
-noted the dev smoke scripts now need a `./conduit.toml` present — true, and satisfied on the dev
+noted the dev smoke scripts now need a `./condotto.toml` present — true, and satisfied on the dev
 box by the cutover; they never ran without a testrepo + auth anyway, so no change.)
 
 **Files:** `src/core/config.ts` (rewritten), `src/daemon.ts` (`parseConfigArg` + config/slack load
-+ messages), `conduit.example.toml` (new, tracked), `.gitignore`, `tests/config.test.ts`
++ messages), `condotto.example.toml` (new, tracked), `.gitignore`, `tests/config.test.ts`
 (rewritten, 32 tests), plus stale-reference fixes in `src/core/session-manager.ts`,
 `src/core/store.ts`, and `DESIGN.md` §2. **Next: M4 §2 — binary + schema migrations.**
 
@@ -1296,7 +1296,7 @@ arm64 / subscription OAuth, no `ANTHROPIC_API_KEY`).** Compiled two single-file 
 
 **Design consequence (shapes the §2 implementation):** the release is a **binary + its native
 `claude` companion**, not a lone 60MB file — the SDK's real runtime is a separate 236MB artifact.
-Two supported ways to supply it, resolved in the adapter: (a) `CONDUIT_CLAUDE_CLI=<path>` env
+Two supported ways to supply it, resolved in the adapter: (a) `CONDOTTO_CLAUDE_CLI=<path>` env
 override (point at any installed `claude`), and (b) a `claude` **sidecar next to the compiled
 binary** (the default release bundle), used only when the `$bunfs` signal says we're compiled. The
 true single-file **embed** (finding 3) is proven and documented as the optional recipe, but not the
@@ -1327,34 +1327,34 @@ Future schema changes append a new entry — **never edit the baseline** (a comm
 this). `ensureColumn` became a free function taking `db`.
 
 **(2) CLI (`daemon.ts` + `src/version.ts`).** `--version`/`-v` and `--help`/`-h` short-circuit at
-the top of `main()` **before any config load**, so they work without a valid `conduit.toml` and
+the top of `main()` **before any config load**, so they work without a valid `condotto.toml` and
 regardless of a malformed `--config` elsewhere on the line. Version is a single compiled-in constant
 in `src/version.ts` (a `bun build --compile` binary has no `package.json` beside it —
 `--compile-autoload-package-json` is off), kept in lockstep with `package.json` by
 `tests/version.test.ts`. `--help`'s program name comes from `basename(process.execPath)` when
-compiled (argv[1] is a `$bunfs` path) else the literal `conduit`.
+compiled (argv[1] is a `$bunfs` path) else the literal `condotto`.
 
 **(3) Native-CLI wiring (`adapters/claude-code/adapter.ts`).** `resolveClaudeCliPath()` sets the
-SDK's `pathToClaudeCodeExecutable` — priority `CONDUIT_CLAUDE_CLI` env → a `claude`/`claude.exe`
+SDK's `pathToClaudeCodeExecutable` — priority `CONDOTTO_CLAUDE_CLI` env → a `claude`/`claude.exe`
 sidecar next to `process.execPath` (gated on the `$bunfs` compiled-binary signal) → `undefined`
 (dev). Lazy-memoized so `--help`/`--version` never emit its warning. Under `bun run` it returns
 `undefined` and behavior is unchanged.
 
 **(4) Release story (`scripts/build-binary.ts` + `package.json` + `.gitignore`).** `bun run build`
-compiles the daemon and bundles the native `claude` beside it into `dist/<platform>/{conduit,
+compiles the daemon and bundles the native `claude` beside it into `dist/<platform>/{condotto,
 claude}`; `build:darwin-*`/`build:linux-*` cross-target the four macOS/Linux binaries. Host builds
 **discover** the installed native package by scanning `node_modules/@anthropic-ai/claude-agent-sdk-*`
 (glibc/musl-proof — `process.arch` can't tell them apart); a cross-target maps the target to its
 package and warns (non-fatal) if that platform's native isn't present (build it on a matching
-runner, or set `CONDUIT_CLAUDE_CLI`). `dist/` and Bun's `*.bun-build` scratch files are gitignored.
+runner, or set `CONDOTTO_CLAUDE_CLI`). `dist/` and Bun's `*.bun-build` scratch files are gitignored.
 
-**Verified by running it (not just `bun test`):** built `dist/darwin-arm64/{conduit(62MB),
+**Verified by running it (not just `bun test`):** built `dist/darwin-arm64/{condotto(62MB),
 claude(236MB)}`; the compiled binary's `--version`/`-v`/`--help`/`-h` and the fail-fast config-error
 path (`--config /nonexistent`, bare `--config`) all correct + exit(1). **Migration proven on a copy
-of the live `conduit.sqlite`:** `user_version` 0 → 1 with sessions/repos/roles/audit counts
+of the live `condotto.sqlite`:** `user_version` 0 → 1 with sessions/repos/roles/audit counts
 unchanged (1/2/1/109), idempotent on re-open. **Sidecar resolution proven from a CLEAN CWD** (no
 `node_modules` up-tree, stripped PATH, no API key): no-sidecar → the SDK's "Native CLI binary not
-found" error; sidecar-beside-binary → headless `"READY"`; `CONDUIT_CLAUDE_CLI` → `"READY"`. (An
+found" error; sidecar-beside-binary → headless `"READY"`; `CONDOTTO_CLAUDE_CLI` → `"READY"`. (An
 earlier "it works without a sidecar" was a test artifact — the SDK also falls back to a
 CWD-relative `node_modules`, so running the binary from the repo root masked the requirement.)
 
@@ -1368,7 +1368,7 @@ bundle with a misleading message → host builds now **discover** the installed 
 rather than guessing from `process.arch`. Both are out of the shipped macOS/Linux-glibc matrix
 (bounded latent bugs), but the fixes make the adapter and build script internally consistent. Refuted
 (correctly): "test name overclaims runner atomicity" (conditioned on a future refactor),
-"incomplete-bundle exits 0" (intended for cross-target + loud warning), "`CONDUIT_CLAUDE_CLI` honored
+"incomplete-bundle exits 0" (intended for cross-target + loud warning), "`CONDOTTO_CLAUDE_CLI` honored
 under `bun run` contradicts the contract" (intentional — only the *sidecar* is compiled-gated), and
 two about spike-file comments (not shipped code).
 
@@ -1408,7 +1408,7 @@ the insert.
 column (migration **v2**, plain forward `ALTER TABLE ADD COLUMN` — the runner guarantees
 exactly-once, so no `ensureColumn` gymnastics) records an explicit-clean-stop schedule.
 `collectWorktrees(now?, {orphanMinAgeMs?})` has two targets:
-  - **Clean-stopped, past retention** — a session ended with `@Conduit stop clean` whose grace window
+  - **Clean-stopped, past retention** — a session ended with `@Condotto stop clean` whose grace window
     elapsed: remove worktree + branch, then `deleteSession` DISCARDS the row (approvals + turns
     dropped in a transaction; the **audit_log is KEPT** — no FK, so the security trail survives a
     discard). Serialized through the per-session FIFO and **re-read there**, so a teardown can never
@@ -1420,7 +1420,7 @@ exactly-once, so no `ensureColumn` gymnastics) records an explicit-clean-stop sc
   query so a live/parked worktree can never surface. Reactivation (`assign` on a stopped session)
   **clears `cleanup_at`**, cancelling a pending teardown, and re-reads under the FIFO to bail
   gracefully if the GC discarded the row first (no false "reactivated"). Command surface:
-  `@Conduit stop clean` (slack adapter `parseMentionCommand` gets one strict arity rule); default
+  `@Condotto stop clean` (slack adapter `parseMentionCommand` gets one strict arity rule); default
   retention 24h (a `SessionManagerOptions` override).
 
 **(4) The GC-vs-create race (found in self-review, before the workflow, and independently
@@ -1457,7 +1457,7 @@ the v0-adoption test drops `cleanup_at` to faithfully reconstruct the pre-runner
 
 **Adversarial review** (5 lenses — invariant, teardown/fs-safety, migration/store, concurrency,
 UX/test-honesty — refute-by-default verification, run as a multi-agent workflow). **1 confirmed
-(low), 4 refuted.** Confirmed: the plain-stop message advertised `@Conduit stop clean` as a recovery
+(low), 4 refuted.** Confirmed: the plain-stop message advertised `@Condotto stop clean` as a recovery
 action, but the command was rejected on an already-stopped session (a dead-end). Fixed the *better*
 way — `stop clean` now schedules teardown on an already-stopped session too, so the advertised
 recovery is real (and a redundant plain re-stop gives a clear "already stopped" reply instead of "no
@@ -1472,20 +1472,20 @@ hit). Every park-and-resume, retention, teardown-confinement, and migration inva
 clean incl. already-stopped, orphan-leak fix, reactivation cancel + race guard, collectWorktrees +
 orphan grace, retentionLabel), `src/daemon.ts` (boot + periodic GC), `src/adapters/slack/adapter.ts`
 (`stop clean` parse), `tests/worktrees.test.ts` (new), `tests/session-manager.test.ts`,
-`tests/store.test.ts`, `tests/adapter-slack.test.ts`. **Next: M4 §4 — daemon-wide `/conduit status`
+`tests/store.test.ts`, `tests/adapter-slack.test.ts`. **Next: M4 §4 — daemon-wide `/condotto status`
 + slash fixes.**
 
-## 2026-07-19 — M4 §4 done: daemon-wide operator `/conduit status` + slash fixes
+## 2026-07-19 — M4 §4 done: daemon-wide operator `/condotto status` + slash fixes
 
-**What shipped.** `/conduit status` (the Slack SLASH command) is now a **daemon-wide, architect-only
+**What shipped.** `/condotto status` (the Slack SLASH command) is now a **daemon-wide, architect-only
 operator dashboard**, delivered as an **ephemeral** `respond` (never a public channel post): uptime,
 session counts across ALL channels (active/parked/stopped), turns-in-flight vs the concurrency cap, the
 daemon-wide pending-approval backlog, and a config summary (default model/effort, cost cap, auto-approve
-default, repo + architect counts). The in-thread **`@Conduit status`** mention is UNCHANGED — the
-channel-scoped session list, posted in-thread. **`/conduit stop`** (previously a near-no-op) now
-ephemerally lists the channel's live sessions and points the operator to the in-thread `@Conduit stop`
+default, repo + architect counts). The in-thread **`@Condotto status`** mention is UNCHANGED — the
+channel-scoped session list, posted in-thread. **`/condotto stop`** (previously a near-no-op) now
+ephemerally lists the channel's live sessions and points the operator to the in-thread `@Condotto stop`
 (custom slash commands can't run inside a thread; targeting a stop stays the mention, mirroring
-`@Conduit assign`). Both slash gaps from DESIGN §8-(5) closed: status is ephemeral (was public), stop is
+`@Condotto assign`). Both slash gaps from DESIGN §8-(5) closed: status is ephemeral (was public), stop is
 actionable (was silent).
 
 **Design — how the core stays Slack-free while replying ephemerally.** The reply must be ephemeral (a
@@ -1545,19 +1545,19 @@ Both riders were spiked FIRST on the real SDK (subscription/keychain OAuth, no A
 **Spike (a) — env-scrub the agent shell (`spikes/m4/env-scrub.ts`).** The SDK's `options.env`
 **REPLACES the subprocess environment entirely** (confirmed in `sdk.d.ts:1411` — "it is not merged
 with process.env"), so a wrong keep-list would break every turn. Test: plant poison secrets
-(`SLACK_BOT_TOKEN=xoxb-POISON`, `SLACK_APP_TOKEN`, `CONDUIT_POISON`) + a benign `MY_TOOLCHAIN_VAR` in
+(`SLACK_BOT_TOKEN=xoxb-POISON`, `SLACK_APP_TOKEN`, `CONDOTTO_POISON`) + a benign `MY_TOOLCHAIN_VAR` in
 the daemon env, build the **denylist** scrub (`{...process.env}` minus keys matching `^SLACK_` /
-`^CONDUIT_`), pass it as `options.env`, and have the agent's **Bash** echo those vars.
+`^CONDOTTO_`), pass it as `options.env`, and have the agent's **Bash** echo those vars.
 - **Result: PASS.** The Claude Code CLI **ran cleanly under the scrubbed env on keychain OAuth**
   (`subtype=success`, cost $0.186) — nothing load-bearing was dropped. The agent's shell saw
-  `slack=[]`, `conduit=[]` (secrets gone) but `tool=[toolchain-keepme]`, `home=[/Users/…]`,
+  `slack=[]`, `condotto=[]` (secrets gone) but `tool=[toolchain-keepme]`, `home=[/Users/…]`,
   `haspath=[yes]` (PATH/HOME/toolchain survived).
 - **Why keychain OAuth survives the scrub:** the CLI reaches macOS keychain creds via `HOME`
   (→ `~/.claude`), which the denylist preserves; there is no `CLAUDE_CODE_OAUTH_TOKEN`/
-  `ANTHROPIC_API_KEY` in this deployment, and neither would match the `SLACK_`/`CONDUIT_` prefixes
+  `ANTHROPIC_API_KEY` in this deployment, and neither would match the `SLACK_`/`CONDOTTO_` prefixes
   anyway (a headless box's `CLAUDE_CODE_OAUTH_TOKEN` is preserved). **Denylist is safe by
   construction** — it drops only our two namespaces and keeps everything the toolchain/CLI needs.
-- **Decision:** build the denylist exactly as specced (drop `SLACK_*`/`CONDUIT_*` by prefix). This is
+- **Decision:** build the denylist exactly as specced (drop `SLACK_*`/`CONDOTTO_*` by prefix). This is
   distinct from `CommandRunner`'s scrub (a fixed *name* list that also drops the Claude auth token,
   because a deploy command doesn't need it) — the AGENT shell MUST keep the Claude auth (the SDK needs
   it), so a prefix denylist (which never matches the auth token) is the right shape.
@@ -1590,7 +1590,7 @@ and `close()` (kills the subprocess); `task_progress` carries an **incremental**
   have the **adapter interrupt the detached task the moment that signal appears while a workflow is
   running** (the signal alone is inert for a detached task; the interrupt makes it real and bounds the
   overshoot to the checkpoint interval). Wire `HarnessSession.interrupt() → q.interrupt()` (currently a
-  no-op stub) so an architect `@Conduit cancel` and the inactivity watchdog can both halt a running
+  no-op stub) so an architect `@Condotto cancel` and the inactivity watchdog can both halt a running
   turn; drain the aborted result's `total_cost_usd` into the ledger on EVERY interrupt/timeout path
   (today the 10-min timeout records ZERO cost — the M3.6 watch-list bug). The live `task_progress`
   token signal is available but unused: it is per-task tokens, not dollars, and converting needs
@@ -1601,12 +1601,12 @@ and `close()` (kills the subprocess); `task_progress` carries an **incremental**
 
 **Implementation (DESIGN.md §8 M4, the two "cheap riders").** 320 tests (+15), `tsc` + `check-ports`
 clean, and BOTH riders verified end-to-end through the REAL adapter on subscription auth
-(`smoke:cancel`): the agent shell saw `slack=[] conduit=[]` (scrubbed) with `PATH`/`HOME`/toolchain
+(`smoke:cancel`): the agent shell saw `slack=[] condotto=[]` (scrubbed) with `PATH`/`HOME`/toolchain
 intact, and a live multi-agent workflow was cancelled mid-run with its **$1.54** spend drained into the
 notice.
 
 **(a) Env-scrub the agent shell (`claude-code` adapter).** Every turn's `options.env` is
-`scrubDaemonEnv(process.env)` — a **denylist** spread dropping keys matching `^SLACK_`/`^CONDUIT_` while
+`scrubDaemonEnv(process.env)` — a **denylist** spread dropping keys matching `^SLACK_`/`^CONDOTTO_` while
 preserving everything else (belt-and-braces over the §4 credential/secret hard-deny floor, which STAYS).
 Distinct from `CommandRunner`'s scrub (a fixed NAME list that also drops the Claude auth token, which a
 deploy command doesn't need) — the agent MUST keep the Claude auth, and a prefix denylist never matches
@@ -1617,14 +1617,14 @@ it. Spike-proven the CLI runs under keychain OAuth with the scrubbed env.
   lever that actually halts a DETACHED background workflow (`maxBudgetUsd` does not — spike b); it stores
   the in-flight `activeQuery` (cleared in a `finally`) and only sets `cancelRequested` when a query is
   live, so a cancel on an idle session is a clean no-op that can't taint the next turn.
-- **Drain-on-abort turn loop.** On any interrupt — inactivity timeout, `@Conduit cancel`, or a
+- **Drain-on-abort turn loop.** On any interrupt — inactivity timeout, `@Condotto cancel`, or a
   `maxBudgetUsd` breach that hit a RUNNING workflow — the loop stops the (possibly detached) task and
   drains the aborted result's `total_cost_usd` into the ledger, then posts ONE notice. Tolerates the
   SDK's post-abort pull throw (`[ede_diagnostic]`, spike b). Auto-cancel-on-breach = set `maxBudgetUsd`
   on workflow turns so the SDK emits the budget SIGNAL, which the adapter converts into a real
   `q.interrupt()` (the signal alone is inert for a detached task). Fixes the M3.6 watch-list bug where a
   wedged workflow recorded ZERO cost and could keep spending after the turn parked.
-- **`@Conduit cancel`** (new `CommandName`, architect-only, thread-scoped — mirrors `stop`): interrupts
+- **`@Condotto cancel`** (new `CommandName`, architect-only, thread-scoped — mirrors `stop`): interrupts
   the in-flight turn WITHOUT ending the session (session parks, thread continues). Gated on
   `status === "active"` (a genuinely running/spending turn; a semaphore-waiter is parked and hasn't
   spent). Slack `parseMentionCommand` + usage text + in-thread help updated.
@@ -1658,7 +1658,7 @@ confirmed (1 refuted), all fixed before commit:**
 - **(medium/low) Resume cap too broad.** The first cut capped EVERY resume in a workflow session,
   re-stranding ordinary approved near-budget actions (the M3 regression). Fixed with the workflow-launch-
   only cap above. Residual (documented): an already-AT-cap workflow-launch resume runs uncapped rather
-  than stranding the approved launch — its full spend is still drained, with `@Conduit cancel` + the
+  than stranding the approved launch — its full spend is still drained, with `@Condotto cancel` + the
   inactivity watchdog as backstops.
 - **Refuted (correctly):** the out-of-band cancel test does exercise the real drain path (the aborted
   result sets `abortReason="cancel"` and drains before the notice).
@@ -1682,33 +1682,33 @@ CommandName), `src/adapters/slack/adapter.ts` (parse + usage), `tests/adapter-cl
 section: no source changed, so the whole test/typecheck/ports surface stayed green
 (320 tests, `tsc` + `check-ports` clean). Deliverables:
 
-- **`README.md`** — the front-door runbook: what Conduit is → requirements →
+- **`README.md`** — the front-door runbook: what Condotto is → requirements →
   **install** (from source with Bun, or the `bun build --compile` binary + its
   `claude` sidecar, incl. keychain-vs-`setup-token` auth) → **create the Slack
   app** (a self-contained scope/token/event/slash/interactivity/invite checklist,
-  pointing to Appendix C for the rationale) → **copy & fill `conduit.toml`** (with a
+  pointing to Appendix C for the rationale) → **copy & fill `condotto.toml`** (with a
   glanceable schema block + env overrides) → **run** → a first-session walkthrough
   → a full **command reference** → the **trust model** (allow/gate/hard-deny, plus
-  how `@Conduit grant` + auto-approve let the architect empower domain experts,
+  how `@Condotto grant` + auto-approve let the architect empower domain experts,
   with the M3.8 residual risk stated plainly and the "not vs. a hostile insider /
   not multi-tenant / installer owns the boundary" scope) → an **operations** block
   (service units, **reading the SQLite audit log locally** since the Slack audit
   channel is deferred, upgrades/migrations, worktree GC, cost, backups,
   troubleshooting).
-- **`deploy/conduit.service`** (systemd) and **`deploy/com.conduit.daemon.plist`**
+- **`deploy/condotto.service`** (systemd) and **`deploy/com.condotto.daemon.plist`**
   (launchd LaunchAgent) — sample units with inline install steps. Design points:
   `Type=simple` + `KillSignal=SIGTERM` (the daemon exits 0 on SIGTERM), the token
-  in an `EnvironmentFile` not the unit, the `conduit`+`claude` sidecar kept
+  in an `EnvironmentFile` not the unit, the `condotto`+`claude` sidecar kept
   together, and a deliberate note NOT to over-harden (ProtectHome/ReadOnlyPaths
   would break the agent's toolchain + worktree writes); the launchd sample is a
   per-user LaunchAgent so keychain OAuth works without a token.
 
 **Verified by actually running the documented commands** (the repo's "re-run the
-real primitive" rule, adapted for docs): `./conduit --help` / `--version`;
+real primitive" rule, adapted for docs): `./condotto --help` / `--version`;
 `bun start -- --config <path>` / `-- --version` forward correctly; **all four
 audit-log SQL queries + `.backup`** run as written against the real
-`conduit.sqlite` (real `tool_call`/`approval_*`/`session_*` rows, real `detail`
-JSON, `json_extract` works); **`conduit.example.toml` fields match
+`condotto.sqlite` (real `tool_call`/`approval_*`/`session_*` rows, real `detail`
+JSON, `json_extract` works); **`condotto.example.toml` fields match
 `src/core/config.ts`** — proven by `loadConfig`/`loadSlackConfig` on the example
 producing ZERO "unrecognized key" warnings; `plutil -lint` OK on the plist and the
 systemd unit is well-formed INI.
@@ -1716,28 +1716,28 @@ systemd unit is well-formed INI.
 **Adversarial review (multi-agent workflow, 5 lenses — commands/CLI, audit/SQLite,
 install/build/auth, trust/security, service-units — refute-by-default, each finding
 citing exact source). 5 findings confirmed, ALL fixed before commit:**
-- **(high ×2)** The command-reference tables labeled `/conduit assign` and
-  `@Conduit assign` as runnable by "anyone" — but assignment is command authority
+- **(high ×2)** The command-reference tables labeled `/condotto assign` and
+  `@Condotto assign` as runnable by "anyone" — but assignment is command authority
   (`SessionManager.assign` refuses non-architects: "Only architects can assign
   sessions", session-manager.ts:492-495). The prose was right; the tables
   contradicted it — ship-blocking for a member audience. Fixed both rows to
   **architect** + a "who can do what" note (members converse; an architect
-  `@Conduit grant`s a PM to let them drive). (`@Conduit status` / `/conduit stop`
+  `@Condotto grant`s a PM to let them drive). (`@Condotto status` / `/condotto stop`
   confirmed genuinely open — left as "anyone".)
-- **(medium)** The systemd INSTALL steps wrote `/etc/conduit/env` via `tee` but only
-  created `/opt/conduit` — `tee` can't make parent dirs, so a fresh headless box
-  fails with ENOENT. Added `sudo mkdir -p /etc/conduit`.
+- **(medium)** The systemd INSTALL steps wrote `/etc/condotto/env` via `tee` but only
+  created `/opt/condotto` — `tee` can't make parent dirs, so a fresh headless box
+  fails with ENOENT. Added `sudo mkdir -p /etc/condotto`.
 - **(low ×2)** Audit-glossary imprecision: `approval_request` has TWO shapes (agent
   tool-gate → actor `agent`, `summary`/`concern`; land/deploy → actor the ordering
   architect's `slack:U…`, `kind`/`command`), and only `session_assigned` carries
   `repo`/`branch`/`worktree` (`session_stopped`/`session_reactivated` are empty or
   carry clean/cleanup fields). Both rows corrected against source.
 
-**M4 status: COMPLETE.** All six sections shipped (§1 single `conduit.toml`; §2
+**M4 status: COMPLETE.** All six sections shipped (§1 single `condotto.toml`; §2
 binaries + ordered schema migrations; §3 worktree cleanup; §4 operator
-`/conduit status` + slash fixes; §5 env-scrub + background cost/cancel; §6
+`/condotto status` + slash fixes; §5 env-scrub + background cost/cancel; §6
 README/runbook + service units). DESIGN.md §8 Milestone 4 marked ✅ DONE and
-CLAUDE.md updated. **The DESIGN.md §8 build plan (M0 → M4) is complete — Conduit is
+CLAUDE.md updated. **The DESIGN.md §8 build plan (M0 → M4) is complete — Condotto is
 an installable open-source beta.** Later work (fleet, shared session storage, a
 second surface/harness adapter, the deferred read-only Slack audit channel +
 symlink-realpath confinement) is post-beta, per DESIGN §8 "Later".

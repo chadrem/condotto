@@ -43,7 +43,7 @@ export interface Attachment {
 }
 
 // ---------------------------------------------------------------------------
-// Surface port — how humans reach Conduit
+// Surface port — how humans reach Condotto
 
 export type CommandName =
   | "assign"
@@ -86,7 +86,7 @@ export type InboundEvent =
       attachments: Attachment[];
       /** Decoration only — attacker-editable free text, never authority. */
       authorDisplayName?: string;
-      /** True when the author @-mentioned Conduit. Lets the core offer guidance
+      /** True when the author @-mentioned Condotto. Lets the core offer guidance
        *  (vs. staying silent) when someone pings an unassigned thread. */
       mentioned?: boolean;
     }
@@ -178,7 +178,7 @@ export interface SurfaceAdapter {
 }
 
 // ---------------------------------------------------------------------------
-// Harness port — how Conduit drives a coding agent
+// Harness port — how Condotto drives a coding agent
 
 export interface ToolCall {
   id: string;
@@ -231,7 +231,7 @@ export type TurnEvent =
   /**
    * The turn's final reply. `workflow` marks a turn that ran a multi-agent
    * workflow (M3.6), so the surface can append a terse "what ran + cost" summary
-   * footer — the synthesized text is the agent's; the footer is Conduit's.
+   * footer — the synthesized text is the agent's; the footer is Condotto's.
    */
   | { kind: "reply"; text: string; costUsd?: number; workflow?: boolean }
   /**
@@ -321,7 +321,7 @@ export interface HarnessCapabilities {
   imageInput: boolean;
   /**
    * Model tokens the architect may select (M3.5), e.g. ["opus","sonnet","fable"].
-   * The core validates an architect's `@Conduit model <x>` against this list —
+   * The core validates an architect's `@Condotto model <x>` against this list —
    * membership only, so it never needs to know SDK model IDs (kept in the adapter).
    */
   supportedModels: string[];
@@ -334,7 +334,7 @@ export interface HarnessAdapter {
   readonly capabilities: HarnessCapabilities;
   create(opts: { cwd: string; system: string }): Promise<HarnessSession>;
   /**
-   * `system` is re-supplied on every resume: the Conduit protocol prompt is
+   * `system` is re-supplied on every resume: the Condotto protocol prompt is
    * core policy, not session state, so a posture change (e.g. read-only → gated)
    * must reach existing sessions. The adapter must NOT freeze it in the handle.
    */
@@ -358,7 +358,7 @@ export interface RepoConfig {
   testCmd?: string;
   /**
    * The repo's land/deploy path (M3, DESIGN §2 journey 4). Architect-ordered
-   * (`@Conduit land` / `deploy`) and run by the daemon through the approval gate,
+   * (`@Condotto land` / `deploy`) and run by the daemon through the approval gate,
    * never by the agent's shell. Build-time safety: these are `echo`/no-ops on the
    * throwaway repo until M4 hardening. `undefined` = the action is unavailable.
    */
@@ -391,7 +391,7 @@ export interface RepoConfig {
   /**
    * Per-repo default for the M3.8 architect self-approve setting. Seeded onto
    * each new session (the architect can then toggle it per thread with
-   * `@Conduit auto-approve on|off`). `undefined` = fall back to the daemon-wide
+   * `@Condotto auto-approve on|off`). `undefined` = fall back to the daemon-wide
    * default (`SessionManagerOptions.defaultAutoApprove`, on by default).
    */
   autoApprove?: boolean;

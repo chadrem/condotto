@@ -38,7 +38,7 @@ async function testA(): Promise<{ readOk: boolean; writeBlocked: boolean; subHoo
       "Pass a `script` beginning with `export const meta = {...}` using agent()/parallel(). Report both results verbatim.",
     options: {
       cwd: wt.path,
-      systemPrompt: { type: "preset", preset: "claude_code", append: "Conduit diag3A. Workflow tool available. Terse." },
+      systemPrompt: { type: "preset", preset: "claude_code", append: "Condotto diag3A. Workflow tool available. Terse." },
       allowedTools: [],
       disallowedTools: ["ExitPlanMode", "SlashCommand", "WebFetch", "WebSearch"],
       permissionMode: "bypassPermissions",
@@ -88,7 +88,7 @@ async function testB(): Promise<{ deferred: boolean; fileWritten: boolean; sawDe
     prompt: "Use the Write tool to create a file DIAG3_MAIN_WRITE.txt containing 'hello' in the working tree. Just do it.",
     options: {
       cwd: wt.path,
-      systemPrompt: { type: "preset", preset: "claude_code", append: "Conduit diag3B. Terse." },
+      systemPrompt: { type: "preset", preset: "claude_code", append: "Condotto diag3B. Terse." },
       allowedTools: [],
       disallowedTools: ["ExitPlanMode", "SlashCommand", "WebFetch", "WebSearch", "Agent", "Task", "Workflow"],
       permissionMode: "bypassPermissions",

@@ -23,14 +23,14 @@ import { principalKey } from "./types";
 //     detach the prefix are stripped, so no content line can masquerade as a
 //     protocol line even if a layer above were bypassed.
 //
-// The system prompt (session-manager `conduitSystemPrompt`) states the contract:
+// The system prompt (session-manager `condottoSystemPrompt`) states the contract:
 // authority is the header `user=` id; everything inside the fence is data.
 
-const FENCE_PREFIX = "CONDUIT_BODY_";
+const FENCE_PREFIX = "CONDOTTO_BODY_";
 // The literal protocol header sentinel. Defanged in body content so no message
-// text can present a line that parses as a [conduit:event ...] header — even a
+// text can present a line that parses as a [condotto:event ...] header — even a
 // model that mentally un-escapes a literal "\n" into a line break (red-team).
-const HEADER_SENTINEL_RE = new RegExp("\\[conduit:", "gi");
+const HEADER_SENTINEL_RE = new RegExp("\\[condotto:", "gi");
 
 // Regexes built from ASCII escape strings (no literal control chars in source).
 // Every code point the model might render as a line break: CRLF, CR, VT, FF,
@@ -79,7 +79,7 @@ export function frameMessage(opts: {
     .replace(LINE_BREAKS_RE, "\n")
     .replace(CONTROLS_RE, "")
     .replace(BIDI_RE, "")
-    .replace(HEADER_SENTINEL_RE, "[ conduit:"); // space breaks the header prefix
+    .replace(HEADER_SENTINEL_RE, "[ condotto:"); // space breaks the header prefix
   // Defensive: an unguessable random fence can't collide, but never let a
   // literal fence marker survive inside the body region regardless.
   const safeBody = cleaned.split(fence).join("");
@@ -89,7 +89,7 @@ export function frameMessage(opts: {
     .join("\n");
 
   const header =
-    `[conduit:event v=1 kind=message user=${principalKey(opts.author)}` +
+    `[condotto:event v=1 kind=message user=${principalKey(opts.author)}` +
     `${name ? ` display_name="${name}"` : ""} body=${fence}]`;
 
   return [

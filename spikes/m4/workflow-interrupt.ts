@@ -15,14 +15,14 @@
 import { query } from "@anthropic-ai/claude-agent-sdk";
 import { WorktreeManager } from "../../src/core/worktrees";
 
-const TESTREPO = process.env.HOME + "/tmp/conduit-testrepo";
-const worktrees = new WorktreeManager(process.env.HOME + "/tmp/conduit-spike-worktrees");
+const TESTREPO = process.env.HOME + "/tmp/condotto-testrepo";
+const worktrees = new WorktreeManager(process.env.HOME + "/tmp/condotto-spike-worktrees");
 
 const READ = new Set(["Read", "Glob", "Grep", "TodoWrite"]);
 const SPAWN = new Set(["Agent", "Task", "Workflow"]);
 
 // A hook that allows the main Workflow launch + confined workflow-agent reads,
-// denies everything else — the real Conduit read-only posture.
+// denies everything else — the real Condotto read-only posture.
 function readOnlyHook(tag: string) {
   return async (hi: unknown) => {
     const h = hi as { tool_name?: string; agent_id?: string };
@@ -63,7 +63,7 @@ async function runWorkflow(opts: {
     prompt: WF_PROMPT,
     options: {
       cwd: wt.path,
-      systemPrompt: { type: "preset", preset: "claude_code", append: `Conduit ${opts.label}. Workflow tool available. Be thorough.` },
+      systemPrompt: { type: "preset", preset: "claude_code", append: `Condotto ${opts.label}. Workflow tool available. Be thorough.` },
       allowedTools: [],
       disallowedTools: ["ExitPlanMode", "SlashCommand", "WebFetch", "WebSearch"],
       permissionMode: "bypassPermissions",

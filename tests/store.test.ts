@@ -16,7 +16,7 @@ const baseSession = {
   worktree_path: "/tmp/wt/abc",
   harness_id: "claude-code",
   harness_session_handle: null,
-  branch: "conduit/abc",
+  branch: "condotto/abc",
   status: "active" as const,
 };
 
@@ -448,7 +448,7 @@ describe("store roles — runtime grants (M3.8)", () => {
   });
 
   test("the source column and grants survive a re-open of the same DB file (migration idempotent)", () => {
-    const dir = mkdtempSync(join(tmpdir(), "conduit-roles-"));
+    const dir = mkdtempSync(join(tmpdir(), "condotto-roles-"));
     const path = join(dir, "roles.sqlite");
     let store = new Store(path);
     store.setRole("slack:U_GRANT", "architect", "C1", "grant", "slack:U_BY");
@@ -466,7 +466,7 @@ describe("store schema migrations (M4 §2)", () => {
   // pin the runner's behavior to it.
   const CURRENT_SCHEMA_VERSION = 2;
 
-  const migPath = (name: string): string => join(mkdtempSync(join(tmpdir(), "conduit-mig-")), name);
+  const migPath = (name: string): string => join(mkdtempSync(join(tmpdir(), "condotto-mig-")), name);
   const userVersion = (path: string): number => {
     const db = new Database(path, { readonly: true });
     const v = db.query<{ user_version: number }, []>("PRAGMA user_version").get()!.user_version;
@@ -492,7 +492,7 @@ describe("store schema migrations (M4 §2)", () => {
   });
 
   test("adopting the runner over a pre-runner store (user_version 0, full schema) is lossless", () => {
-    // Faithful to the LIVE conduit.sqlite: the old ad-hoc bootstrap left every
+    // Faithful to the LIVE condotto.sqlite: the old ad-hoc bootstrap left every
     // table + column present but user_version at 0 (it never stamped). Build that
     // exact state, seed rows, then open with Store — it must carry to v1 and touch
     // no data.

@@ -118,7 +118,7 @@ const SUBAGENT_DEFS = {
       "Read-only exploration: reads, searches, and summarizes the codebase in parallel. " +
       "Use to investigate before the main agent makes changes.",
     prompt:
-      "You are a read-only exploration subagent for Conduit. Use Read/Glob/Grep to investigate " +
+      "You are a read-only exploration subagent for Condotto. Use Read/Glob/Grep to investigate " +
       "the working tree and report concise, specific findings (files, symbols, line numbers). You " +
       "cannot write files or run shell commands; if a change is needed, describe exactly what the " +
       "main agent should do. Stay within the working tree.",
@@ -161,7 +161,7 @@ const BATCH_GATE_DENY =
 /**
  * The SDK warns — with a full stack trace, on EVERY query() — that read-only
  * tools are "shadowed" from canUseTool by allowedTools
- * (CLAUDE_SDK_CAN_USE_TOOL_SHADOWED). For Conduit that is expected and correct:
+ * (CLAUDE_SDK_CAN_USE_TOOL_SHADOWED). For Condotto that is expected and correct:
  * read-only tools are auto-approved by allowedTools and confined by the
  * PreToolUse hook, so they must never reach the deny-by-default canUseTool
  * backstop — only gated tools do (see DECISIONS.md). Left alone it masquerades
@@ -209,7 +209,7 @@ const DRAIN_AFTER_ABORT_MS = 30_000;
  * M4 §5 rider (a): env-scrub the agent shell. The SDK's `options.env` REPLACES the
  * subprocess environment entirely (sdk.d.ts:1411), so this is a DENYLIST over a
  * spread of `process.env`: drop the daemon's own secret namespaces (`SLACK_*`,
- * `CONDUIT_*`) so an in-worktree Bash command can never read the daemon's Slack
+ * `CONDOTTO_*`) so an in-worktree Bash command can never read the daemon's Slack
  * tokens or config from its own environ, while PRESERVING everything the toolchain
  * and the Claude Code CLI need — `PATH`/`HOME`, the repo's build env, and the Claude
  * auth token (which never matches these prefixes, so keychain OAuth AND a headless
@@ -219,7 +219,7 @@ const DRAIN_AFTER_ABORT_MS = 30_000;
  * drops a fixed NAME list incl. the Claude auth token because a deploy command,
  * unlike the agent, does not need it.
  */
-const DAEMON_SECRET_ENV_PREFIXES = ["SLACK_", "CONDUIT_"];
+const DAEMON_SECRET_ENV_PREFIXES = ["SLACK_", "CONDOTTO_"];
 export function scrubDaemonEnv(base: NodeJS.ProcessEnv): Record<string, string> {
   const out: Record<string, string> = {};
   for (const [k, v] of Object.entries(base)) {
@@ -243,7 +243,7 @@ function abortNotice(reason: AbortReason, sawWorkflow: boolean, costUsd: number 
     case "budget":
       return (
         `I hit this thread's cost budget and stopped ${what}${spent}. ` +
-        `An architect can raise it with \`@Conduit budget <usd>\` to continue.`
+        `An architect can raise it with \`@Condotto budget <usd>\` to continue.`
       );
   }
 }
@@ -270,21 +270,21 @@ function isCompiledBinary(): boolean {
  * can't: the SDK resolves its native CLI relative to a `$bunfs` path no child
  * process can exec, and the 236MB per-platform package was never bundled (M4 §2
  * spike). So when compiled, point the SDK at a real `claude`, in priority order:
- *   1. CONDUIT_CLAUDE_CLI — explicit operator override (any installed `claude`,
+ *   1. CONDOTTO_CLAUDE_CLI — explicit operator override (any installed `claude`,
  *      or a custom sidecar path). `extractFromBunfs` is a no-op on a real path
  *      and future-proofs an embedded (`type: "file"` → `$bunfs`) path pointed here.
  *   2. a `claude` sidecar next to the compiled binary — the default release
- *      bundle (`conduit` + `claude` shipped together).
+ *      bundle (`condotto` + `claude` shipped together).
  * Gated on the compiled-binary signal so a dev box with Claude Code installed
  * next to `bun` (e.g. /opt/homebrew/bin/claude) is never silently picked up.
  */
 function resolveClaudeCliPath(): string | undefined {
-  const override = process.env.CONDUIT_CLAUDE_CLI?.trim();
+  const override = process.env.CONDOTTO_CLAUDE_CLI?.trim();
   if (override) {
     const resolved = extractFromBunfs(override);
     if (existsSync(resolved)) return resolved;
     console.warn(
-      `[claude-code] CONDUIT_CLAUDE_CLI="${override}" does not exist — ignoring it and falling ` +
+      `[claude-code] CONDOTTO_CLAUDE_CLI="${override}" does not exist — ignoring it and falling ` +
         `back to the SDK's own CLI resolution.`,
     );
   }
@@ -297,8 +297,8 @@ function resolveClaudeCliPath(): string | undefined {
     if (existsSync(sidecar)) return sidecar;
     console.warn(
       `[claude-code] running as a compiled binary but found no '${claudeName}' CLI beside it ` +
-        `(${dirname(process.execPath)}) and CONDUIT_CLAUDE_CLI is unset — the agent runtime will ` +
-        `fail to start. Ship the native '${claudeName}' next to the binary or set CONDUIT_CLAUDE_CLI.`,
+        `(${dirname(process.execPath)}) and CONDOTTO_CLAUDE_CLI is unset — the agent runtime will ` +
+        `fail to start. Ship the native '${claudeName}' next to the binary or set CONDOTTO_CLAUDE_CLI.`,
     );
   }
   return undefined;
@@ -317,7 +317,7 @@ class ClaudeCodeSession implements HarnessSession {
   constructor(
     private _handle: ClaudeCodeHandle,
     private cwd: string,
-    /** Conduit protocol prompt (preset append). Supplied fresh each turn. */
+    /** Condotto protocol prompt (preset append). Supplied fresh each turn. */
     private system: string,
     /** The SDK query function (injectable for tests). */
     private queryFn: QueryFn,
@@ -380,7 +380,7 @@ class ClaudeCodeSession implements HarnessSession {
             ? { permissionDecision: "deny" as const, permissionDecisionReason: decision.reason }
             : {
                 permissionDecision: "defer" as const,
-                permissionDecisionReason: "Gated by Conduit — awaiting an architect's approval.",
+                permissionDecisionReason: "Gated by Condotto — awaiting an architect's approval.",
               };
       return { hookSpecificOutput: { hookEventName: "PreToolUse" as const, ...out } };
     };
@@ -434,7 +434,7 @@ class ClaudeCodeSession implements HarnessSession {
       options: {
         cwd: this.cwd,
         resume: this._handle.sessionId ?? undefined,
-        // M4 §5 rider (a): scrub the daemon's own SLACK_*/CONDUIT_* secrets from the
+        // M4 §5 rider (a): scrub the daemon's own SLACK_*/CONDOTTO_* secrets from the
         // environment the agent's Bash inherits (belt-and-braces over the §4 policy
         // floor). options.env REPLACES the subprocess env, so this is a denylist
         // spread of process.env that keeps PATH/HOME + the toolchain + the Claude
@@ -477,7 +477,7 @@ class ClaudeCodeSession implements HarnessSession {
       },
     });
 
-    // Expose the running query so an out-of-band interrupt() (architect `@Conduit
+    // Expose the running query so an out-of-band interrupt() (architect `@Condotto
     // cancel`, M4 §5) can reach it. Cleared in the finally.
     this.activeQuery = q;
     let sawResult = false;
@@ -492,7 +492,7 @@ class ClaudeCodeSession implements HarnessSession {
     let sawWorkflow = false;
     let lastWorkflowDesc = "";
     // M4 §5 rider (b): when a turn is interrupted — inactivity timeout, an architect
-    // `@Conduit cancel`, or a budget breach that hit a RUNNING workflow — we stop the
+    // `@Condotto cancel`, or a budget breach that hit a RUNNING workflow — we stop the
     // (possibly detached) background task and DRAIN the aborted result's cost into the
     // ledger, then post one notice. `q.interrupt()` is the only lever that actually
     // halts a detached workflow (maxBudgetUsd does NOT — spike b), and the aborted
@@ -582,7 +582,7 @@ class ClaudeCodeSession implements HarnessSession {
           // error (incl. error_max_budget_usd) — so the core's cost ledger and
           // runaway cap count all of them (verified against SDKResult* types).
           const cost = typeof m.total_cost_usd === "number" ? m.total_cost_usd : undefined;
-          // An architect `@Conduit cancel` interrupted this turn out-of-band: the SDK
+          // An architect `@Condotto cancel` interrupted this turn out-of-band: the SDK
           // now emits an aborted result. Capture its cost and report the cancellation.
           if (this.cancelRequested && !abortReason) abortReason = "cancel";
           // Already aborting (cancel/timeout, or a budget breach handled just below):
@@ -687,7 +687,7 @@ class ClaudeCodeSession implements HarnessSession {
       throw err;
     } finally {
       // The query is done (or being abandoned) — stop routing interrupts to it so a
-      // later `@Conduit cancel` on an idle session is a clean no-op, not a stray abort.
+      // later `@Condotto cancel` on an idle session is a clean no-op, not a stray abort.
       if (this.activeQuery === q) this.activeQuery = null;
     }
     // A turn that produced no result at all (and wasn't an intentional abort) is an
@@ -703,7 +703,7 @@ class ClaudeCodeSession implements HarnessSession {
    * Interrupt the in-flight turn's query (M4 §5): halts a wedged/over-cap multi-agent
    * workflow — `q.interrupt()` is the only lever that actually stops the DETACHED
    * background task (spike b) — and lets the turn loop drain the aborted result's
-   * cost. A no-op when no turn is running, so an architect `@Conduit cancel` on an
+   * cost. A no-op when no turn is running, so an architect `@Condotto cancel` on an
    * idle session does nothing. Only sets `cancelRequested` when a query is actually
    * live, so it can never taint a subsequent normal turn.
    */

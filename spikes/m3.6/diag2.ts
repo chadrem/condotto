@@ -31,7 +31,7 @@ const q = query({
     "Pass a `script` beginning with `export const meta = {...}` using agent()/parallel(). Report both agents' results verbatim.",
   options: {
     cwd: worktree.path,
-    systemPrompt: { type: "preset", preset: "claude_code", append: "You are Conduit diag2. You have the Workflow tool. Be terse." },
+    systemPrompt: { type: "preset", preset: "claude_code", append: "You are Condotto diag2. You have the Workflow tool. Be terse." },
     allowedTools: [],
     disallowedTools: ["ExitPlanMode", "SlashCommand", "WebFetch", "WebSearch"],
     // The only lever that can make background workflow agents run at all:

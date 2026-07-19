@@ -1,12 +1,12 @@
-# conduit.example.toml — Conduit's single configuration file.
+# condotto.example.toml — Condotto's single configuration file.
 #
-# Copy this to `conduit.toml` and fill it in:
+# Copy this to `condotto.toml` and fill it in:
 #
-#     cp conduit.example.toml conduit.toml
+#     cp condotto.example.toml condotto.toml
 #
-# `conduit.toml` is gitignored because it holds secrets (the Slack tokens live
+# `condotto.toml` is gitignored because it holds secrets (the Slack tokens live
 # right here). This is the ONE file to configure — it replaces the old scattered
-# .env / conduit.repos.json / conduit.roles.json / CONDUIT_* setup.
+# .env / condotto.repos.json / condotto.roles.json / CONDOTTO_* setup.
 #
 # Every value can also be supplied (or overridden) by an environment variable;
 # the env var always wins. Those overrides are noted inline. Paths may start with
@@ -22,7 +22,7 @@
 # and (M3.8) auto-approve their own turns + delegate roles at runtime.
 # Find a user's ID in Slack: profile → ⋯ → "Copy member ID".
 # WITHOUT at least one architect, no one can approve gated actions.
-# Env override/append: CONDUIT_ARCHITECTS (comma/space separated).
+# Env override/append: CONDOTTO_ARCHITECTS (comma/space separated).
 architects = [
   # "slack:U0123ABC",
 ]
@@ -37,17 +37,17 @@ app_token = "xapp-your-app-token"   # App-Level Token for Socket Mode (starts xa
 # Optional richer role mappings beyond the architects above — e.g. a member
 # locked to one channel's scope, or an observer. Most setups don't need this;
 # `architects` above is the quick path. Roles delegated at runtime with
-# `@Conduit grant` persist in SQLite and are NOT listed here.
+# `@Condotto grant` persist in SQLite and are NOT listed here.
 # [[roles]]
 # principal = "slack:U0000AAA"
 # role = "member"          # architect | member | observer
 # scope = "C0123CHANNEL"   # a Slack channel id, or "*" for everywhere (default)
 
 # ---------------------------------------------------------------------------
-# Filesystem paths. Env overrides: CONDUIT_DB_PATH / CONDUIT_WORKTREES_ROOT.
+# Filesystem paths. Env overrides: CONDOTTO_DB_PATH / CONDOTTO_WORKTREES_ROOT.
 [paths]
-db = "conduit.sqlite"                    # SQLite store (audit log, sessions, roles)
-worktrees_root = "~/tmp/conduit-worktrees"  # where per-session git worktrees live
+db = "condotto.sqlite"                    # SQLite store (audit log, sessions, roles)
+worktrees_root = "~/tmp/condotto-worktrees"  # where per-session git worktrees live
                                             # (absolute & stable — moving a live
                                             #  session's worktree loses the session)
 
@@ -55,28 +55,28 @@ worktrees_root = "~/tmp/conduit-worktrees"  # where per-session git worktrees li
 # Daemon-wide defaults. Each is used when a repo (below) doesn't set its own.
 [defaults]
 model = "opus"              # implementer model token: opus | sonnet | fable.
-                            #   Env override: CONDUIT_DEFAULT_MODEL
+                            #   Env override: CONDOTTO_DEFAULT_MODEL
 effort = "high"             # reasoning effort: low | medium | high | xhigh | max.
-                            #   Env override: CONDUIT_DEFAULT_EFFORT
+                            #   Env override: CONDOTTO_DEFAULT_EFFORT
 auto_approve = true         # M3.8: architect-initiated turns skip the Approve
                             #   click (the mechanical hard-deny floor still holds).
-                            #   Env override: CONDUIT_AUTO_APPROVE=off|false|0|no
+                            #   Env override: CONDOTTO_AUTO_APPROVE=off|false|0|no
 cost_cap_usd = 10           # per-thread cost ceiling; a runaway thread pauses here.
-                            #   Env override: CONDUIT_COST_CAP_USD
+                            #   Env override: CONDOTTO_COST_CAP_USD
 max_concurrent_turns = 6    # cap on harness turns running at once across all
-                            #   sessions. Env override: CONDUIT_MAX_CONCURRENT_TURNS
+                            #   sessions. Env override: CONDOTTO_MAX_CONCURRENT_TURNS
 
 # ---------------------------------------------------------------------------
-# Repos Conduit can be pointed at. Assign one with `/conduit assign <name>`.
+# Repos Condotto can be pointed at. Assign one with `/condotto assign <name>`.
 #
-# The throwaway "testrepo" (~/tmp/conduit-testrepo, env override CONDUIT_TEST_REPO)
+# The throwaway "testrepo" (~/tmp/condotto-testrepo, env override CONDOTTO_TEST_REPO)
 # is registered automatically; a [[repos]] entry named "testrepo" overrides it.
 # Sessions only ever see COMMITTED content (each runs in a fresh git worktree), so
 # a repo's working tree, untracked files, and .gitignored files are never visible
 # to the agent.
 #
 # [[repos]]
-# name = "webapp"                 # simple identifier used by /conduit assign
+# name = "webapp"                 # simple identifier used by /condotto assign
 # path = "~/Projects/webapp"      # absolute path to the git repo (required)
 # default_branch = "main"         # base branch for session worktrees (default "main")
 # trusted = false                 # true loads the repo's own CLAUDE.md/skills/.claude
@@ -87,9 +87,9 @@ max_concurrent_turns = 6    # cap on harness turns running at once across all
 # ]
 # test_cmd = "bun test"           # the repo's test command — auto-run so the agent
 #                                 #   can verify its own work without approval.
-# land_cmd = "make land"          # architect-ordered `@Conduit land`, run by the
+# land_cmd = "make land"          # architect-ordered `@Condotto land`, run by the
 #                                 #   daemon through the gate (never the agent shell).
-# deploy_cmd = "make deploy"      # architect-ordered `@Conduit deploy`, same handling.
+# deploy_cmd = "make deploy"      # architect-ordered `@Condotto deploy`, same handling.
 # cost_cap_usd = 25               # per-thread cost ceiling for this repo
 #                                 #   (overrides [defaults].cost_cap_usd).
 # default_model = "sonnet"        # per-repo default model token (overrides [defaults]).

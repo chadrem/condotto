@@ -5,9 +5,9 @@ state summary; the authority is still DESIGN.md (§8 build plan) + DECISIONS.md.
 
 ---
 
-Continue Conduit development. Read DESIGN.md in full first, then DECISIONS.md and
+Continue Condotto development. Read DESIGN.md in full first, then DECISIONS.md and
 CLAUDE.md — they are current and describe everything below. Everything is
-committed AND pushed to origin/main (github.com/chadrem/conduit).
+committed AND pushed to origin/main (github.com/chadrem/condotto).
 
 **State:** Milestones 0, 1, and 2 are DONE. M2 (policy engine + defer-based
 approval loop + roles) is complete, adversarially reviewed, and verified LIVE in
@@ -27,8 +27,8 @@ proves defer→approve→cross-process-resume→execute (`bun run smoke:gate` th
   pending-approval guard); `store.ts` (bun:sqlite WAL; sessions/roles/approvals/
   audit_log/turns; UNIQUE(surface_id,conversation_id); roleOf/isArchitect,
   approvals keyed by tool_use_id, tryActivate, expirePendingApprovals, clearRoles,
-  listAudit); `config.ts` (repos + roles from CONDUIT_ARCHITECTS /
-  conduit.roles.json; DEFAULT_SAFE_BASH_ALLOWLIST); `worktrees.ts`; `framing.ts`
+  listAudit); `config.ts` (repos + roles from CONDOTTO_ARCHITECTS /
+  condotto.roles.json; DEFAULT_SAFE_BASH_ALLOWLIST); `worktrees.ts`; `framing.ts`
   (A1).
 - `src/adapters/claude-code/adapter.ts` (Agent SDK: gate->PreToolUse defer,
   canUseTool deny-by-default backstop, deferred_tool_use detection, system prompt
@@ -52,18 +52,18 @@ proves defer→approve→cross-process-resume→execute (`bun run smoke:gate` th
 - The system prompt is core policy, re-supplied on create AND resume (never frozen
   in the harness handle) — a posture change must reach existing sessions.
 - `@slack/bolt` is PINNED to 4.x (5.x breaks under Bun). Slash commands can't run
-  in threads: `/conduit assign` posts an anchor message; `@Conduit assign` claims
+  in threads: `/condotto assign` posts an anchor message; `@Condotto assign` claims
   an existing thread. Socket Mode auto-enables Slack Interactivity.
 - Roles are config-authoritative (clearRoles + reseed at boot). The architect is
-  seeded via `CONDUIT_ARCHITECTS=slack:UJYA5CHRA` in `.env` (gitignored) — the demo
+  seeded via `CONDOTTO_ARCHITECTS=slack:UJYA5CHRA` in `.env` (gitignored) — the demo
   is ready to run.
 - Development runs in the REAL company workspace (Acme); prefer a test
-  channel. `/conduit assign` with no repo defaults to the throwaway `testrepo`.
+  channel. `/condotto assign` with no repo defaults to the throwaway `testrepo`.
 
 **BUILD-TIME SAFETY** (still in force — this shapes M3): point sessions only at
 the throwaway `testrepo` for anything that writes; wire land/deploy as no-ops/echo
 FIRST; never a real repo's real deploy path until M4 hardening + gating review.
-Real repos are registered in `conduit.repos.json` but for read-leaning use only.
+Real repos are registered in `condotto.repos.json` but for read-leaning use only.
 So M3 builds the test/land/deploy MECHANISM and demos it on `testrepo` with
 land/deploy as gated echo/no-ops; real repo + real deploy is M4.
 

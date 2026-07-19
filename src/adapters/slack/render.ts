@@ -43,8 +43,8 @@ export function renderMrkdwn(markdown: string): string {
 
 // -- approval rendering (Block Kit) -----------------------------------------
 
-export const APPROVE_ACTION = "conduit_approve";
-export const DENY_ACTION = "conduit_deny";
+export const APPROVE_ACTION = "condotto_approve";
+export const DENY_ACTION = "condotto_deny";
 
 const MAX_DETAIL_CHARS = 2_500; // well under Slack's 3000-char section text limit
 
@@ -74,8 +74,8 @@ function approvalDetail(toolName: string, input: unknown): string | null {
       return str(i.file_path || i.notebook_path) || null;
     case "WebFetch":
       return str(i.url) || null;
-    case "conduit:land":
-    case "conduit:deploy":
+    case "condotto:land":
+    case "condotto:deploy":
       // Show the exact repo command the architect is approving to run.
       return str(i.command) || null;
     default: {
@@ -109,7 +109,7 @@ export function approvalBlocks(req: ApprovalPrompt): { text: string; blocks: unk
   }
   blocks.push({
     type: "actions",
-    block_id: `conduit_approval:${req.requestId}`,
+    block_id: `condotto_approval:${req.requestId}`,
     elements: [
       {
         type: "button",
@@ -151,7 +151,7 @@ export function resolveApprovalMessage(
 
 // -- guided choice rendering (M3.1) -----------------------------------------
 
-export const CHOICE_ACTION = "conduit_choice";
+export const CHOICE_ACTION = "condotto_choice";
 
 /**
  * A guided choice as a question plus one button per option. `block_id` carries

@@ -3,7 +3,7 @@
   "configVersion": 1,
   "workspaces": {
     "": {
-      "name": "conduit",
+      "name": "condotto",
       "dependencies": {
         "@anthropic-ai/claude-agent-sdk": "^0.3.214",
         "@slack/bolt": "^4",

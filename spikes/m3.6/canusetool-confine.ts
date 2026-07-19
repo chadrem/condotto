@@ -120,7 +120,7 @@ async function runWorkflow(worktree: string, writeMode: boolean, prompt: string)
       prompt,
       options: {
         cwd: worktree,
-        systemPrompt: { type: "preset", preset: "claude_code", append: "You are Conduit (M3.6 workflow spike). You have the Workflow tool. Be terse." },
+        systemPrompt: { type: "preset", preset: "claude_code", append: "You are Condotto (M3.6 workflow spike). You have the Workflow tool. Be terse." },
         // DECISIVE CHANGE (vs M3.5): reads are NOT in allowedTools. In allowedTools
         // they are "auto-approved before the callback is consulted" — which for
         // workflow SUB-agents shadows our hook AND denies them invisibly. Removing

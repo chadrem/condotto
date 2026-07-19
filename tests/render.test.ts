@@ -58,7 +58,7 @@ describe("approvalBlocks", () => {
     });
     expect(text).toContain("Approval needed");
     const actions = buttons(blocks);
-    expect(actions.block_id).toBe("conduit_approval:req-1");
+    expect(actions.block_id).toBe("condotto_approval:req-1");
     const [approve, deny] = actions.elements;
     expect(approve.action_id).toBe(APPROVE_ACTION);
     expect(approve.value).toBe("req-1");
@@ -138,7 +138,7 @@ describe("choiceBlocks (M3.1 guided choice)", () => {
   });
 
   test("parseChoiceBlockId rejects foreign block ids", () => {
-    expect(parseChoiceBlockId("conduit_approval:req-1")).toBeNull();
+    expect(parseChoiceBlockId("condotto_approval:req-1")).toBeNull();
     expect(parseChoiceBlockId(undefined)).toBeNull();
   });
 

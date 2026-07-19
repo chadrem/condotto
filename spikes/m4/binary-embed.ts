@@ -13,8 +13,8 @@
 // host IS darwin-arm64; the shippable adapter selects the platform package at
 // build time (see DECISIONS.md M4 §2).
 //
-// Build: bun build --compile spikes/m4/binary-embed.ts --outfile /tmp/conduit-embed
-// Run:   /tmp/conduit-embed
+// Build: bun build --compile spikes/m4/binary-embed.ts --outfile /tmp/condotto-embed
+// Run:   /tmp/condotto-embed
 
 // @ts-expect-error — Bun `type: "file"` embed import; darwin-arm64-only in this spike.
 import claudeEmbeddedPath from "@anthropic-ai/claude-agent-sdk-darwin-arm64/claude" with { type: "file" };
@@ -38,7 +38,7 @@ const exe = extractFromBunfs(claudeEmbeddedPath as unknown as string);
 console.log("[embed] extracted CLI path:", exe);
 if (!existsSync(exe)) fail(`extracted CLI path does not exist: ${exe}`);
 
-const cwd = mkdtempSync(join(tmpdir(), "conduit-embed-"));
+const cwd = mkdtempSync(join(tmpdir(), "condotto-embed-"));
 let subtype = "";
 let reply = "";
 let cost: number | undefined;

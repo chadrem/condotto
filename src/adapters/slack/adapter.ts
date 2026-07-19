@@ -36,7 +36,7 @@ export interface SurfaceAuthority {
 }
 
 /**
- * Core-provided operator queries for the `/conduit` slash console (M4 §4). Both
+ * Core-provided operator queries for the `/condotto` slash console (M4 §4). Both
  * are synchronous, read-only text renderers the core owns — the adapter only
  * decides HOW to deliver them (an ephemeral `respond`, so a channel is never
  * spammed). Same injection shape as `SurfaceAuthority`: the composition root wires
@@ -46,12 +46,12 @@ export interface OperatorConsole {
   /** Daemon-wide operator dashboard; returns the refusal line for non-architects
    *  (authority is decided in the core, not trusted from here). */
   operatorStatus(author: Principal, channelId: string): string;
-  /** This channel's live sessions + how to stop one in-thread (`/conduit stop`). */
+  /** This channel's live sessions + how to stop one in-thread (`/condotto stop`). */
   channelStopGuidance(channelId: string): string;
 }
 
 /**
- * The ephemeral text a `/conduit <sub>` slash command should `respond` with, or
+ * The ephemeral text a `/condotto <sub>` slash command should `respond` with, or
  * null when the sub-command is NOT an ephemeral console query (assign, unknown) and
  * the caller handles it. Pure and module-level so the console routing is unit-
  * testable without a live Bolt App (M4 §4).
@@ -88,11 +88,11 @@ export function slashEphemeralText(
 // in DECISIONS.md): custom slash commands CANNOT be invoked inside a message
 // thread — the client only offers them at top level, and the payload carries
 // no thread context. So:
-//   /conduit assign        -> creates a NEW conversation: we post an anchor
+//   /condotto assign        -> creates a NEW conversation: we post an anchor
 //                             message and its ts becomes the thread root.
-//   @Conduit assign        -> assigns the EXISTING thread the mention is in
+//   @Condotto assign        -> assigns the EXISTING thread the mention is in
 //                             (app_mention events do carry thread_ts).
-//   @Conduit stop|status   -> thread-scoped commands.
+//   @Condotto stop|status   -> thread-scoped commands.
 
 const SURFACE_ID = "slack";
 
@@ -113,7 +113,7 @@ function threadTsOf(conv: ConversationRef): string | undefined {
  * Resolve a linkified Slack user mention ("<@U0ABBY>" or "<@U0ABBY|abby>") to a
  * domain principal key ("slack:U0ABBY"). Returns null for plain text, a malformed
  * token, or a mention of the bot itself — so no raw Slack id shape ever crosses the
- * port, and a `grant` can never target Conduit. Built via `principalKey` so the key
+ * port, and a `grant` can never target Condotto. Built via `principalKey` so the key
  * format stays in lockstep with the core (M3.8). Pure (no `this`) for unit testing.
  */
 export function resolveUserMention(token: string, botUserId: string | null): string | null {
@@ -124,9 +124,9 @@ export function resolveUserMention(token: string, botUserId: string | null): str
 }
 
 /**
- * Parse an `@Conduit …` mention into a command (or null = conversation/help).
+ * Parse an `@Condotto …` mention into a command (or null = conversation/help).
  * Pure and module-level (no `this`) so it is unit-testable without a live Bolt App.
- * Deliberately strict, arity-checked word forms so ordinary prose ("@Conduit take a
+ * Deliberately strict, arity-checked word forms so ordinary prose ("@Condotto take a
  * look at x.ts") is treated as conversation, not a command. The target of a
  * grant/revoke is a Slack `<@U…>` mention — read from the ORIGINAL-case `words`
  * (Slack ids are uppercase; `first/second/third` are lowercased) and resolved to a
@@ -227,13 +227,13 @@ export class SlackAdapter implements SurfaceAdapter {
     const auth = await this.app.client.auth.test();
     this.botUserId = (auth.user_id as string) ?? null;
 
-    this.app.command("/conduit", async ({ command, ack, respond }) => {
+    this.app.command("/condotto", async ({ command, ack, respond }) => {
       await ack();
       if (command.trigger_id && this.dedup.has(`cmd:${command.trigger_id}`)) return;
       try {
         await this.handleSlashCommand(command, respond);
       } catch (err) {
-        this.log(`[slack] /conduit failed: ${err}`);
+        this.log(`[slack] /condotto failed: ${err}`);
         await respond({
           response_type: "ephemeral",
           text: `Something went wrong: ${err instanceof Error ? err.message : err}`,
@@ -260,7 +260,7 @@ export class SlackAdapter implements SurfaceAdapter {
     this.app.action(APPROVE_ACTION, onDecision);
     this.app.action(DENY_ACTION, onDecision);
 
-    // Guided-choice buttons (M3.1): action_ids look like `conduit_choice:<value>`.
+    // Guided-choice buttons (M3.1): action_ids look like `condotto_choice:<value>`.
     this.app.action(new RegExp(`^${CHOICE_ACTION}:`), async (args: any) => {
       await args.ack();
       try {
@@ -289,7 +289,7 @@ export class SlackAdapter implements SurfaceAdapter {
     const author = { surface: SURFACE_ID, externalId: String(command.user_id) };
     const channelId = String(command.channel_id);
 
-    // `/conduit status` (daemon-wide operator dashboard) and `/conduit stop`
+    // `/condotto status` (daemon-wide operator dashboard) and `/condotto stop`
     // (session list + how to stop in-thread) are EPHEMERAL operator-console
     // queries: the core renders the text, and we deliver it privately via
     // `respond` — never a public channel post (M4 §4, DESIGN §8-(5)).
@@ -307,13 +307,13 @@ export class SlackAdapter implements SurfaceAdapter {
         try {
           const anchor = await this.app.client.chat.postMessage({
             channel: channelId,
-            text: `🎫 New Conduit session (started by <@${author.externalId}>) — talk to me in this thread.`,
+            text: `🎫 New Condotto session (started by <@${author.externalId}>) — talk to me in this thread.`,
           });
           anchorTs = String(anchor.ts);
         } catch (err: any) {
           const reason =
             err?.data?.error === "not_in_channel"
-              ? "I'm not in this channel — run `/invite @Conduit` first."
+              ? "I'm not in this channel — run `/invite @Condotto` first."
               : `couldn't post here (${err?.data?.error ?? err})`;
           await respond({ response_type: "ephemeral", text: reason });
           return;
@@ -335,16 +335,16 @@ export class SlackAdapter implements SurfaceAdapter {
         await respond({
           response_type: "ephemeral",
           text:
-            "Usage: `/conduit assign [repo]` (new session in this channel), " +
-            "`/conduit status` (operator dashboard — architects), " +
-            "`/conduit stop` (list this channel's sessions).\n" +
-            "Inside a session thread (mention me): `@Conduit stop`, `@Conduit cancel` (stop the running turn), " +
-            "`@Conduit status`, `@Conduit land`/`deploy` (gated), `@Conduit budget <usd>`.\n" +
-            "Tune the implementer: `@Conduit model <opus|sonnet|fable>`, `@Conduit effort <low…max>`, " +
-            "`@Conduit subagents on|off`, `@Conduit workflows on|off`, `@Conduit ultra on|off`.\n" +
-            "Approvals & roles: `@Conduit auto-approve on|off` (skip your own Approve clicks), " +
-            "`@Conduit grant @user architect [everywhere]`, `@Conduit revoke @user`.\n" +
-            "To assign an existing thread: `@Conduit assign` in that thread.",
+            "Usage: `/condotto assign [repo]` (new session in this channel), " +
+            "`/condotto status` (operator dashboard — architects), " +
+            "`/condotto stop` (list this channel's sessions).\n" +
+            "Inside a session thread (mention me): `@Condotto stop`, `@Condotto cancel` (stop the running turn), " +
+            "`@Condotto status`, `@Condotto land`/`deploy` (gated), `@Condotto budget <usd>`.\n" +
+            "Tune the implementer: `@Condotto model <opus|sonnet|fable>`, `@Condotto effort <low…max>`, " +
+            "`@Condotto subagents on|off`, `@Condotto workflows on|off`, `@Condotto ultra on|off`.\n" +
+            "Approvals & roles: `@Condotto auto-approve on|off` (skip your own Approve clicks), " +
+            "`@Condotto grant @user architect [everywhere]`, `@Condotto revoke @user`.\n" +
+            "To assign an existing thread: `@Condotto assign` in that thread.",
         });
       }
     }
@@ -352,7 +352,7 @@ export class SlackAdapter implements SurfaceAdapter {
 
   /**
    * Strict command forms only — anything looser is conversation, not a
-   * command ("@Conduit take a look at src/x.ts" must reach the session, not
+   * command ("@Condotto take a look at src/x.ts" must reach the session, not
    * trigger an assign).
    */
   private mentionCommand(text: string): { name: CommandName; args: string } | null {
@@ -362,7 +362,7 @@ export class SlackAdapter implements SurfaceAdapter {
   }
 
   /**
-   * A bare `@Conduit` or `@Conduit help`/`start` — a request for guidance rather
+   * A bare `@Condotto` or `@Condotto help`/`start` — a request for guidance rather
    * than a command or a conversational message. (Commands are matched first.)
    */
   private isHelpMention(text: string): boolean {

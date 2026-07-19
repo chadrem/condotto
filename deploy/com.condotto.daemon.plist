@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!--
-  Sample launchd unit for the Conduit daemon (macOS, M4 §6).
+  Sample launchd unit for the Condotto daemon (macOS, M4 §6).
 
   Install this as a per-user LaunchAgent (NOT a system LaunchDaemon). A
   LaunchAgent runs inside your logged-in GUI session, so the Claude Code SDK can
@@ -14,42 +14,42 @@
   the systemd unit — avoids that. See DESIGN.md §3 "Deployment shapes".
 
   INSTALL
-    1. Put the release bundle somewhere stable and fill in conduit.toml beside it
-       (chmod 600 conduit.toml — it holds your Slack tokens). A binary release is
-       TWO files kept together: `conduit` and its `claude` sidecar.
-         mkdir -p ~/conduit && cp dist/<platform>/{conduit,claude} ~/conduit/
-         cp conduit.toml ~/conduit/ && chmod 600 ~/conduit/conduit.toml
+    1. Put the release bundle somewhere stable and fill in condotto.toml beside it
+       (chmod 600 condotto.toml — it holds your Slack tokens). A binary release is
+       TWO files kept together: `condotto` and its `claude` sidecar.
+         mkdir -p ~/condotto && cp dist/<platform>/{condotto,claude} ~/condotto/
+         cp condotto.toml ~/condotto/ && chmod 600 ~/condotto/condotto.toml
     2. Edit the paths below (replace YOU / ~ expansions with absolute paths —
        launchd does NOT expand ~).
     3. Install + load:
-         cp deploy/com.conduit.daemon.plist ~/Library/LaunchAgents/
-         launchctl load  ~/Library/LaunchAgents/com.conduit.daemon.plist
-         tail -f /Users/YOU/conduit/conduit.log      # watch the boot log
+         cp deploy/com.condotto.daemon.plist ~/Library/LaunchAgents/
+         launchctl load  ~/Library/LaunchAgents/com.condotto.daemon.plist
+         tail -f /Users/YOU/condotto/condotto.log      # watch the boot log
        To stop / reload after edits:
-         launchctl unload ~/Library/LaunchAgents/com.conduit.daemon.plist
+         launchctl unload ~/Library/LaunchAgents/com.condotto.daemon.plist
 -->
 <plist version="1.0">
 <dict>
     <key>Label</key>
-    <string>com.conduit.daemon</string>
+    <string>com.condotto.daemon</string>
 
     <!-- The compiled binary + its `claude` sidecar in the same directory. To run
-         from source, make this: bun, /Users/YOU/conduit/src/daemon.ts. Add a
+         from source, make this: bun, /Users/YOU/condotto/src/daemon.ts. Add a
          "--config" + path pair to point at a non-default config. -->
     <key>ProgramArguments</key>
     <array>
-        <string>/Users/YOU/conduit/conduit</string>
+        <string>/Users/YOU/condotto/condotto</string>
     </array>
 
-    <!-- conduit.toml / conduit.sqlite live here; the `claude` sidecar sits beside
+    <!-- condotto.toml / condotto.sqlite live here; the `claude` sidecar sits beside
          the binary. Absolute path — launchd has no notion of ~ or $HOME here. -->
     <key>WorkingDirectory</key>
-    <string>/Users/YOU/conduit</string>
+    <string>/Users/YOU/condotto</string>
 
     <!-- With a LaunchAgent + keychain OAuth you usually need nothing here. For a
          headless/LaunchDaemon setup, uncomment and paste a `claude setup-token`
          value. The daemon keeps this token for the agent runtime while scrubbing
-         its own SLACK_*/CONDUIT_* secrets out of the agent's shell. -->
+         its own SLACK_*/CONDOTTO_* secrets out of the agent's shell. -->
     <!--
     <key>EnvironmentVariables</key>
     <dict>
@@ -69,8 +69,8 @@
     </dict>
 
     <key>StandardOutPath</key>
-    <string>/Users/YOU/conduit/conduit.log</string>
+    <string>/Users/YOU/condotto/condotto.log</string>
     <key>StandardErrorPath</key>
-    <string>/Users/YOU/conduit/conduit.log</string>
+    <string>/Users/YOU/condotto/condotto.log</string>
 </dict>
 </plist>

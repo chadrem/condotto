@@ -1,8 +1,8 @@
-# Conduit — Product & Engineering Design
+# Condotto — Product & Engineering Design
 
 *Working title. Alternatives considered: Foreman, Pod. Rename freely — nothing below depends on the name.*
 
-> The thread becomes the conduit. The coding agent becomes the implementer.
+> The thread becomes the condotto. The coding agent becomes the implementer.
 > The software engineer becomes the architect. (Slack and Claude Code are the
 > defaults — both sit behind swappable adapters.)
 
@@ -32,7 +32,7 @@ deploy path — and the thread becomes a three-way working conversation between
 product, engineering, and the AI implementer.
 
 **Two deliberate generalizations.** Slack is the *default surface*, not a
-dependency: humans may reach Conduit through Microsoft Teams, email, SMS, or a
+dependency: humans may reach Condotto through Microsoft Teams, email, SMS, or a
 custom web app, and the core never imports a Slack type. Likewise Claude Code
 is the *default harness*, not a dependency: the implementer sits behind a
 harness interface other coding agents can implement. Both seams are defined in
@@ -59,18 +59,18 @@ toy. Exposing those capabilities to the thread is Milestone 3.5, and it is
 what turns "a chatbot that edits files" into "a PM shipping a feature with an
 engineer riding shotgun."
 
-**Distribution & trust model.** Conduit ships as **open source** — source,
+**Distribution & trust model.** Condotto ships as **open source** — source,
 prebuilt binaries, and install docs — for a technical **architect** to
 self-host for a small, mutually-trusting team (a startup's PM plus a couple of
 engineers, or a squad inside a larger org). The architect is an expert in the
 *tech* (coding, servers, the toolchain) but need not be the *domain* expert on
-the product; Conduit is how they empower the domain experts — who hold the
+the product; Condotto is how they empower the domain experts — who hold the
 product knowledge and vary in coding depth — to do real engineering
 (prototyping, design, speccing features, fixing bugs) in the surface they
 already live in. The "empower domain experts" mechanic already exists (grant +
 auto-approve, M3.8); the product's remaining job is to package it. Because
 **everyone with Slack-and-repo access is trusted, enforcing that boundary is
-the installer's responsibility** — documented, not engineered against. Conduit
+the installer's responsibility** — documented, not engineered against. Condotto
 therefore invests in mechanical gating, unforgeable framing, and audit (defense
 against mistakes, prompt injection from thread *content*, and accidental blast
 radius) but deliberately does **not** try to isolate against a hostile insider
@@ -79,13 +79,13 @@ or run as multi-tenant SaaS.
 **Why this doesn't exist yet.** Anthropic ships three adjacent things, none of
 which is this:
 
-| Product | Runs where | Session model | Gap vs. Conduit |
+| Product | Runs where | Session model | Gap vs. Condotto |
 |---|---|---|---|
 | Claude Tag (`@Claude` in Slack) | Anthropic-hosted ephemeral sandbox | No persistence across idle; no per-thread resumable sessions | No real dev machine, no local toolchain, no ad-hoc `npm install`, no deploys from your infra |
 | Claude Code on the web | Anthropic-hosted sandbox | Per-task | Not your machine, not your credentials, not your deploy path |
 | Claude Code CLI | Your machine | Full sessions, resumable | One human at one terminal; no Slack surface, no multi-session management |
 
-Conduit is the missing quadrant: **persistent, multi-session coding agents on
+Condotto is the missing quadrant: **persistent, multi-session coding agents on
 your own development computer, with chat threads (Slack first) as the entire
 user interface.**
 
@@ -94,7 +94,7 @@ user interface.**
 @-mentions), a polling watcher that streamed thread messages into a live
 Claude Code session, and a written authority protocol (only the EM's verified
 Slack user ID could authorize builds/deploys). It worked well enough to be
-worth productizing. Conduit replaces the human session-conductor with a
+worth productizing. Condotto replaces the human session-conductor with a
 daemon, and replaces the honor-system protocol with mechanical enforcement.
 
 ---
@@ -107,9 +107,9 @@ daemon, and replaces the honor-system protocol with mechanical enforcement.
   role mappings. (Initially: the same person as the architect.)
 - **Architect** — Slack users (by user ID) with command authority: assign
   sessions, approve gated actions, order landings/deploys, stop sessions.
-  Configured via `conduit.toml` (`architects`/`[[roles]]`) or `CONDUIT_ARCHITECTS`
+  Configured via `condotto.toml` (`architects`/`[[roles]]`) or `CONDOTTO_ARCHITECTS`
   (M4 §1: the single config file), or delegated at
-  runtime by another architect (M3.8: `@Conduit grant @user architect
+  runtime by another architect (M3.8: `@Condotto grant @user architect
   [everywhere]`, channel-scoped by default; persisted across restarts, while
   config stays authoritative for config-sourced roles).
 - **Member** — PMs/engineers who converse with sessions. Their questions get
@@ -131,15 +131,15 @@ these to its native affordances: Teams message actions, signed email links, a
 web UI. The journeys themselves are surface-agnostic.)
 
 1. **Assign.** Two paths (architects only). For an **existing** thread:
-   `@Conduit assign` (or `@Conduit take this`) mentioned in the thread — Slack
-   delivers mentions with thread context. For a **new** ticket: `/conduit
+   `@Condotto assign` (or `@Condotto take this`) mentioned in the thread — Slack
+   delivers mentions with thread context. For a **new** ticket: `/condotto
    assign <repo>` at channel top level — the daemon posts an anchor message
    whose `ts` becomes the thread root, and the conversation happens in that
    thread. (Custom slash commands cannot be invoked inside Slack threads at
    all — verified 2026-07-18, see DECISIONS.md.) Either way the daemon creates
    a git worktree for the repo, starts a Claude Code session pinned to it, and
    the session introduces itself in the thread ("I'm on it — repo `webapp`,
-   branch `conduit/payout-bug`."). The thread↔session binding is persisted;
+   branch `condotto/payout-bug`."). The thread↔session binding is persisted;
    from here on, every human message in the thread is a turn for that session,
    and every session reply is posted back into the thread.
 
@@ -156,7 +156,7 @@ web UI. The journeys themselves are surface-agnostic.)
    resumes exactly where it paused; on denial the reason is fed back to the
    session so it adapts.
 
-4. **Ship.** On an architect's explicit go-ahead (`@Conduit land`/`deploy`,
+4. **Ship.** On an architect's explicit go-ahead (`@Condotto land`/`deploy`,
    M3), the **daemon** runs the repo's configured land/deploy command (whatever
    the repo defines) in the worktree — never the agent's shell, so exactly the
    authoritative command runs — and still behind the Approve/Deny gate. The
@@ -167,15 +167,15 @@ web UI. The journeys themselves are surface-agnostic.)
    moment a human types again, the session resumes with full context — every
    prior file read, decision, and message intact.
 
-6. **Stop.** `/conduit stop` (architect) ends the session, posts a sign-off,
-   and optionally cleans up the worktree. `/conduit status` lists active
+6. **Stop.** `/condotto stop` (architect) ends the session, posts a sign-off,
+   and optionally cleans up the worktree. `/condotto status` lists active
    sessions and their branches.
 
 ### Non-goals (v1)
 
 - Not a general chatbot. A thread must be explicitly assigned to get a session.
 - Not autonomous shipping. Every state-changing action is gated by default.
-- Not multi-tenant SaaS, and not hardened against a hostile insider. Conduit is
+- Not multi-tenant SaaS, and not hardened against a hostile insider. Condotto is
   open-source, self-hosted software for one trusted team on their own
   machine(s); who gets Slack-and-repo access — and thus the trust boundary — is
   the installer's call, not something the daemon polices.
@@ -193,7 +193,7 @@ web UI. The journeys themselves are surface-agnostic.)
 └───────▲────────────────────────────────────────────────────────────────┘
         │ surface port: inbound domain events / outbound posts, approvals
 ┌───────┴───────────────────────────────────────────────────────────────────┐
-│                       CONDUIT DAEMON  (one Bun process)                    │
+│                       CONDOTTO DAEMON  (one Bun process)                    │
 │                                                                            │
 │  ┌ Surface adapters ──┐   ┌── Session manager ──┐   ┌── Policy engine ──┐  │
 │  │ slack/ (Bolt over  │   │ conversation↔session│   │ role lookup       │  │
@@ -232,7 +232,7 @@ harnesses). v1 ships one adapter per seam, but the interfaces exist from the
 first commit, and the cheapest way to keep them honest is a lint rule:
 platform imports outside `adapters/` fail review.
 
-**Surface port — how humans reach Conduit.** An adapter owns its transport
+**Surface port — how humans reach Condotto.** An adapter owns its transport
 (Slack: Socket Mode WebSocket; Teams: Bot Framework; email: IMAP/JMAP + SMTP;
 SMS: Twilio webhooks; web app: `Bun.serve` + WebSocket), translates platform
 events into domain events, and renders domain output natively:
@@ -280,7 +280,7 @@ Two rules keep this port honest:
   email with a signed HTTPS link, an SMS reply code. The *decision* always
   comes back as a domain event carrying a verified `Principal`.
 
-**Harness port — how Conduit drives a coding agent.** Defined by what the
+**Harness port — how Condotto drives a coding agent.** Defined by what the
 product needs, which is small — and one capability dominates:
 
 ```typescript
@@ -466,7 +466,7 @@ the agent cannot talk its way past.
 The mapping from tool call → {allow, gate, deny} is the **policy engine**, and
 it is per-repo and per-thread configurable. Default posture is deny/gate-heavy;
 an architect can widen it for a given thread ("auto-approve edits in this
-session") — but never for the hard-deny set. *(Implemented in M3.8: `@Conduit
+session") — but never for the hard-deny set. *(Implemented in M3.8: `@Condotto
 auto-approve`, on by default — a gate-tier call on an architect-initiated turn on a
 `verified` surface runs without the click; the hard-deny floor is untouched. The
 widening lives in the session-manager gate closure, not the pure policy engine, since
@@ -628,7 +628,7 @@ requirements. Verified 2026-07-16: a headless `query()` succeeds with no
 
 **Why Bun.** Anthropic acquired Oven (the company behind Bun) in late 2025,
 and Claude Code itself ships as a Bun-compiled standalone binary — the
-alignment is strategic, not fashion. Concretely for Conduit: `bun:sqlite`
+alignment is strategic, not fashion. Concretely for Condotto: `bun:sqlite`
 removes the one native-module dependency (better-sqlite3) and its install
 pain; `bun build --compile` turns the daemon into a **single distributable
 binary**, which is exactly the "admin installs the daemon" story we want;
@@ -778,13 +778,13 @@ whole spike **under Bun** — it doubles as the SDK-on-Bun compatibility check
 record the exact failure in `DECISIONS.md` and pick a hedge from §6.
 
 **Milestone 1 — Slack echo session. ✅ DONE 2026-07-18** (code-complete, live
-human demo run clean: `/invite` → `/conduit assign` → converse → daemon restart
-→ resume → `@Conduit stop`). Assignment uses two paths because Slack forbids
-slash commands inside threads (DECISIONS.md): `/conduit assign` posts an anchor
-message that roots the thread; `@Conduit assign` claims an existing thread.
+human demo run clean: `/invite` → `/condotto assign` → converse → daemon restart
+→ resume → `@Condotto stop`). Assignment uses two paths because Slack forbids
+slash commands inside threads (DECISIONS.md): `/condotto assign` posts an anchor
+message that roots the thread; `@Condotto assign` claims an existing thread.
 Original text follows for reference.
 Set up the Slack app per **Appendix C**
-(Socket Mode, scopes, `/conduit` command). Bolt over Socket Mode. `/conduit
+(Socket Mode, scopes, `/condotto` command). Bolt over Socket Mode. `/condotto
 assign` in a thread starts a session in a fixed **throwaway** test repo; thread
 messages become turns; the session's text replies post back. No gating yet
 (read-only `allowedTools`). Persist conversation↔session in SQLite; prove park
@@ -802,9 +802,9 @@ engine (`core/policy.ts`) classifies every tool call allow/gate/deny (hard-deny
 first, then auto-allow read-only+confined and allowlisted bash, else gate); a
 `gate` becomes the SDK `defer`, and the approval is driven by the actual
 `deferred_tool_use`. Architect-only for assign/stop/approvals, verified
-server-side; roles are config-authoritative (`CONDUIT_ARCHITECTS` /
-`conduit.roles.json`). `canUseTool` is the deny-by-default backstop for the
-batching caveat. **Set `CONDUIT_ARCHITECTS` before the live demo** or no one can
+server-side; roles are config-authoritative (`CONDOTTO_ARCHITECTS` /
+`condotto.roles.json`). `canUseTool` is the deny-by-default backstop for the
+batching caveat. **Set `CONDOTTO_ARCHITECTS` before the live demo** or no one can
 approve. Original text follows for reference.
 Add the policy engine and the approval loop
 from M0, now over Slack buttons. Roles table; architect-only approvals verified
@@ -818,7 +818,7 @@ DECISIONS.md; 115 tests, real-harness smokes prove gate→approve→resume and 4
 concurrent in-process sessions; a four-lens framing red-team confirmed the model
 holds and its findings were fixed). Per-repo test/land/deploy commands
 (`repos.test_cmd`/`land_cmd`/`deploy_cmd`); land/deploy are architect-ordered
-(`@Conduit land`/`deploy`) and run by the **daemon** through the Approve/Deny gate
+(`@Condotto land`/`deploy`) and run by the **daemon** through the Approve/Deny gate
 via a core `CommandRunner` in the worktree — never the agent's shell — echo/no-op
 on `testrepo` (a real land/deploy command is the operating team's per-repo
 config, out of M4). The repo's test command auto-runs (folded into the
@@ -826,7 +826,7 @@ effective allowlist). Streaming progress is one throttled, trailing-flushed stat
 message. Concurrency is a daemon-wide turn semaphore over the per-session FIFO
 (in-process `query()` verified under load). Cost governance is two-layer:
 cumulative `total_cost_usd` pauses a runaway thread and pings the architect
-(recovery via `@Conduit budget <usd>`), and the SDK `maxBudgetUsd` brakes a single
+(recovery via `@Condotto budget <usd>`), and the SDK `maxBudgetUsd` brakes a single
 turn with `error_max_budget_usd` surfaced as a notice. The production-data gate
 gates prod-data access like a build (never auto-allowlistable, aggregates-only in
 the prompt + audit). Injection framing hardened with an unforgeable random-nonce
@@ -878,11 +878,11 @@ Build in tiers, safest first:
 
 - **Tier A — model + effort (safe, do first).** Persist `model` and `effort` per
   session (like `budget_limit_usd`), with per-repo defaults + a global default
-  (default to Opus + high). Architect commands `@Conduit model <…>` /
-  `@Conduit effort <…>`; the harness port carries them (opaque to the core; the
+  (default to Opus + high). Architect commands `@Condotto model <…>` /
+  `@Condotto effort <…>`; the harness port carries them (opaque to the core; the
   adapter validates via `HarnessCapabilities`); shown in the intro/status.
 - **Tier B — subagents + workflows (needs a spike).** Architect opt-in per
-  session, default off: `@Conduit subagents on`, and an `@Conduit ultra on` preset
+  session, default off: `@Condotto subagents on`, and an `@Condotto ultra on` preset
   (= `xhigh` + `Agent`+`Workflow` tools). Un-disallow `Agent`/`Workflow`; give
   subagents restricted default toolsets; **run an M0-style spike first** to confirm
   the defer→Slack-approval→resume loop survives a *subagent-initiated* gated call
@@ -904,7 +904,7 @@ ships a feature they could not have hand-coded, guided in-thread.**
 
 **Milestone 3.6 — Workflows working in the thread. ✅ DONE 2026-07-18** (full facts
 in DECISIONS.md; 201 tests, `tsc` + `check-ports` clean; real-SDK `smoke:workflows`
-[+ `CONDUIT_SMOKE_WRITE=1`], spikes in `spikes/m3.6/`). Re-enabled Claude Code's
+[+ `CONDOTTO_SMOKE_WRITE=1`], spikes in `spikes/m3.6/`). Re-enabled Claude Code's
 multi-agent **Workflow** tool, gated + confined, after the spike-first re-test
 INVERTED the M3.5 conclusion: workflows aren't ungateable — the M3.5 finding was an
 artifact of `permissionMode:"default"`. Under **`permissionMode:"bypassPermissions"`**
@@ -912,14 +912,14 @@ artifact of `permissionMode:"default"`. Under **`permissionMode:"bypassPermissio
 calls route THROUGH the PreToolUse hook with an `agent_id`, where the M3.5 read-only
 subagent policy confines them; the main agent's defer→approve→resume and the
 `canUseTool` batching backstop still hold (hooks outrank permission mode). Built in
-three tiers: **Tier 1** — secure read-only workflows (`@Conduit workflows on|off`,
+three tiers: **Tier 1** — secure read-only workflows (`@Condotto workflows on|off`,
 re-folded into `ultra`; reads via the hook, not `allowedTools`, so background
 sub-agents aren't shadow-denied; the adapter delivers the LAST of a workflow turn's
 multiple results). **Tier 2** — the running-workflow Slack UX: the launch is a gated
 action (Approve/Deny showing the workflow's name/description + a fan-out/budget
 concern), a live throttled status streams the background-task lifecycle, and the
 synthesized reply carries a cost footer. **Tier 3** — the informed worktree-write
-opt-in (`@Conduit workflows write on|off`, mandatory warning): the policy lets
+opt-in (`@Condotto workflows write on|off`, mandatory warning): the policy lets
 confined subagent/workflow/escaped calls WRITE (edit files, confined to the worktree)
 without per-write approval — bash stays gated to the main agent (it has no worktree
 confinement), and out-of-worktree/credential/production-data stay hard-denied
@@ -947,8 +947,8 @@ stays** (out-of-worktree, credential/secret files, daemon secrets, `rm -rf` esca
 it never showed a prompt and is the only thing stopping an injection-steered turn from
 exfiltrating the daemon's own credentials. Member turns still gate; a defer→resume is
 governed by the ORIGINAL initiator (never the approving decider — no authority
-laundering). On by default (`@Conduit auto-approve on|off`, per-repo/daemon default).
-**(B) In-thread grant** — `@Conduit grant @user architect [everywhere]` / `@Conduit
+laundering). On by default (`@Condotto auto-approve on|off`, per-repo/daemon default).
+**(B) In-thread grant** — `@Condotto grant @user architect [everywhere]` / `@Condotto
 revoke @user`: an architect delegates authority at runtime, channel-scoped by default
 (`everywhere` = global). Persisted with a `roles.source` column so grants survive the
 boot reseed (`clearConfigRoles` clears only config rows); config stays authoritative
@@ -960,36 +960,36 @@ daemon restart.**
 
 **Milestone 4 — Installable open-source beta (polish & packaging). ✅ DONE
 2026-07-19** (full facts in DECISIONS.md — the six §1–§6 entries; the build plan
-is complete). Shipped, section by section: (§1) the single `conduit.toml`; (§2)
+is complete). Shipped, section by section: (§1) the single `condotto.toml`; (§2)
 `bun build --compile` binaries + ordered `user_version` schema migrations; (§3)
 real worktree teardown + assign-race fix + retention GC; (§4) the daemon-wide
-operator `/conduit status` + the two slash-gap fixes; (§5) agent-shell env-scrub +
+operator `/condotto status` + the two slash-gap fixes; (§5) agent-shell env-scrub +
 background-task cost accounting/cancellation; and (§6) the **README/runbook**
-(install → Slack app → `conduit.toml` → run, the grant + auto-approve trust model,
+(install → Slack app → `condotto.toml` → run, the grant + auto-approve trust model,
 and reading the SQLite audit log locally) plus **sample launchd/systemd units** in
 `deploy/`. The scope
 narrowed sharply from the original "dedicated box & hardening" once the audience
-was pinned down (2026-07-19, DECISIONS.md): Conduit ships as open source for a
+was pinned down (2026-07-19, DECISIONS.md): Condotto ships as open source for a
 *trusted* small team whose architect self-hosts it, so the milestone is
 **making it installable, operable, and polished**, not building tenant-grade
 isolation.
 
-- **(1) A single `conduit.toml`** (TOML via Bun's built-in `Bun.TOML.parse`,
+- **(1) A single `condotto.toml`** (TOML via Bun's built-in `Bun.TOML.parse`,
   zero deps) — the **single source of truth**, replacing today's scattered
-  `.env` + `conduit.repos.json` + `conduit.roles.json` + `CONDUIT_*` (the legacy
+  `.env` + `condotto.repos.json` + `condotto.roles.json` + `CONDOTTO_*` (the legacy
   readers are removed; a short migration note covers the one live instance). It
   carries `[slack]` tokens, `architects`, `[defaults]`
   (model/effort/auto-approve/cost cap), a `[paths]` block (worktree root, SQLite
   DB), and `[[repos]]` entries enumerating the §5 repo fields (`name`, `path`,
   `default_branch`, `trusted`, `safe_bash_allowlist`, `land_cmd`, `deploy_cmd`,
   `policy_overrides`); env vars override any value. Secrets live in the file, so
-  the repo tracks a commented **`conduit.example.toml`** and `.gitignore`s the
-  real one. The daemon discovers it at `./conduit.toml` (override with
-  `--config <path>`/`CONDUIT_CONFIG`) and **validates at boot** — missing or
+  the repo tracks a commented **`condotto.example.toml`** and `.gitignore`s the
+  real one. The daemon discovers it at `./condotto.toml` (override with
+  `--config <path>`/`CONDOTTO_CONFIG`) and **validates at boot** — missing or
   malformed required fields fail fast with an actionable message, never a
   half-started daemon.
 - **(2) Install/setup docs** — a README/runbook: install Bun or grab the binary
-  → create the Slack app (Appendix C) → copy and fill `conduit.example.toml` →
+  → create the Slack app (Appendix C) → copy and fill `condotto.example.toml` →
   run, *and* how the grant + auto-approve trust model lets the architect empower
   domain experts. Since the read-only audit channel is deferred, it also
   documents reading the SQLite audit log locally.
@@ -1005,21 +1005,21 @@ isolation.
   upgrade a binary in place over a persistent SQLite store, boot runs an
   **ordered schema migration** (SQLite `user_version`) so an upgrade never
   strands an existing install.
-- **(5) A daemon-wide operator `/conduit status`** (across all channels,
+- **(5) A daemon-wide operator `/condotto status`** (across all channels,
   architect-only: uptime, active/parked counts, in-flight-vs-cap, pending
   approvals, config summary) and fixes for the two
   slash gaps: `status` currently posts publicly (make it ephemeral) and `stop`
   is a no-op — since custom slash commands can't run inside a thread, stop is
-  targeted via in-thread **`@Conduit stop`** (mirroring `@Conduit assign`), with
-  channel-level `/conduit stop` listing sessions or pointing to the thread. Ship
+  targeted via in-thread **`@Condotto stop`** (mirroring `@Condotto assign`), with
+  channel-level `/condotto stop` listing sessions or pointing to the thread. Ship
   a sample launchd/systemd unit.
 
 Plus two cheap riders: **env-scrub the agent's shell** — a *denylist* through
-the SDK's `options.env` that drops the daemon's `SLACK_*`/`CONDUIT_*` secrets
+the SDK's `options.env` that drops the daemon's `SLACK_*`/`CONDOTTO_*` secrets
 while preserving `PATH`/`HOME` and the repo toolchain's environment (the policy
 floor stays as defense-in-depth); and **background-task cost accounting +
 cancellation** — background workflow spend counts against the per-thread runaway
-cap, and a wedged/over-cap workflow is cancellable (architect `@Conduit cancel`,
+cap, and a wedged/over-cap workflow is cancellable (architect `@Condotto cancel`,
 plus auto-cancel on cap breach) instead of silently spending after the turn
 parks.
 
@@ -1031,7 +1031,7 @@ gate). **Deferred past M4:** the read-only Slack audit channel and
 symlink-realpath (vs. lexical) confinement (large, and only fully closed by
 OS-level sandboxing we're not building — interim: don't let `ln -s`
 auto-approve). **Demo: a new team grabs a binary or clones the repo, copies
-`conduit.example.toml`, fills it, runs `./conduit`, and is collaborating in a
+`condotto.example.toml`, fills it, runs `./condotto`, and is collaborating in a
 thread minutes later.**
 
 **Later — fleet, shared session storage (SDK `SessionStore`), draft mode,
@@ -1052,14 +1052,14 @@ harness adapter (evaluate ACP first — §9).**
    thread root. (Prototype used an explicit announcement as a visible "claim";
    reuse that to prevent two sessions grabbing one thread.)
 4. **Naming/identity of sessions in Slack** — one bot with
-   `chat:write.customize` per-session display names ("Conduit — payout-bug") so
+   `chat:write.customize` per-session display names ("Condotto — payout-bug") so
    parallel sessions are distinguishable, vs. one generic bot identity.
 5. **Multi-repo threads** — v1 says one repo per thread. Cross-repo changes?
 6. **Where the policy lives** — per-repo config file in the repo itself
    (versioned, reviewable) vs. daemon-side config. (Leaning: in the repo.)
 7. **Model routing** — which model for conversation vs. implementation, and who
    can change it per thread. **Partially resolved (M3.5): the architect changes
-   model + effort per thread via `@Conduit model`/`effort` (audited); one model/
+   model + effort per thread via `@Condotto model`/`effort` (audited); one model/
    effort applies per session.** Separate conversation-vs-implementation routing
    is still open.
 8. **Second surface** — Teams, email, or a minimal web app first? (The web app
@@ -1164,7 +1164,7 @@ Docs:
 `streaming-output` https://code.claude.com/docs/en/agent-sdk/streaming-output.md
 
 **Package / runtime.** `bun add @anthropic-ai/claude-agent-sdk` (published for
-Node 18+; Conduit runs it under Bun — M0 verifies, see §6); the SDK bundles
+Node 18+; Condotto runs it under Bun — M0 verifies, see §6); the SDK bundles
 the Claude Code runtime (no separate CLI). Python:
 `pip install claude-agent-sdk`, Python 3.10+. Auth: `ANTHROPIC_API_KEY`.
 
@@ -1193,7 +1193,7 @@ M0 note: without `systemPrompt: { type: "preset", preset: "claude_code" }` the
 default system prompt carries no environment context — in the spike the model
 didn't know its own cwd and invented `/home/user/…` paths (the `cwd` option
 itself worked; the recovered write landed in the right repo). The harness
-adapter should use the preset plus an appended Conduit protocol prompt so the
+adapter should use the preset plus an appended Condotto protocol prompt so the
 agent knows its worktree.
 
 Start & capture id, then resume:
@@ -1301,7 +1301,7 @@ Foundry via `CLAUDE_CODE_USE_BEDROCK=1` / `CLAUDE_CODE_USE_VERTEX=1` /
 ## Appendix C — Slack surface adapter: app setup (needed from Milestone 1)
 
 Create a Slack app (https://api.slack.com/apps → "From scratch") in a
-**scratch workspace** you control. Conduit uses **Socket Mode**, so there is no
+**scratch workspace** you control. Condotto uses **Socket Mode**, so there is no
 request URL to host.
 
 **Enable Socket Mode.** App settings → Socket Mode → toggle on. This generates
@@ -1313,8 +1313,8 @@ workspace to mint the bot token (`xoxb-…`, Bolt's `token`):
 - `chat:write` — post replies and approval requests.
 - `chat:write.customize` — per-session display names (`username`/`icon` on
   post), so parallel sessions are distinguishable (§9.4). Optional but wanted.
-- `commands` — the `/conduit …` slash commands.
-- `app_mentions:read` — `@Conduit take this` assignment path.
+- `commands` — the `/condotto …` slash commands.
+- `app_mentions:read` — `@Condotto take this` assignment path.
 - `channels:history`, `groups:history` — read thread messages (public /
   private channels). Add `im:history`/`mpim:history` only if you support DMs.
 - `reactions:read` — only if you use an emoji-reaction assignment trigger.
@@ -1326,13 +1326,13 @@ workspace to mint the bot token (`xoxb-…`, Bolt's `token`):
 Subscribe to bot events: `message.channels`, `message.groups` (+ `.im`/`.mpim`
 if used), `app_mention`, and `reaction_added` (only if emoji assignment).
 
-**Slash command:** create `/conduit` (Socket Mode delivers it; the "request
+**Slash command:** create `/condotto` (Socket Mode delivers it; the "request
 URL" field can be a placeholder). Bolt handles subcommands (`assign`, `status`,
 `stop`) by parsing the command text. **Caveat (verified 2026-07-18):** custom
-slash commands cannot be invoked inside message threads, so `/conduit assign`
+slash commands cannot be invoked inside message threads, so `/condotto assign`
 always creates a *new* conversation (the daemon posts an anchor message that
 becomes the thread root); assigning an existing thread is done with
-`@Conduit assign` in that thread.
+`@Condotto assign` in that thread.
 
 **Interactivity:** enable it (required for the Approve/Deny **buttons**);
 Socket Mode delivers `block_actions` events — no URL needed.
@@ -1345,13 +1345,13 @@ const app = new App({
   appToken: process.env.SLACK_APP_TOKEN,   // xapp-…
   socketMode: true,
 });
-app.command("/conduit", async ({ command, ack }) => { await ack(); /* … */ });
+app.command("/condotto", async ({ command, ack }) => { await ack(); /* … */ });
 app.action("approve", async ({ body, ack }) => { await ack(); /* verify body.user.id is an architect */ });
 app.event("message", async ({ event }) => { /* route to session by thread_ts */ });
 await app.start();
 ```
 
-**Reminder:** the bot must be **invited to the channel** (`/invite @Conduit`)
+**Reminder:** the bot must be **invited to the channel** (`/invite @Condotto`)
 or reads fail with `not_in_channel`. Verify approval clicks server-side against
 the roles table by `body.user.id` — never trust anything client-supplied.
 

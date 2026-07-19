@@ -32,7 +32,7 @@ export interface WorktreeRemoveResult {
   removed: boolean;
   /** True when git deregistered the linked worktree (false = it wasn't registered). */
   deregistered: boolean;
-  /** True when the conduit branch was deleted (false = it was already absent). */
+  /** True when the condotto branch was deleted (false = it was already absent). */
   branchDeleted: boolean;
 }
 
@@ -51,7 +51,7 @@ export class WorktreeManager {
   }): Promise<WorktreeInfo> {
     await mkdir(this.root, { recursive: true });
     const path = this.pathFor(opts.sessionId);
-    const branch = `conduit/${opts.sessionId.slice(0, 8)}`;
+    const branch = `condotto/${opts.sessionId.slice(0, 8)}`;
 
     if (existsSync(path)) {
       // Idempotent recovery: worktree already provisioned for this session.
@@ -85,7 +85,7 @@ export class WorktreeManager {
 
   /**
    * Tear down a session's worktree (M4 §3): `git worktree remove --force`, delete
-   * the conduit branch (`branch -D`), then `git worktree prune`. **Best-effort and
+   * the condotto branch (`branch -D`), then `git worktree prune`. **Best-effort and
    * idempotent** — a missing directory, an already-deleted branch, or an
    * unregistered worktree are not errors, so the GC never crashes on one bad tree,
    * and a re-run is a no-op. `--force`/`-D` because a disposable worktree normally
@@ -104,7 +104,7 @@ export class WorktreeManager {
     branch?: string;
   }): Promise<WorktreeRemoveResult> {
     const path = this.pathFor(opts.sessionId);
-    const branch = opts.branch ?? `conduit/${opts.sessionId.slice(0, 8)}`;
+    const branch = opts.branch ?? `condotto/${opts.sessionId.slice(0, 8)}`;
 
     // Confinement: a worktree path is ALWAYS strictly under the root
     // (root/<sessionId>). Reject anything else — an escape (`../x`) OR the root
@@ -123,7 +123,7 @@ export class WorktreeManager {
       if ((await git(["-C", repoPath, "worktree", "remove", "--force", path])).ok) {
         deregistered = true;
       }
-      // Delete the conduit branch (only its owning repo has it).
+      // Delete the condotto branch (only its owning repo has it).
       if ((await git(["-C", repoPath, "branch", "-D", branch])).ok) {
         branchDeleted = true;
       }

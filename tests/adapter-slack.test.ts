@@ -18,7 +18,7 @@ describe("resolveUserMention (M3.8)", () => {
     expect(resolveUserMention("@abby", BOT)).toBeNull(); // not linkified
     expect(resolveUserMention("abby", BOT)).toBeNull();
     expect(resolveUserMention("<@U0ABBY", BOT)).toBeNull(); // malformed
-    expect(resolveUserMention(`<@${BOT}>`, BOT)).toBeNull(); // never target Conduit
+    expect(resolveUserMention(`<@${BOT}>`, BOT)).toBeNull(); // never target Condotto
   });
 });
 
@@ -49,7 +49,7 @@ describe("parseMentionCommand — grant/revoke/auto-approve (M3.8)", () => {
   });
 });
 
-describe("slashEphemeralText — /conduit console routing (M4 §4)", () => {
+describe("slashEphemeralText — /condotto console routing (M4 §4)", () => {
   const author: Principal = { surface: "slack", externalId: "U1" };
   const op: OperatorConsole = {
     operatorStatus: (a, ch) => `OPS ${a.externalId}@${ch}`,

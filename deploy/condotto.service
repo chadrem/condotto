@@ -1,58 +1,58 @@
-# Sample systemd unit for the Conduit daemon (Linux, M4 §6).
+# Sample systemd unit for the Condotto daemon (Linux, M4 §6).
 #
-# Conduit runs as ONE long-lived process. It shuts down cleanly on SIGTERM
+# Condotto runs as ONE long-lived process. It shuts down cleanly on SIGTERM
 # (exit 0), parks any in-flight sessions on the next boot, and runs ordered
 # SQLite migrations at startup — so `systemctl restart` and in-place binary
 # upgrades are both safe.
 #
 # INSTALL
 #   1. Create a dedicated, unprivileged user that owns the install + repos:
-#        sudo useradd --system --create-home --shell /usr/sbin/nologin conduit
+#        sudo useradd --system --create-home --shell /usr/sbin/nologin condotto
 #   2. Put the release bundle where WorkingDirectory points (below). A binary
-#      release is TWO files shipped together — `conduit` and its `claude`
+#      release is TWO files shipped together — `condotto` and its `claude`
 #      sidecar; keep them side by side so the daemon finds the runtime.
-#        sudo -u conduit mkdir -p /opt/conduit
-#        # copy dist/<platform>/{conduit,claude} into /opt/conduit/
-#        # copy your filled-in conduit.toml into /opt/conduit/ (chmod 600 — it holds secrets)
+#        sudo -u condotto mkdir -p /opt/condotto
+#        # copy dist/<platform>/{condotto,claude} into /opt/condotto/
+#        # copy your filled-in condotto.toml into /opt/condotto/ (chmod 600 — it holds secrets)
 #   3. Put the Claude auth token where the EnvironmentFile points (headless box
 #      has no keychain — mint one with `claude setup-token`):
-#        sudo mkdir -p /etc/conduit
-#        printf 'CLAUDE_CODE_OAUTH_TOKEN=%s\n' "$TOKEN" | sudo tee /etc/conduit/env >/dev/null
-#        sudo chmod 600 /etc/conduit/env && sudo chown conduit:conduit /etc/conduit/env
+#        sudo mkdir -p /etc/condotto
+#        printf 'CLAUDE_CODE_OAUTH_TOKEN=%s\n' "$TOKEN" | sudo tee /etc/condotto/env >/dev/null
+#        sudo chmod 600 /etc/condotto/env && sudo chown condotto:condotto /etc/condotto/env
 #   4. Install + start:
-#        sudo cp deploy/conduit.service /etc/systemd/system/conduit.service
+#        sudo cp deploy/condotto.service /etc/systemd/system/condotto.service
 #        sudo systemctl daemon-reload
-#        sudo systemctl enable --now conduit
-#        journalctl -u conduit -f      # watch the boot log
+#        sudo systemctl enable --now condotto
+#        journalctl -u condotto -f      # watch the boot log
 #
 # Adjust every path/user below to your install before enabling.
 
 [Unit]
-Description=Conduit — Slack threads that work themselves
-Documentation=https://github.com/chadrem/conduit
+Description=Condotto — Slack threads that work themselves
+Documentation=https://github.com/chadrem/condotto
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=simple
-User=conduit
-Group=conduit
+User=condotto
+Group=condotto
 
-# Where conduit.toml and conduit.sqlite live. The daemon discovers ./conduit.toml
+# Where condotto.toml and condotto.sqlite live. The daemon discovers ./condotto.toml
 # from here; the SQLite store and default worktree root are resolved relative to
 # it too. Also the directory holding the `claude` sidecar next to the binary.
-WorkingDirectory=/opt/conduit
+WorkingDirectory=/opt/condotto
 
 # The compiled binary + its `claude` sidecar in the same directory. To run from
-# source instead, use:  ExecStart=/usr/local/bin/bun run /opt/conduit/src/daemon.ts
-# Point at a non-default config with:  ExecStart=/opt/conduit/conduit --config /etc/conduit/conduit.toml
-ExecStart=/opt/conduit/conduit
+# source instead, use:  ExecStart=/usr/local/bin/bun run /opt/condotto/src/daemon.ts
+# Point at a non-default config with:  ExecStart=/opt/condotto/condotto --config /etc/condotto/condotto.toml
+ExecStart=/opt/condotto/condotto
 
-# Claude auth (and any CONDUIT_*/SLACK_* env overrides) live here, out of the
+# Claude auth (and any CONDOTTO_*/SLACK_* env overrides) live here, out of the
 # unit file. `-` = tolerate the file being absent if you keep secrets only in
-# conduit.toml and use keychain OAuth. The daemon env-scrubs SLACK_*/CONDUIT_*
+# condotto.toml and use keychain OAuth. The daemon env-scrubs SLACK_*/CONDOTTO_*
 # out of the agent's own shell; the Claude token is preserved for the runtime.
-EnvironmentFile=-/etc/conduit/env
+EnvironmentFile=-/etc/condotto/env
 
 # SIGTERM → clean shutdown (parks sessions, closes the DB). Give it a moment.
 KillSignal=SIGTERM

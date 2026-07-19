@@ -4,11 +4,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { loadConfig, loadSlackConfig } from "../src/core/config";
 
-// Write a throwaway conduit.toml and return its path. Tests pass an EXPLICIT
-// path + an empty env so a stray ./conduit.toml or process.env can't leak in.
+// Write a throwaway condotto.toml and return its path. Tests pass an EXPLICIT
+// path + an empty env so a stray ./condotto.toml or process.env can't leak in.
 function tomlFile(content: string): string {
-  const dir = mkdtempSync(join(tmpdir(), "conduit-cfg-"));
-  const path = join(dir, "conduit.toml");
+  const dir = mkdtempSync(join(tmpdir(), "condotto-cfg-"));
+  const path = join(dir, "condotto.toml");
   writeFileSync(path, content);
   return path;
 }
@@ -19,7 +19,7 @@ const SLACK = `[slack]\nbot_token = "B"\napp_token = "A"\n`;
 
 describe("config discovery + validation", () => {
   test("a missing config file fails fast with an actionable message", () => {
-    expect(() => loadConfig({}, "/nonexistent/conduit.toml")).toThrow(/No Conduit config found/);
+    expect(() => loadConfig({}, "/nonexistent/condotto.toml")).toThrow(/No Condotto config found/);
   });
 
   test("malformed TOML is rejected loudly with the file path", () => {
@@ -27,9 +27,9 @@ describe("config discovery + validation", () => {
     expect(() => loadConfig({}, bad)).toThrow(/parse .* as TOML/);
   });
 
-  test("CONDUIT_CONFIG selects the file when no --config override is given", () => {
+  test("CONDOTTO_CONFIG selects the file when no --config override is given", () => {
     const path = tomlFile(`[[repos]]\nname = "webapp"\npath = "/srv/webapp"\n`);
-    const config = loadConfig({ CONDUIT_CONFIG: path });
+    const config = loadConfig({ CONDOTTO_CONFIG: path });
     expect(config.repos.map((r) => r.name)).toContain("webapp");
   });
 
@@ -77,8 +77,8 @@ path = "/srv/api"
     expect(config.repos[0]!.path).toBe("/tmp/elsewhere");
   });
 
-  test("CONDUIT_TEST_REPO overrides the default testrepo path", () => {
-    const config = loadConfig({ CONDUIT_TEST_REPO: "/tmp/tr" }, tomlFile(""));
+  test("CONDOTTO_TEST_REPO overrides the default testrepo path", () => {
+    const config = loadConfig({ CONDOTTO_TEST_REPO: "/tmp/tr" }, tomlFile(""));
     expect(config.repos[0]!.path).toBe("/tmp/tr");
   });
 
@@ -208,14 +208,14 @@ describe("loadConfig defaults + env overrides", () => {
 
     // Env wins over the file value.
     const over = loadConfig(
-      { CONDUIT_COST_CAP_USD: "42.5", CONDUIT_MAX_CONCURRENT_TURNS: "3" },
+      { CONDOTTO_COST_CAP_USD: "42.5", CONDOTTO_MAX_CONCURRENT_TURNS: "3" },
       tomlFile(`[defaults]\ncost_cap_usd = 20\nmax_concurrent_turns = 4\n`),
     );
     expect(over.defaultCostCapUsd).toBe(42.5);
     expect(over.maxConcurrentTurns).toBe(3);
 
-    expect(() => loadConfig({ CONDUIT_COST_CAP_USD: "-1" }, tomlFile(""))).toThrow(/positive number/);
-    expect(() => loadConfig({ CONDUIT_MAX_CONCURRENT_TURNS: "0" }, tomlFile(""))).toThrow(/positive integer/);
+    expect(() => loadConfig({ CONDOTTO_COST_CAP_USD: "-1" }, tomlFile(""))).toThrow(/positive number/);
+    expect(() => loadConfig({ CONDOTTO_MAX_CONCURRENT_TURNS: "0" }, tomlFile(""))).toThrow(/positive integer/);
     expect(() => loadConfig({}, tomlFile(`[defaults]\nmax_concurrent_turns = 0\n`))).toThrow(/positive integer/);
   });
 
@@ -223,11 +223,11 @@ describe("loadConfig defaults + env overrides", () => {
     expect(loadConfig({}, tomlFile("")).defaultAutoApprove).toBe(true);
     expect(loadConfig({}, tomlFile(`[defaults]\nauto_approve = false\n`)).defaultAutoApprove).toBe(false);
     for (const off of ["off", "false", "0", "no", "OFF"]) {
-      expect(loadConfig({ CONDUIT_AUTO_APPROVE: off }, tomlFile("")).defaultAutoApprove).toBe(false);
+      expect(loadConfig({ CONDOTTO_AUTO_APPROVE: off }, tomlFile("")).defaultAutoApprove).toBe(false);
     }
     // Env "on" beats a file `false`.
     expect(
-      loadConfig({ CONDUIT_AUTO_APPROVE: "on" }, tomlFile(`[defaults]\nauto_approve = false\n`)).defaultAutoApprove,
+      loadConfig({ CONDOTTO_AUTO_APPROVE: "on" }, tomlFile(`[defaults]\nauto_approve = false\n`)).defaultAutoApprove,
     ).toBe(true);
   });
 
@@ -241,7 +241,7 @@ describe("loadConfig defaults + env overrides", () => {
     expect(fromFile.defaultEffort).toBe("max");
 
     const over = loadConfig(
-      { CONDUIT_DEFAULT_MODEL: "fable", CONDUIT_DEFAULT_EFFORT: "xhigh" },
+      { CONDOTTO_DEFAULT_MODEL: "fable", CONDOTTO_DEFAULT_EFFORT: "xhigh" },
       tomlFile(`[defaults]\nmodel = "sonnet"\neffort = "max"\n`),
     );
     expect(over.defaultModel).toBe("fable");
@@ -249,13 +249,13 @@ describe("loadConfig defaults + env overrides", () => {
   });
 
   test("paths: db + worktrees_root come from [paths] and env overrides", () => {
-    const fromFile = loadConfig({}, tomlFile(`[paths]\ndb = "/data/conduit.sqlite"\nworktrees_root = "/data/wt"\n`));
-    expect(fromFile.dbPath).toBe("/data/conduit.sqlite");
+    const fromFile = loadConfig({}, tomlFile(`[paths]\ndb = "/data/condotto.sqlite"\nworktrees_root = "/data/wt"\n`));
+    expect(fromFile.dbPath).toBe("/data/condotto.sqlite");
     expect(fromFile.worktreesRoot).toBe("/data/wt");
 
     const over = loadConfig(
-      { CONDUIT_DB_PATH: "/env/db.sqlite", CONDUIT_WORKTREES_ROOT: "/env/wt" },
-      tomlFile(`[paths]\ndb = "/data/conduit.sqlite"\nworktrees_root = "/data/wt"\n`),
+      { CONDOTTO_DB_PATH: "/env/db.sqlite", CONDOTTO_WORKTREES_ROOT: "/env/wt" },
+      tomlFile(`[paths]\ndb = "/data/condotto.sqlite"\nworktrees_root = "/data/wt"\n`),
     );
     expect(over.dbPath).toBe("/env/db.sqlite");
     expect(over.worktreesRoot).toBe("/env/wt");
@@ -274,11 +274,11 @@ describe("loadConfig roles", () => {
 
   test("a non-qualified architect principal is rejected (file and env)", () => {
     expect(() => loadConfig({}, tomlFile(`architects = ["U_NOSURFACE"]\n`))).toThrow(/surface-qualified/);
-    expect(() => loadConfig({ CONDUIT_ARCHITECTS: "U_NOSURFACE" }, tomlFile(""))).toThrow(/surface-qualified/);
+    expect(() => loadConfig({ CONDOTTO_ARCHITECTS: "U_NOSURFACE" }, tomlFile(""))).toThrow(/surface-qualified/);
   });
 
-  test("CONDUIT_ARCHITECTS splits on both commas and spaces", () => {
-    const cfg = loadConfig({ CONDUIT_ARCHITECTS: "slack:U1, slack:U2 slack:U3" }, tomlFile(""));
+  test("CONDOTTO_ARCHITECTS splits on both commas and spaces", () => {
+    const cfg = loadConfig({ CONDOTTO_ARCHITECTS: "slack:U1, slack:U2 slack:U3" }, tomlFile(""));
     expect(cfg.roles).toEqual([
       { principal: "slack:U1", role: "architect", scope: "*" },
       { principal: "slack:U2", role: "architect", scope: "*" },
@@ -286,12 +286,12 @@ describe("loadConfig roles", () => {
     ]);
   });
 
-  test("a file [[roles]] entry wins over the env CONDUIT_ARCHITECTS quick-list on a same-scope collision", () => {
+  test("a file [[roles]] entry wins over the env CONDOTTO_ARCHITECTS quick-list on a same-scope collision", () => {
     // Role assignments are authority: an explicit demote in the owned file must
-    // stick even if the principal is still named in CONDUIT_ARCHITECTS (a demote
+    // stick even if the principal is still named in CONDOTTO_ARCHITECTS (a demote
     // must never be silently re-elevated by a leftover env entry).
     const path = tomlFile(`[[roles]]\nprincipal = "slack:U1"\nrole = "member"\nscope = "*"\n`);
-    const cfg = loadConfig({ CONDUIT_ARCHITECTS: "slack:U1" }, path);
+    const cfg = loadConfig({ CONDOTTO_ARCHITECTS: "slack:U1" }, path);
     expect(cfg.roles).toEqual([{ principal: "slack:U1", role: "member", scope: "*" }]);
   });
 
@@ -308,7 +308,7 @@ scope = "C_LOCKED"
 principal = "slack:U10"
 role = "observer"
 `);
-    const cfg = loadConfig({ CONDUIT_ARCHITECTS: "slack:U2" }, path);
+    const cfg = loadConfig({ CONDOTTO_ARCHITECTS: "slack:U2" }, path);
     expect(cfg.roles).toContainEqual({ principal: "slack:U1", role: "architect", scope: "*" });
     expect(cfg.roles).toContainEqual({ principal: "slack:U2", role: "architect", scope: "*" });
     expect(cfg.roles).toContainEqual({ principal: "slack:U9", role: "member", scope: "C_LOCKED" });

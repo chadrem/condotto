@@ -3,18 +3,18 @@ import { resolve } from "node:path";
 import { existsSync, readFileSync } from "node:fs";
 import type { RepoConfig, Role } from "./types";
 
-// Conduit's single source of truth is one TOML file, `conduit.toml` (M4 §1),
-// consolidating what used to be scattered across `.env`, `conduit.repos.json`,
-// `conduit.roles.json`, and `CONDUIT_*` env vars. This module is the ONLY config
+// Condotto's single source of truth is one TOML file, `condotto.toml` (M4 §1),
+// consolidating what used to be scattered across `.env`, `condotto.repos.json`,
+// `condotto.roles.json`, and `CONDOTTO_*` env vars. This module is the ONLY config
 // parser: it discovers, reads, validates, and shapes that file into the core
-// `ConduitConfig` the daemon consumes. It also exposes the surface adapter's
+// `CondottoConfig` the daemon consumes. It also exposes the surface adapter's
 // credentials (`loadSlackConfig`) as bare strings for the composition root
-// (`daemon.ts`) to hand straight to its adapter — the core domain `ConduitConfig`
+// (`daemon.ts`) to hand straight to its adapter — the core domain `CondottoConfig`
 // still never carries transport credentials, and nothing here constructs a Slack
 // type (check-ports stays clean).
 //
-// Discovery: `--config <path>` (daemon argv) > `CONDUIT_CONFIG` > `./conduit.toml`.
-// Env-var overrides (`CONDUIT_*`, `SLACK_*`) win over any value in the file, so an
+// Discovery: `--config <path>` (daemon argv) > `CONDOTTO_CONFIG` > `./condotto.toml`.
+// Env-var overrides (`CONDOTTO_*`, `SLACK_*`) win over any value in the file, so an
 // operator can keep secrets out of the file if they prefer. Boot validation fails
 // fast with an actionable message rather than half-starting the daemon.
 
@@ -24,7 +24,7 @@ export interface RoleMapping {
   scope: string; // channel_id or "*"
 }
 
-export interface ConduitConfig {
+export interface CondottoConfig {
   dbPath: string;
   worktreesRoot: string; // absolute; worktree paths must be stable forever
   repos: RepoConfig[];
@@ -44,7 +44,7 @@ export interface ConduitConfig {
    * Daemon-wide default for the M3.8 architect self-approve setting, used when a
    * repo sets no `auto_approve`. On by default (DESIGN §4:441-444 sanctions
    * per-thread widening; the architect dials it off per thread/repo). Override
-   * with `[defaults].auto_approve = false` or `CONDUIT_AUTO_APPROVE=off`.
+   * with `[defaults].auto_approve = false` or `CONDOTTO_AUTO_APPROVE=off`.
    */
   defaultAutoApprove: boolean;
 }
@@ -68,7 +68,7 @@ export const DEFAULT_MODEL = "opus";
 export const DEFAULT_EFFORT = "high";
 
 /** Default location and env override for the single config file (M4 §1). */
-export const DEFAULT_CONFIG_PATH = "conduit.toml";
+export const DEFAULT_CONFIG_PATH = "condotto.toml";
 
 /**
  * Commands auto-allowed without approval on any repo. Deliberately conservative:
@@ -111,7 +111,7 @@ const tomlParse = (input: string): unknown =>
   (Bun as unknown as { TOML: { parse(s: string): unknown } }).TOML.parse(input);
 
 function discoverConfigPath(env: Record<string, string | undefined>, override?: string): string {
-  const raw = override ?? env.CONDUIT_CONFIG ?? DEFAULT_CONFIG_PATH;
+  const raw = override ?? env.CONDOTTO_CONFIG ?? DEFAULT_CONFIG_PATH;
   return resolve(raw);
 }
 
@@ -123,8 +123,8 @@ function readParsedConfig(
   const path = discoverConfigPath(env, override);
   if (!existsSync(path)) {
     throw new Error(
-      `No Conduit config found at ${path}. Copy conduit.example.toml to conduit.toml and fill ` +
-        `it in, or point at one with --config <path> or CONDUIT_CONFIG.`,
+      `No Condotto config found at ${path}. Copy condotto.example.toml to condotto.toml and fill ` +
+        `it in, or point at one with --config <path> or CONDOTTO_CONFIG.`,
     );
   }
   let text: string;
@@ -280,7 +280,7 @@ function parseRepoEntry(entry: unknown, where: string): RepoConfig {
  * working tree, untracked files, and ignored files are never visible to the agent.
  */
 function parseRepos(toml: Record<string, unknown>, env: Record<string, string | undefined>): RepoConfig[] {
-  const testRepoPath = expandHome(env.CONDUIT_TEST_REPO ?? "~/tmp/conduit-testrepo");
+  const testRepoPath = expandHome(env.CONDOTTO_TEST_REPO ?? "~/tmp/condotto-testrepo");
   // Build-time safety (DESIGN §8): land/deploy are echo/no-ops on the throwaway
   // repo until a real target is wired. `bun test` is its real test command.
   const testrepo: RepoConfig = {
@@ -315,12 +315,12 @@ function parseRepos(toml: Record<string, unknown>, env: Record<string, string | 
  * Admin role mappings (DESIGN.md §2). Three sources, merged and de-duped by
  * (principal, scope): the `architects = [...]` array (surface-qualified principals
  * → architect at scope "*", the quick path), richer `[[roles]]` entries
- * ({principal, role, scope?}), and the `CONDUIT_ARCHITECTS` env var (a comma/space
+ * ({principal, role, scope?}), and the `CONDOTTO_ARCHITECTS` env var (a comma/space
  * list, the single-architect convenience). A principal is surface-qualified:
  * "slack:U0123ABC".
  *
  * Precedence (matches the pre-M4 reader): on a same-(principal, scope) collision
- * the FILE wins over the env `CONDUIT_ARCHITECTS` quick-list — so an explicit
+ * the FILE wins over the env `CONDOTTO_ARCHITECTS` quick-list — so an explicit
  * `[[roles]]` demotion in the authoritative file sticks even if the same
  * principal is still named in the env var. (This is the one place env does NOT
  * override the file: role assignments are authority, and a demote in the owned
@@ -334,9 +334,9 @@ function parseRoles(toml: Record<string, unknown>, env: Record<string, string | 
   const validPrincipal = (p: string) => /^[a-z0-9_]+:.+$/i.test(p);
 
   // Env quick-list first, so any file entry below overrides it on a collision.
-  for (const raw of (env.CONDUIT_ARCHITECTS ?? "").split(/[\s,]+/).filter(Boolean)) {
+  for (const raw of (env.CONDOTTO_ARCHITECTS ?? "").split(/[\s,]+/).filter(Boolean)) {
     if (!validPrincipal(raw)) {
-      throw new Error(`CONDUIT_ARCHITECTS: "${raw}" is not a surface-qualified principal (e.g. slack:U0123ABC)`);
+      throw new Error(`CONDOTTO_ARCHITECTS: "${raw}" is not a surface-qualified principal (e.g. slack:U0123ABC)`);
     }
     put({ principal: raw, role: "architect", scope: "*" });
   }
@@ -382,7 +382,7 @@ const PATHS_KEYS = ["db", "worktrees_root"] as const;
 const DEFAULTS_KEYS = ["model", "effort", "auto_approve", "cost_cap_usd", "max_concurrent_turns"] as const;
 
 /**
- * Load and validate the core configuration from `conduit.toml` (M4 §1). `env`
+ * Load and validate the core configuration from `condotto.toml` (M4 §1). `env`
  * supplies overrides (defaults to `process.env`); `configPathOverride` is the
  * daemon's `--config` argument. Throws fast with an actionable message on a
  * missing file, malformed TOML, or an invalid required field.
@@ -390,9 +390,9 @@ const DEFAULTS_KEYS = ["model", "effort", "auto_approve", "cost_cap_usd", "max_c
 export function loadConfig(
   env: Record<string, string | undefined> = process.env,
   configPathOverride?: string,
-): ConduitConfig {
+): CondottoConfig {
   const { toml } = readParsedConfig(env, configPathOverride);
-  warnUnknownKeys(toml, TOP_LEVEL_KEYS, "conduit.toml");
+  warnUnknownKeys(toml, TOP_LEVEL_KEYS, "condotto.toml");
 
   const paths = toml.paths === undefined ? {} : asTable(toml.paths, "[paths]");
   warnUnknownKeys(paths, PATHS_KEYS, "[paths]");
@@ -400,8 +400,8 @@ export function loadConfig(
   warnUnknownKeys(defaults, DEFAULTS_KEYS, "[defaults]");
 
   // M3.8 architect self-approve, on unless explicitly disabled. Accept the usual
-  // falsey spellings so `CONDUIT_AUTO_APPROVE=off|false|0|no` all turn it off.
-  const autoApproveEnv = envStr(env.CONDUIT_AUTO_APPROVE)?.toLowerCase();
+  // falsey spellings so `CONDOTTO_AUTO_APPROVE=off|false|0|no` all turn it off.
+  const autoApproveEnv = envStr(env.CONDOTTO_AUTO_APPROVE)?.toLowerCase();
   const autoApproveFile = optBool(defaults.auto_approve, "[defaults].auto_approve");
   const defaultAutoApprove =
     autoApproveEnv !== undefined
@@ -409,24 +409,24 @@ export function loadConfig(
       : (autoApproveFile ?? true);
 
   return {
-    dbPath: expandHome(envStr(env.CONDUIT_DB_PATH) ?? optString(paths.db, "[paths].db") ?? "conduit.sqlite"),
+    dbPath: expandHome(envStr(env.CONDOTTO_DB_PATH) ?? optString(paths.db, "[paths].db") ?? "condotto.sqlite"),
     worktreesRoot: expandHome(
-      envStr(env.CONDUIT_WORKTREES_ROOT) ?? optString(paths.worktrees_root, "[paths].worktrees_root") ?? "~/tmp/conduit-worktrees",
+      envStr(env.CONDOTTO_WORKTREES_ROOT) ?? optString(paths.worktrees_root, "[paths].worktrees_root") ?? "~/tmp/condotto-worktrees",
     ),
     repos: parseRepos(toml, env),
     roles: parseRoles(toml, env),
     defaultCostCapUsd:
-      envPosNumber(env.CONDUIT_COST_CAP_USD, "CONDUIT_COST_CAP_USD") ??
+      envPosNumber(env.CONDOTTO_COST_CAP_USD, "CONDOTTO_COST_CAP_USD") ??
       optPosNumber(defaults.cost_cap_usd, "[defaults].cost_cap_usd") ??
       DEFAULT_COST_CAP_USD,
     maxConcurrentTurns:
-      envPosInt(env.CONDUIT_MAX_CONCURRENT_TURNS, "CONDUIT_MAX_CONCURRENT_TURNS") ??
+      envPosInt(env.CONDOTTO_MAX_CONCURRENT_TURNS, "CONDOTTO_MAX_CONCURRENT_TURNS") ??
       optPosInt(defaults.max_concurrent_turns, "[defaults].max_concurrent_turns") ??
       DEFAULT_MAX_CONCURRENT_TURNS,
     // Opaque tokens: the harness adapter validates them (never core policy).
-    defaultModel: envStr(env.CONDUIT_DEFAULT_MODEL) ?? optString(defaults.model, "[defaults].model") ?? DEFAULT_MODEL,
+    defaultModel: envStr(env.CONDOTTO_DEFAULT_MODEL) ?? optString(defaults.model, "[defaults].model") ?? DEFAULT_MODEL,
     defaultEffort:
-      envStr(env.CONDUIT_DEFAULT_EFFORT) ?? optString(defaults.effort, "[defaults].effort") ?? DEFAULT_EFFORT,
+      envStr(env.CONDOTTO_DEFAULT_EFFORT) ?? optString(defaults.effort, "[defaults].effort") ?? DEFAULT_EFFORT,
     defaultAutoApprove,
   };
 }
@@ -434,7 +434,7 @@ export function loadConfig(
 /**
  * Load the surface (Slack) credentials the composition root hands to its adapter.
  * From `[slack].bot_token`/`app_token`, with `SLACK_BOT_TOKEN`/`SLACK_APP_TOKEN`
- * env overrides. Kept separate from `ConduitConfig` so the core domain never
+ * env overrides. Kept separate from `CondottoConfig` so the core domain never
  * carries transport credentials; returns bare strings (no Slack type). Throws
  * fast with an actionable message if either token is missing.
  */

@@ -144,14 +144,14 @@ describe("claude-code adapter: gate wiring (M3.6)", () => {
 });
 
 describe("env-scrub the agent shell (M4 §5 rider a)", () => {
-  test("scrubDaemonEnv drops SLACK_*/CONDUIT_* but keeps PATH/HOME/toolchain/Claude auth", () => {
+  test("scrubDaemonEnv drops SLACK_*/CONDOTTO_* but keeps PATH/HOME/toolchain/Claude auth", () => {
     const base: NodeJS.ProcessEnv = {
       PATH: "/usr/bin",
       HOME: "/Users/x",
       SLACK_BOT_TOKEN: "xoxb-secret",
       SLACK_APP_TOKEN: "xapp-secret",
-      CONDUIT_CONFIG: "/etc/conduit.toml",
-      CONDUIT_CLAUDE_CLI: "/opt/claude",
+      CONDOTTO_CONFIG: "/etc/condotto.toml",
+      CONDOTTO_CLAUDE_CLI: "/opt/claude",
       CLAUDE_CODE_OAUTH_TOKEN: "oauth-keep",
       ANTHROPIC_API_KEY: "sk-keep",
       MY_TOOLCHAIN: "keep",
@@ -160,8 +160,8 @@ describe("env-scrub the agent shell (M4 §5 rider a)", () => {
     const out = scrubDaemonEnv(base);
     expect(out.SLACK_BOT_TOKEN).toBeUndefined();
     expect(out.SLACK_APP_TOKEN).toBeUndefined();
-    expect(out.CONDUIT_CONFIG).toBeUndefined();
-    expect(out.CONDUIT_CLAUDE_CLI).toBeUndefined();
+    expect(out.CONDOTTO_CONFIG).toBeUndefined();
+    expect(out.CONDOTTO_CLAUDE_CLI).toBeUndefined();
     expect(out.PATH).toBe("/usr/bin");
     expect(out.HOME).toBe("/Users/x");
     // The Claude auth token never matches the prefixes — the SDK needs it (keychain
@@ -174,7 +174,7 @@ describe("env-scrub the agent shell (M4 §5 rider a)", () => {
 
   test("a turn passes the scrubbed env to the SDK query options", async () => {
     process.env.SLACK_TEST_SECRET = "xoxb-leak";
-    process.env.CONDUIT_TEST_SECRET = "leak";
+    process.env.CONDOTTO_TEST_SECRET = "leak";
     let captured: any;
     const q = fakeQuery(async function* (opts) {
       captured = opts;
@@ -183,10 +183,10 @@ describe("env-scrub the agent shell (M4 §5 rider a)", () => {
     await collect(new ClaudeCodeAdapter(q), allowGate);
     expect(captured.env).toBeDefined();
     expect(captured.env.SLACK_TEST_SECRET).toBeUndefined();
-    expect(captured.env.CONDUIT_TEST_SECRET).toBeUndefined();
+    expect(captured.env.CONDOTTO_TEST_SECRET).toBeUndefined();
     expect(captured.env.PATH).toBe(process.env.PATH); // toolchain preserved
     delete process.env.SLACK_TEST_SECRET;
-    delete process.env.CONDUIT_TEST_SECRET;
+    delete process.env.CONDOTTO_TEST_SECRET;
   });
 });
 
@@ -243,7 +243,7 @@ describe("claude-code adapter: background cost/cancel (M4 §5 rider b)", () => {
       events.push(ev);
       if (!fired && ev.kind === "progress" && /workflow/.test((ev as any).text)) {
         fired = true;
-        await session.interrupt(); // architect `@Conduit cancel` mid-workflow
+        await session.interrupt(); // architect `@Condotto cancel` mid-workflow
       }
     }
     expect(interrupts).toBe(1);

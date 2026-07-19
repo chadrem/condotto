@@ -8,7 +8,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { ClaudeCodeAdapter } from "../src/adapters/claude-code/adapter";
 import type { GateFn } from "../src/core/types";
 
-const state = JSON.parse(readFileSync(join(homedir(), "tmp", "conduit-m2-smoke.json"), "utf8"));
+const state = JSON.parse(readFileSync(join(homedir(), "tmp", "condotto-m2-smoke.json"), "utf8"));
 console.log(`[smoke] resuming; approving deferred tool_use_id=${state.deferred.id}`);
 
 const gate: GateFn = async (call) => {
@@ -20,7 +20,7 @@ const gate: GateFn = async (call) => {
 };
 
 const adapter = new ClaudeCodeAdapter();
-const session = await adapter.resume(state.handle, state.cwd, "You are Conduit (M2 smoke). Be terse.");
+const session = await adapter.resume(state.handle, state.cwd, "You are Condotto (M2 smoke). Be terse.");
 
 for await (const ev of session.turn({ text: "" }, gate)) {
   console.log(`[event] ${ev.kind}${ev.kind === "reply" ? ": " + ev.text.slice(0, 160) : ""}`);

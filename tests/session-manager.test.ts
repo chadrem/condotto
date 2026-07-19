@@ -23,7 +23,7 @@ async function run(cmd: string[], cwd?: string): Promise<void> {
 }
 
 beforeAll(async () => {
-  const base = mkdtempSync(join(tmpdir(), "conduit-test-"));
+  const base = mkdtempSync(join(tmpdir(), "condotto-test-"));
   repoPath = join(base, "repo");
   worktreesRoot = join(base, "worktrees");
   await run(["git", "init", "-q", "-b", "main", repoPath]);
@@ -107,15 +107,15 @@ describe("assign", () => {
     const row = w.store.getSessionByConversation("fake", "100.000001");
     expect(row).not.toBeNull();
     expect(row!.repo_id).toBe("testrepo");
-    expect(row!.branch).toStartWith("conduit/");
+    expect(row!.branch).toStartWith("condotto/");
     expect(row!.worktree_path).toStartWith(worktreesRoot);
     expect(existsSync(join(row!.worktree_path, "README.md"))).toBe(true);
     const intro = w.surface.posts.at(-1)!.text;
     expect(intro).toContain("I'm on it");
     // The intro advertises the thread commands (discoverable in-thread, not just docs).
-    expect(intro).toContain("@Conduit land");
-    expect(intro).toContain("@Conduit budget");
-    expect(intro).toContain("@Conduit stop");
+    expect(intro).toContain("@Condotto land");
+    expect(intro).toContain("@Condotto budget");
+    expect(intro).toContain("@Condotto stop");
   });
 
   test("assigning an already-assigned conversation is refused", async () => {
@@ -187,7 +187,7 @@ describe("conversing", () => {
   });
 
   test("park & resume: a fresh daemon resumes from the persisted handle", async () => {
-    const dbPath = join(mkdtempSync(join(tmpdir(), "conduit-db-")), "test.sqlite");
+    const dbPath = join(mkdtempSync(join(tmpdir(), "condotto-db-")), "test.sqlite");
     const w1 = makeWorld(new Store(dbPath));
     await assignAndMessage(w1, "500.000001", "first message");
     const row = w1.store.getSessionByConversation("fake", "500.000001")!;
@@ -211,7 +211,7 @@ describe("conversing", () => {
   });
 
   test("resume re-supplies the CURRENT system prompt, not the one frozen in the handle", async () => {
-    const dbPath = join(mkdtempSync(join(tmpdir(), "conduit-db-")), "test.sqlite");
+    const dbPath = join(mkdtempSync(join(tmpdir(), "condotto-db-")), "test.sqlite");
     const w1 = makeWorld(new Store(dbPath));
     await assignAndMessage(w1, "410.000001", "hello");
     const row = w1.store.getSessionByConversation("fake", "410.000001")!;
@@ -417,26 +417,26 @@ describe("operator status & slash stop guidance (M4 §4)", () => {
     expect(w.manager.operatorStatus(architect, "C1")).toContain("turns in flight: *0/6*");
   });
 
-  test("`/conduit stop` guidance lists the channel's sessions and points to @Conduit stop", async () => {
+  test("`/condotto stop` guidance lists the channel's sessions and points to @Condotto stop", async () => {
     const w = makeWorld();
     await assign(w, "ops7.000001");
     const text = w.manager.channelStopGuidance("C1");
     expect(text).toContain("Sessions in this channel");
     expect(text).toContain("testrepo");
-    expect(text).toContain("@Conduit stop");
+    expect(text).toContain("@Condotto stop");
     expect(text).toContain("stop clean");
   });
 
-  test("`/conduit stop` guidance in an empty channel points to assign", () => {
+  test("`/condotto stop` guidance in an empty channel points to assign", () => {
     const w = makeWorld();
     const text = w.manager.channelStopGuidance("C_EMPTY");
     expect(text).toContain("No active sessions");
-    expect(text).toContain("/conduit assign");
+    expect(text).toContain("/condotto assign");
   });
 });
 
 describe("guided onboarding (M3.1)", () => {
-  test("@Conduit in an unassigned thread offers a repo picker (anyone can ask)", async () => {
+  test("@Condotto in an unassigned thread offers a repo picker (anyone can ask)", async () => {
     const w = makeWorld();
     await w.manager.handleEvent({ kind: "command", conv: conv("h00.000001"), author: member, name: "help", args: "" });
     const choice = w.surface.lastChoice();
@@ -463,14 +463,14 @@ describe("guided onboarding (M3.1)", () => {
     expect(w.surface.posts.at(-1)?.text).toContain("Only architects can assign");
   });
 
-  test("@Conduit in an assigned thread shows the command summary, not a picker", async () => {
+  test("@Condotto in an assigned thread shows the command summary, not a picker", async () => {
     const w = makeWorld();
     await w.manager.handleEvent({ kind: "command", conv: conv("h30.000001"), author: architect, name: "assign", args: "" });
     const choicesBefore = w.surface.choiceRequests.length;
     await w.manager.handleEvent({ kind: "command", conv: conv("h30.000001"), author: member, name: "help", args: "" });
     expect(w.surface.choiceRequests.length).toBe(choicesBefore); // no picker on an assigned thread
     expect(w.surface.posts.at(-1)?.text).toContain("working in this thread");
-    expect(w.surface.posts.at(-1)?.text).toContain("@Conduit stop");
+    expect(w.surface.posts.at(-1)?.text).toContain("@Condotto stop");
   });
 
   test("a mention in an unassigned thread guides; a plain message stays silent", async () => {
@@ -480,7 +480,7 @@ describe("guided onboarding (M3.1)", () => {
     expect(w.surface.choiceRequests.length).toBe(0);
     expect(w.surface.posts.length).toBe(0);
     // A mention → guided.
-    await w.manager.handleEvent({ kind: "message", conv: conv("h40.000001"), author: member, text: "hey @conduit", attachments: [], mentioned: true });
+    await w.manager.handleEvent({ kind: "message", conv: conv("h40.000001"), author: member, text: "hey @condotto", attachments: [], mentioned: true });
     expect(w.surface.lastChoice()?.choiceId).toBe("assign_repo");
   });
 
@@ -490,7 +490,7 @@ describe("guided onboarding (M3.1)", () => {
     await w.manager.handleEvent({ kind: "command", conv: conv("h50.000001"), author: member, name: "help", args: "" });
     expect(w.surface.choiceRequests.length).toBe(0); // too many for buttons
     expect(w.surface.posts.at(-1)?.text).toContain("Available repos:");
-    expect(w.surface.posts.at(-1)?.text).toContain("@Conduit assign");
+    expect(w.surface.posts.at(-1)?.text).toContain("@Condotto assign");
   });
 
   test("an unknown choiceId is ignored (no crash)", async () => {
@@ -715,9 +715,9 @@ describe("land / deploy (M3, DESIGN §2 journey 4)", () => {
     await assign(w, "d00.000001");
     await w.manager.handleEvent({ kind: "command", conv: conv("d00.000001"), author: architect, name: "land", args: "" });
 
-    // A conduit:land approval was posted — not run yet (gated, §4).
+    // A condotto:land approval was posted — not run yet (gated, §4).
     expect(w.surface.approvalRequests.length).toBe(1);
-    expect(w.surface.approvalRequests[0]!.req.toolName).toBe("conduit:land");
+    expect(w.surface.approvalRequests[0]!.req.toolName).toBe("condotto:land");
     expect(w.runner.calls.length).toBe(0);
 
     const requestId = w.surface.lastApprovalRequestId()!;
@@ -1157,12 +1157,12 @@ describe("harness capabilities — subagents & ultra (M3.5 Tier B)", () => {
     expect(intro).toContain("cost budget");
   });
 
-  test("the join announcement reflects enabled subagents/ultra when Conduit re-announces", async () => {
+  test("the join announcement reflects enabled subagents/ultra when Condotto re-announces", async () => {
     const w = makeWorld();
     const c = conv("set2.000001");
     await assign(w, "set2.000001");
     await w.manager.handleEvent({ kind: "command", conv: c, author: architect, name: "ultra", args: "on" });
-    // A bare @Conduit (help) re-announces the current settings in an assigned thread.
+    // A bare @Condotto (help) re-announces the current settings in an assigned thread.
     await w.manager.handleEvent({ kind: "command", conv: c, author: architect, name: "help", args: "" });
     const msg = w.surface.posts.at(-1)!.text;
     expect(msg).toContain("Session settings");
@@ -1777,7 +1777,7 @@ describe("role delegation — grant/revoke (M3.8)", () => {
 describe("worktree cleanup — GC & the park-and-resume invariant (M4 §3)", () => {
   /** A world with its own worktree root (clean orphan counting) + a retention window. */
   function isolatedWorld(retentionMs?: number): World {
-    const root = mkdtempSync(join(tmpdir(), "conduit-gc-root-"));
+    const root = mkdtempSync(join(tmpdir(), "condotto-gc-root-"));
     return makeWorld(undefined, { worktreesRoot: root, worktreeRetentionMs: retentionMs });
   }
   /** Capture git stdout (the module `run` helper ignores it). */

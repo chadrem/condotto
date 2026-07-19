@@ -9,7 +9,7 @@ import { VERSION } from "./version";
 import { ClaudeCodeAdapter } from "./adapters/claude-code/adapter";
 import { SlackAdapter } from "./adapters/slack/adapter";
 
-// Conduit daemon: one long-lived Bun process wiring surfaces -> core -> harness.
+// Condotto daemon: one long-lived Bun process wiring surfaces -> core -> harness.
 
 const log = (msg: string) => console.log(`${new Date().toISOString()} ${msg}`);
 
@@ -20,32 +20,32 @@ const WORKTREE_GC_INTERVAL_MS = 60 * 60 * 1000; // hourly
 
 /** The program name to show in `--help`: the compiled binary's own filename
  *  (from `process.execPath` — argv[1] is a `$bunfs` path when compiled), else
- *  the canonical `conduit` under `bun run`. */
+ *  the canonical `condotto` under `bun run`. */
 function invokedAs(): string {
   const compiled = import.meta.url.includes("$bunfs") || import.meta.url.includes("~BUN");
-  return compiled ? basename(process.execPath) : "conduit";
+  return compiled ? basename(process.execPath) : "condotto";
 }
 
 function helpText(prog: string): string {
   return [
-    `conduit ${VERSION} — turn Slack threads into tickets that work themselves`,
+    `condotto ${VERSION} — turn Slack threads into tickets that work themselves`,
     "",
     "Usage:",
     `  ${prog} [options]`,
     "",
     "Options:",
-    "  --config <path>   Path to conduit.toml (default: ./conduit.toml; env CONDUIT_CONFIG)",
+    "  --config <path>   Path to condotto.toml (default: ./condotto.toml; env CONDOTTO_CONFIG)",
     "  --version, -v     Print the version and exit",
     "  --help, -h        Print this help and exit",
     "",
-    "Conduit reads one config file, conduit.toml. Copy conduit.example.toml to",
-    "conduit.toml, fill in your Slack tokens, architects, and repos, then run it.",
+    "Condotto reads one config file, condotto.toml. Copy condotto.example.toml to",
+    "condotto.toml, fill in your Slack tokens, architects, and repos, then run it.",
     "See the README and DESIGN.md Appendix C (Slack app setup) for the full setup.",
   ].join("\n");
 }
 
 /** Minimal `--config <path>` / `--config=<path>` argv scan (M4 §1; the rest of
- *  the CLI — --version/--help — is M4 §2). Env `CONDUIT_CONFIG` also works. A
+ *  the CLI — --version/--help — is M4 §2). Env `CONDOTTO_CONFIG` also works. A
  *  `--config` with no path (or a flag-shaped/empty value) is an error, not a
  *  silent fall-through to default discovery. */
 function parseConfigArg(argv: string[]): string | undefined {
@@ -56,7 +56,7 @@ function parseConfigArg(argv: string[]): string | undefined {
     else if (a.startsWith("--config=")) value = a.slice("--config=".length);
     else continue;
     if (value === undefined || value.trim() === "" || value.startsWith("-")) {
-      throw new Error("--config requires a path (e.g. --config /etc/conduit/conduit.toml)");
+      throw new Error("--config requires a path (e.g. --config /etc/condotto/condotto.toml)");
     }
     return value;
   }
@@ -65,7 +65,7 @@ function parseConfigArg(argv: string[]): string | undefined {
 
 async function main(): Promise<void> {
   // Informational CLI (M4 §2) short-circuits before any config work, so
-  // `--help`/`--version` always succeed — even without a valid conduit.toml, and
+  // `--help`/`--version` always succeed — even without a valid condotto.toml, and
   // regardless of a malformed `--config` elsewhere on the line.
   const argv = process.argv;
   if (argv.includes("--help") || argv.includes("-h")) {
@@ -73,11 +73,11 @@ async function main(): Promise<void> {
     return;
   }
   if (argv.includes("--version") || argv.includes("-v")) {
-    console.log(`conduit ${VERSION}`);
+    console.log(`condotto ${VERSION}`);
     return;
   }
 
-  // Single source of truth is conduit.toml (M4 §1). A bad --config flag, a
+  // Single source of truth is condotto.toml (M4 §1). A bad --config flag, a
   // missing file, malformed TOML, or a bad required field throws here with an
   // actionable message — never a half-started daemon.
   let config: ReturnType<typeof loadConfig>;
@@ -94,9 +94,9 @@ async function main(): Promise<void> {
   for (const repo of config.repos) {
     if (!existsSync(join(repo.path, ".git"))) {
       console.error(
-        `Repo "${repo.name}" missing at ${repo.path} — point [[repos]].path in conduit.toml at a ` +
+        `Repo "${repo.name}" missing at ${repo.path} — point [[repos]].path in condotto.toml at a ` +
           `git repository (or remove the entry). The default throwaway testrepo lives at ` +
-          `~/tmp/conduit-testrepo; create it or override CONDUIT_TEST_REPO.`,
+          `~/tmp/condotto-testrepo; create it or override CONDOTTO_TEST_REPO.`,
       );
       process.exit(1);
     }
@@ -105,7 +105,7 @@ async function main(): Promise<void> {
   const store = new Store(config.dbPath);
   for (const repo of config.repos) store.upsertRepo(repo);
   // Config is the source of truth for CONFIG roles: clear and re-seed so removing a
-  // principal from config actually revokes their authority. Runtime `@Conduit grant`
+  // principal from config actually revokes their authority. Runtime `@Condotto grant`
   // delegations (source='grant') are preserved across the reseed (M3.8).
   store.clearConfigRoles();
   for (const r of config.roles) store.setRole(r.principal, r.role, r.scope);
@@ -113,7 +113,7 @@ async function main(): Promise<void> {
   if (architects === 0) {
     log(
       "[daemon] WARNING: no architects configured — gated actions (writes, bash, deploys) " +
-        "will have no one who can approve them. Set `architects` in conduit.toml (or CONDUIT_ARCHITECTS).",
+        "will have no one who can approve them. Set `architects` in condotto.toml (or CONDOTTO_ARCHITECTS).",
     );
   } else {
     log(`[daemon] seeded ${config.roles.length} role mapping(s), ${architects} architect(s)`);
@@ -161,13 +161,13 @@ async function main(): Promise<void> {
   }
 
   // Surface credentials belong to the adapter, not the core domain config — the
-  // composition root gets them from conduit.toml (via loadSlackConfig, validated
+  // composition root gets them from condotto.toml (via loadSlackConfig, validated
   // above) and hands them straight over.
   const slack = new SlackAdapter(
     slackCreds,
     { isArchitect: (p, channelId) => store.isArchitect(principalKey(p), channelId) },
-    // Operator console (M4 §4): the core renders the daemon-wide `/conduit status`
-    // dashboard and the `/conduit stop` session list; the adapter delivers them
+    // Operator console (M4 §4): the core renders the daemon-wide `/condotto status`
+    // dashboard and the `/condotto stop` session list; the adapter delivers them
     // ephemerally. Least-privilege object literal (not the whole manager).
     {
       operatorStatus: (p, channelId) => manager.operatorStatus(p, channelId),

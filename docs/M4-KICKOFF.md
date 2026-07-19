@@ -3,15 +3,15 @@
 Durable plan for building **M4 — Installable open-source beta (polish & packaging)**,
 executed **section by section, one fresh context per section**. The authority is
 **DESIGN.md §8** (the M4 spec) + **DECISIONS.md "2026-07-19 — Milestone 4 reframed"**
-(the reframe rationale, the single-`conduit.toml` config decision, and the build
+(the reframe rationale, the single-`condotto.toml` config decision, and the build
 specifics) + **CLAUDE.md**. This doc holds the *strategy and section roadmap*; each
 section has a short paste-in prompt (template at the bottom) that points here.
 Everything through M3.8 is committed and pushed to origin/main
-(github.com/chadrem/conduit).
+(github.com/chadrem/condotto).
 
 ## What M4 is
 
-Make Conduit installable, operable, and polished for a **trusted small team** whose
+Make Condotto installable, operable, and polished for a **trusted small team** whose
 architect self-hosts it (DESIGN.md §1 "Distribution & trust model"). No new authority
 machinery — grant + auto-approve (M3.8) already delivers the "empower domain experts"
 vision; M4 is packaging + operability. **Cut:** dedicated-box provisioning, session
@@ -43,19 +43,19 @@ stay reviewable and context stays sharp.
 
 ## Section roadmap (dependency order)
 
-**§1 — Config foundation.** Single `conduit.toml` (TOML via `Bun.TOML.parse`) as the
-single source of truth, replacing `.env` + `conduit.repos.json` + `conduit.roles.json` +
-`CONDUIT_*`. Schema: `[slack]` tokens, `architects`, `[defaults]`
+**§1 — Config foundation.** Single `condotto.toml` (TOML via `Bun.TOML.parse`) as the
+single source of truth, replacing `.env` + `condotto.repos.json` + `condotto.roles.json` +
+`CONDOTTO_*`. Schema: `[slack]` tokens, `architects`, `[defaults]`
 (model/effort/auto-approve/cost cap), `[paths]` (worktree root, DB), `[[repos]]` (the §5
 repo fields: `name`, `path`, `default_branch`, `trusted`, `safe_bash_allowlist`,
 `land_cmd`, `deploy_cmd`, `policy_overrides`). Secrets live in the file → ship a tracked,
-commented `conduit.example.toml` and `.gitignore` the real one. Discovery `./conduit.toml`
-overridable via `--config <path>`/`CONDUIT_CONFIG`; **boot validation** fails fast on
+commented `condotto.example.toml` and `.gitignore` the real one. Discovery `./condotto.toml`
+overridable via `--config <path>`/`CONDOTTO_CONFIG`; **boot validation** fails fast on
 missing/malformed required fields. **Remove** the legacy readers (single source of truth);
-manual cutover of the one live instance (its `conduit.toml` is gitignored). Config
+manual cutover of the one live instance (its `condotto.toml` is gitignored). Config
 *consolidation, not behavior change* — roles seeding (`clearConfigRoles` reseed), worktree
 pathing, and all behavior stay intact. *Touches:* `config.ts`, `types.ts`, `daemon.ts`,
-`.gitignore`, `conduit.example.toml`. *Spike:* none (schema is a faithful superset of
+`.gitignore`, `condotto.example.toml`. *Spike:* none (schema is a faithful superset of
 current parsing — map `config.ts` first).
 
 **§2 — Binary + schema migrations.** `bun build --compile` binaries (macOS/Linux) + a
@@ -73,20 +73,20 @@ interval after an *explicit* stop. Default `stop` keeps the tree for reactivatio
 (journey 6); an explicit clean variant removes it. *Touches:* `worktrees.ts`,
 `session-manager.ts`, `store.ts`. *Spike:* none; heavy tests around the invariant.
 
-**§4 — Daemon-wide `/conduit status` + slash fixes.** Make `/conduit status` a
+**§4 — Daemon-wide `/condotto status` + slash fixes.** Make `/condotto status` a
 **daemon-wide, architect-only** operator view (uptime, active/parked counts,
 in-flight-vs-cap, pending approvals, config summary) — this changes today's
 channel-scoped status. Fix the two slash gaps: `status` currently posts publicly (make it
-ephemeral); `stop` is a no-op (targeting is in-thread `@Conduit stop` mirroring
-`@Conduit assign`; channel-level `/conduit stop` lists sessions or points to the thread).
+ephemeral); `stop` is a no-op (targeting is in-thread `@Condotto stop` mirroring
+`@Condotto assign`; channel-level `/condotto stop` lists sessions or points to the thread).
 Ship this before the riders. *Touches:* `session-manager.ts`, slack adapter.
 
 **§5 — Riders: env-scrub + background cost/cancel.** (a) **Env-scrub the agent shell** — a
-*denylist* through the SDK's `options.env` dropping the daemon's `SLACK_*`/`CONDUIT_*`
+*denylist* through the SDK's `options.env` dropping the daemon's `SLACK_*`/`CONDOTTO_*`
 secrets while preserving `PATH`/`HOME` + the repo toolchain env (the policy floor stays as
 defense-in-depth). (b) **Background-task cost accounting + cancellation** — background
 workflow spend counts against the per-thread runaway cap; a wedged/over-cap workflow is
-cancellable (architect `@Conduit cancel` + auto-cancel on breach) instead of silently
+cancellable (architect `@Condotto cancel` + auto-cancel on breach) instead of silently
 spending after the turn parks. *Touches:* claude-code adapter, `session-manager.ts`.
 *Spikes (both, before building):* (a) the minimal env the Claude Code CLI needs under
 keychain OAuth — `options.env` REPLACES, doesn't merge, so get the keep-list right;
@@ -94,7 +94,7 @@ keychain OAuth — `options.env` REPLACES, doesn't merge, so get the keep-list r
 final `total_cost_usd`?
 
 **§6 — README/runbook + service unit.** README/runbook: install → create the Slack app
-(Appendix C) → copy and fill `conduit.example.toml` → run; how grant + auto-approve lets
+(Appendix C) → copy and fill `condotto.example.toml` → run; how grant + auto-approve lets
 the architect empower domain experts; reading the SQLite audit log locally (the audit
 channel is deferred). Sample launchd/systemd unit. *Touches:* docs, a sample unit file.
 
@@ -102,7 +102,7 @@ channel is deferred). Sample launchd/systemd unit. *Touches:* docs, a sample uni
 
 Each section's prompt is short and points here:
 
-> You are implementing **Conduit M4 §N — \<title\>**. Read `CLAUDE.md`, `DESIGN.md` (§8 +
+> You are implementing **Condotto M4 §N — \<title\>**. Read `CLAUDE.md`, `DESIGN.md` (§8 +
 > the sections it names), and **`docs/M4-KICKOFF.md`** (the build strategy, this section's
 > scope, and any spikes). Follow the per-section loop in that doc: spike-first → implement
 > → verify by actually running it → adversarially review the diff → log "M4 §N done" in

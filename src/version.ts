@@ -1,5 +1,5 @@
 /**
- * Conduit's version, baked into the source (M4 §2).
+ * Condotto's version, baked into the source (M4 §2).
  *
  * A `bun build --compile` binary has no `package.json` beside it at runtime
  * (`--compile-autoload-package-json` is off by default), so `--version` must

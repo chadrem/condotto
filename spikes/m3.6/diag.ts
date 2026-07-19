@@ -22,7 +22,7 @@ const q = query({
     "Pass a `script` beginning with `export const meta = {...}` using agent(). Report the agent's result.",
   options: {
     cwd: worktree.path,
-    systemPrompt: { type: "preset", preset: "claude_code", append: "You are Conduit diag. You have the Workflow tool. Be terse." },
+    systemPrompt: { type: "preset", preset: "claude_code", append: "You are Condotto diag. You have the Workflow tool. Be terse." },
     allowedTools: [],
     disallowedTools: ["ExitPlanMode", "SlashCommand", "WebFetch", "WebSearch"],
     permissionMode: "default",

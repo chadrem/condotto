@@ -18,14 +18,14 @@ describe("CommandRunner", () => {
   });
 
   test("scrubs the daemon's secrets from the child environment", async () => {
-    process.env.CONDUIT_TEST_SECRET = "leaky";
+    process.env.CONDOTTO_TEST_SECRET = "leaky";
     try {
-      const scrubbed = await new CommandRunner({ scrubEnv: ["CONDUIT_TEST_SECRET"] }).run("echo [$CONDUIT_TEST_SECRET]", "/tmp");
+      const scrubbed = await new CommandRunner({ scrubEnv: ["CONDOTTO_TEST_SECRET"] }).run("echo [$CONDOTTO_TEST_SECRET]", "/tmp");
       expect(scrubbed.output).toBe("[]");
-      const notScrubbed = await new CommandRunner({ scrubEnv: [] }).run("echo [$CONDUIT_TEST_SECRET]", "/tmp");
+      const notScrubbed = await new CommandRunner({ scrubEnv: [] }).run("echo [$CONDOTTO_TEST_SECRET]", "/tmp");
       expect(notScrubbed.output).toBe("[leaky]");
     } finally {
-      delete process.env.CONDUIT_TEST_SECRET;
+      delete process.env.CONDOTTO_TEST_SECRET;
     }
   });
 

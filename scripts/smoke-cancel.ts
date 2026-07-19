@@ -1,10 +1,10 @@
 // M4 §5 smoke: drive BOTH riders through the REAL claude-code adapter (not the
 // injectable-query test seam) on subscription auth against the throwaway testrepo.
 //
-//   Part A — env-scrub: a real turn runs Bash; the daemon's planted SLACK_*/CONDUIT_*
+//   Part A — env-scrub: a real turn runs Bash; the daemon's planted SLACK_*/CONDOTTO_*
 //     secrets are absent from the agent shell, while PATH/HOME/toolchain survive.
 //   Part B — workflow cancel + cost drain: a real multi-agent workflow launches, we
-//     call session.interrupt() mid-run (as `@Conduit cancel` does), and the turn ends
+//     call session.interrupt() mid-run (as `@Condotto cancel` does), and the turn ends
 //     with a cancellation notice carrying the DRAINED spend — proving the detached
 //     workflow is halted and its cost folded into the ledger.
 //
@@ -13,8 +13,8 @@ import { WorktreeManager } from "../src/core/worktrees";
 import { ClaudeCodeAdapter } from "../src/adapters/claude-code/adapter";
 import type { GateFn } from "../src/core/types";
 
-const TESTREPO = process.env.HOME + "/tmp/conduit-testrepo";
-const worktrees = new WorktreeManager(process.env.HOME + "/tmp/conduit-spike-worktrees");
+const TESTREPO = process.env.HOME + "/tmp/condotto-testrepo";
+const worktrees = new WorktreeManager(process.env.HOME + "/tmp/condotto-spike-worktrees");
 const adapter = new ClaudeCodeAdapter();
 
 // A gate that allows reads + Bash + the main Workflow launch, denies real writes,
@@ -32,13 +32,13 @@ let failures = 0;
 // ---------------- Part A: env-scrub through the real adapter ----------------
 console.log("=== Part A — env-scrub the agent shell (real adapter) ===");
 process.env.SLACK_BOT_TOKEN = "xoxb-POISON-SHOULD-NOT-LEAK";
-process.env.CONDUIT_POISON = "CONDUIT-POISON-SHOULD-NOT-LEAK";
+process.env.CONDOTTO_POISON = "CONDOTTO-POISON-SHOULD-NOT-LEAK";
 process.env.MY_TOOLCHAIN_VAR = "toolchain-keepme";
 
 const wtA = await worktrees.create({ repoPath: TESTREPO, defaultBranch: "main", sessionId: crypto.randomUUID() });
 const sessionA = await adapter.create({
   cwd: wtA.path,
-  system: "Conduit env-scrub smoke. Run the one bash command and report its stdout verbatim. Terse.",
+  system: "Condotto env-scrub smoke. Run the one bash command and report its stdout verbatim. Terse.",
 });
 const MARK = "ENVPROBE";
 let replyA = "";
@@ -46,7 +46,7 @@ for await (const ev of sessionA.turn(
   {
     text:
       `Run EXACTLY this bash command and report its stdout verbatim:\n` +
-      `  echo "${MARK} slack=[$SLACK_BOT_TOKEN] conduit=[$CONDUIT_POISON] tool=[$MY_TOOLCHAIN_VAR] home=[$HOME] haspath=[${"${PATH:+yes}"}]"`,
+      `  echo "${MARK} slack=[$SLACK_BOT_TOKEN] condotto=[$CONDOTTO_POISON] tool=[$MY_TOOLCHAIN_VAR] home=[$HOME] haspath=[${"${PATH:+yes}"}]"`,
     harness: { model: "fable", effort: "low" },
   },
   gate,
@@ -58,7 +58,7 @@ const lineA = (replyA.match(new RegExp(`${MARK}[^\\n]*`)) ?? [""])[0];
 console.log(`  [A] shell view: ${lineA}`);
 const aOk =
   !/slack=\[xoxb-POISON/.test(lineA) &&
-  !/conduit=\[CONDUIT-POISON/.test(lineA) &&
+  !/condotto=\[CONDOTTO-POISON/.test(lineA) &&
   /tool=\[toolchain-keepme\]/.test(lineA) &&
   /home=\[\/.+\]/.test(lineA) &&
   /haspath=\[yes\]/.test(lineA);
@@ -70,7 +70,7 @@ console.log("=== Part B — cancel a running workflow + drain its cost (real ada
 const wtB = await worktrees.create({ repoPath: TESTREPO, defaultBranch: "main", sessionId: crypto.randomUUID() });
 const sessionB = await adapter.create({
   cwd: wtB.path,
-  system: "Conduit cancel smoke. You may launch multi-agent workflows for parallel read-only work. Be thorough.",
+  system: "Condotto cancel smoke. You may launch multi-agent workflows for parallel read-only work. Be thorough.",
 });
 let fired = false;
 let sawReply = false;
@@ -88,11 +88,11 @@ for await (const ev of sessionB.turn(
 )) {
   if (ev.kind === "progress") {
     // Interrupt a few beats after the workflow is visibly running (as an architect's
-    // `@Conduit cancel` would), but only once.
+    // `@Condotto cancel` would), but only once.
     if (!fired && /workflow/i.test(ev.text)) {
       fired = true;
       setTimeout(() => {
-        console.log("  [B] >>> session.interrupt() (mid-workflow, like @Conduit cancel)");
+        console.log("  [B] >>> session.interrupt() (mid-workflow, like @Condotto cancel)");
         sessionB.interrupt().catch((e) => console.log(`  [B] interrupt threw: ${e}`));
       }, 5000);
     }
