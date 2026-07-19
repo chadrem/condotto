@@ -1011,16 +1011,23 @@ export class SessionManager {
       await surface.post(conv, { text: `Unknown option \`${modifier}\`. ${usage}` });
       return;
     }
-    // Integrity guard: a runtime grant must not shadow-demote a config architect
-    // (config is authoritative). A channel `member` row would otherwise override a
-    // '*' config architect and survive reboot — a backdoor demotion.
-    if (role !== "architect") {
-      const exact = this.store.getRoleRow(target, scope);
-      const global = scope === "*" ? exact : this.store.getRoleRow(target, "*");
-      if ((exact?.source === "config" && exact.role === "architect") || (global?.source === "config" && global.role === "architect")) {
-        await surface.post(conv, { text: `\`${target}\` is a config architect — change that in \`conduit.roles.json\` / \`CONDUIT_ARCHITECTS\`, not with a runtime grant.` });
-        return;
-      }
+    // Integrity guard: a runtime grant must NEVER override what config declares
+    // (config is authoritative). Two ways it could:
+    //   (1) OVERWRITE — an upsert at the same (principal, scope) as a config row
+    //       flips that row's `source` to 'grant' (setRole's ON CONFLICT), stripping
+    //       config protection so a later `revoke` can delete it — a delegated
+    //       architect could lock out the config-designated admin (review 2026-07-19).
+    //   (2) SHADOW-DEMOTE — a narrower-scope member/observer row overriding a
+    //       broader-scope config architect (channel row beats '*'), surviving reboot.
+    // Both are refused; the fix is a config edit. Additive elevations at a NEW scope
+    // (e.g. granting a config-member architect in one channel) are still allowed.
+    const exact = this.store.getRoleRow(target, scope);
+    const globalRow = scope === "*" ? exact : this.store.getRoleRow(target, "*");
+    const overwritesConfig = exact?.source === "config";
+    const shadowsConfigArchitect = role !== "architect" && globalRow?.source === "config" && globalRow.role === "architect";
+    if (overwritesConfig || shadowsConfigArchitect) {
+      await surface.post(conv, { text: `\`${target}\`'s role at this scope is set by config — change it in \`conduit.roles.json\` / \`CONDUIT_ARCHITECTS\`, not with a runtime grant.` });
+      return;
     }
     this.store.setRole(target, role, scope, "grant", principalKey(author));
     this.store.audit({ actor: principalKey(author), event: "role_granted", detail: { target, role, scope, by: principalKey(author) } });
@@ -1064,8 +1071,22 @@ export class SessionManager {
       await surface.post(conv, { text: `Revoked \`${target}\`'s granted role ${where} — back to member unless config says otherwise.` });
       return;
     }
-    if (this.store.isArchitect(target, scope === "*" ? conv.channelId : scope)) {
+    // Nothing removed at `scope`. Diagnose precisely (don't misdirect to config when
+    // the role is source-agnostic): a genuine config architect → edit config; a grant
+    // that lives at the OTHER scope → retry with/without `everywhere`; else nothing.
+    const exactRow = this.store.getRoleRow(target, scope);
+    const globalRow = this.store.getRoleRow(target, "*");
+    const isConfigArchitect =
+      (exactRow?.source === "config" && exactRow.role === "architect") ||
+      (globalRow?.source === "config" && globalRow.role === "architect");
+    if (isConfigArchitect) {
       await surface.post(conv, { text: `\`${target}\`'s role comes from config, not a runtime grant — change it in \`conduit.roles.json\` / \`CONDUIT_ARCHITECTS\` and restart.` });
+      return;
+    }
+    const otherRow = this.store.getRoleRow(target, scope === "*" ? conv.channelId : "*");
+    if (otherRow?.source === "grant") {
+      const hint = scope === "*" ? "run `@Conduit revoke @user` (without `everywhere`) in that channel" : "add `everywhere`";
+      await surface.post(conv, { text: `No grant to revoke for \`${target}\` ${where}, but they have one scoped elsewhere — ${hint} to remove it.` });
       return;
     }
     await surface.post(conv, { text: `No runtime grant to revoke for \`${target}\` ${where}.` });

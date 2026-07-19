@@ -1489,7 +1489,7 @@ describe("role delegation — grant/revoke (M3.8)", () => {
   test("grant cannot shadow-demote a config architect", async () => {
     const w = makeWorld();
     await w.manager.handleEvent({ kind: "command", conv: conv("g60.000001"), author: architect, name: "grant", args: "fake:U_ARCH member" });
-    expect(w.surface.posts.at(-1)!.text).toContain("config architect");
+    expect(w.surface.posts.at(-1)!.text).toContain("set by config");
     expect(w.store.isArchitect("fake:U_ARCH", "C1")).toBe(true); // still architect
   });
 
@@ -1503,5 +1503,42 @@ describe("role delegation — grant/revoke (M3.8)", () => {
     const requestId = w.surface.lastApprovalRequestId()!;
     await w.manager.handleEvent({ kind: "approval_decision", requestId, decider: abbyP, decision: "approved" });
     expect(w.harness.executed.map((x) => x.name)).toContain("Write");
+  });
+
+  test("a runtime grant cannot flip/overwrite a config architect's row — no lockout (review 2026-07-19)", async () => {
+    const w = makeWorld(); // U_ARCH is a config architect at '*'
+    const c = conv("g80.000001");
+    // Attempt the exploit: grant architect OVER the config architect (skips the old
+    // demote-only guard) then revoke to delete the flipped row.
+    await w.manager.handleEvent({ kind: "command", conv: c, author: architect, name: "grant", args: "fake:U_ARCH architect everywhere" });
+    expect(w.surface.posts.at(-1)!.text).toContain("set by config");
+    // The row must remain source='config' (not flipped to 'grant').
+    expect(w.store.getRoleRow("fake:U_ARCH", "*")).toEqual({ role: "architect", source: "config" });
+    // And a follow-up revoke cannot remove the (still config) architect.
+    await w.manager.handleEvent({ kind: "command", conv: c, author: architect, name: "revoke", args: "fake:U_ARCH everywhere" });
+    expect(w.store.isArchitect("fake:U_ARCH", "C1")).toBe(true);
+    expect(w.store.getRoleRow("fake:U_ARCH", "*")).toEqual({ role: "architect", source: "config" });
+  });
+
+  test("granting a config-member architect in one channel is still allowed (additive, not an overwrite)", async () => {
+    const w = makeWorld();
+    // Seed abby as a config MEMBER globally, then elevate to architect in C1 only.
+    w.store.setRole(abby, "member"); // config-sourced '*' member
+    await w.manager.handleEvent({ kind: "command", conv: conv("g85.000001"), author: architect, name: "grant", args: `${abby} architect` });
+    expect(w.store.isArchitect(abby, "C1")).toBe(true); // elevated in this channel
+    expect(w.store.isArchitect(abby, "C2")).toBe(false); // still member elsewhere
+    expect(w.store.getRoleRow(abby, "*")).toEqual({ role: "member", source: "config" }); // config row untouched
+  });
+
+  test("revoke at the wrong scope hints at scope, not config (review 2026-07-19)", async () => {
+    const w = makeWorld();
+    const c = conv("g90.000001");
+    await w.manager.handleEvent({ kind: "command", conv: c, author: architect, name: "grant", args: `${abby} architect everywhere` });
+    // Revoke WITHOUT `everywhere` — scope is the channel, where no grant row lives.
+    await w.manager.handleEvent({ kind: "command", conv: c, author: architect, name: "revoke", args: abby });
+    const msg = w.surface.posts.at(-1)!.text;
+    expect(msg).not.toContain("comes from config"); // must not misdirect to config
+    expect(msg).toContain("everywhere"); // hints at the correct scope
+    expect(w.store.isArchitect(abby, "C1")).toBe(true); // the grant is intact
   });
 });

