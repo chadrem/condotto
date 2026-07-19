@@ -555,5 +555,11 @@ first). Worktrees are disposable; their branches live in your real repos.
 
 ## License
 
-Condotto is intended to ship as open source. Add the `LICENSE` of your choice
-before distributing.
+Copyright (C) 2026 Chad Remesch
+
+Condotto is free software, licensed under the **GNU Affero General Public
+License, version 3 or later (AGPL-3.0-or-later)** — see [LICENSE](LICENSE) for
+the full text. AGPL's §13 network-use clause means anyone who runs a modified
+Condotto as a network service must make that modified source available to its
+users. Condotto is distributed in the hope that it will be useful, but WITHOUT
+ANY WARRANTY; see the license for details.
