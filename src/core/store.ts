@@ -21,10 +21,10 @@ export interface SessionRow {
   harness_session_handle: SessionHandle | null;
   branch: string;
   status: SessionStatus;
-  /** Per-thread cost ceiling in USD (M3); null = use the daemon-wide default. */
+  /** Per-thread cost ceiling in USD; null = use the daemon-wide default. */
   budget_limit_usd: number | null;
   /**
-   * Harness capability state (M3.5/M3.6). model/effort are opaque tokens (null =
+   * Harness capability state. model/effort are opaque tokens (null =
    * fall back to the daemon-wide default); subagents/workflows/workflow_write are
    * 0/1 flags gating the multi-agent tools (default 0 — architect opt-in). Invariant
    * (enforced in the session manager): workflow_write ⟹ workflows ⟹ subagents.
@@ -33,17 +33,17 @@ export interface SessionRow {
   effort: string | null;
   subagents: number;
   workflows: number;
-  /** M3.6 Tier 3: the informed worktree-write opt-in for workflow/escaped calls. */
+  /** The informed worktree-write opt-in for workflow/escaped calls. */
   workflow_write: number;
   /**
-   * M3.8 architect self-approve: when 1, a gated tool call on a turn initiated by
+   * Architect self-approve: when 1, a gated tool call on a turn initiated by
    * an architect runs without the Approve click (the hard-deny floor still
    * applies). Default 1 (on) — an architect toggles it per thread with
    * `@Condotto auto-approve on|off`.
    */
   auto_approve: number;
   /**
-   * M4 §3 worktree GC: when non-null, this session was explicitly stopped with
+   * Worktree GC: when non-null, this session was explicitly stopped with
    * the `clean` variant and its worktree becomes collectible at this ISO
    * timestamp (the stop time + retention interval). NULL is the resting state —
    * a live/parked session, or a plain `stop` that keeps its worktree for
@@ -57,7 +57,7 @@ export interface SessionRow {
 
 export class ConflictError extends Error {}
 
-/** A repo as read back from the store (M3 adds test/land/deploy + cost cap). */
+/** A repo as read back from the store (includes test/land/deploy + cost cap). */
 export interface RepoRow {
   id: string;
   name: string;
@@ -68,13 +68,13 @@ export interface RepoRow {
   land_cmd: string | null;
   deploy_cmd: string | null;
   cost_cap_usd: number | null;
-  /** Per-repo default model/effort tokens (M3.5); null = daemon-wide default. */
+  /** Per-repo default model/effort tokens; null = daemon-wide default. */
   default_model: string | null;
   default_effort: string | null;
-  /** Trust flag (M3.5 Tier C): 1 loads project config/skills/MCP; 0 stays isolated. */
+  /** Trust flag: 1 loads project config/skills/MCP; 0 stays isolated. */
   trusted: number;
   /**
-   * M3.8 per-repo default for architect self-approve, seeded onto each new
+   * Per-repo default for architect self-approve, seeded onto each new
    * session. 1 = on, 0 = off, null = fall back to the daemon-wide default.
    */
   default_auto_approve: number | null;
@@ -110,7 +110,7 @@ function parseJsonArray(json: string | null): string[] {
 export type ApprovalDecision = "pending" | "approved" | "denied" | "expired";
 
 /**
- * Where a role mapping came from (M3.8). `config` rows are wiped + reseeded from
+ * Where a role mapping came from. `config` rows are wiped + reseeded from
  * `condotto.toml` (`architects`/`[[roles]]`) / `CONDOTTO_ARCHITECTS` on every boot
  * (config stays authoritative); `grant` rows are runtime `@Condotto grant`
  * delegations that survive restart.
@@ -128,10 +128,10 @@ export interface ApprovalRow {
   decision: ApprovalDecision;
   decided_at: string | null;
   /**
-   * M3.8: the principalKey of the human whose turn caused this gated call. Carried
+   * The principalKey of the human whose turn caused this gated call. Carried
    * so a defer→resume continuation is governed by the ORIGINAL initiator (never the
    * approving decider), which prevents laundering a member's turn into architect
-   * auto-approval. Null on pre-M3.8 rows and on daemon-run ship approvals.
+   * auto-approval. Null on older rows and on daemon-run ship approvals.
    */
   initiated_by: string | null;
 }
@@ -152,8 +152,8 @@ function inflateApproval(row: RawApprovalRow | null): ApprovalRow | null {
 }
 
 /**
- * Schema baseline — migration **v1** of the ordered `user_version` runner (M4 §2).
- * The full M0–M3.8 schema, expressed **idempotently** (`CREATE TABLE IF NOT
+ * Schema baseline — migration **v1** of the ordered `user_version` runner.
+ * The full schema, expressed **idempotently** (`CREATE TABLE IF NOT
  * EXISTS` + `ensureColumn`) so it lands the same result whether it runs on:
  *   - a brand-new empty DB (creates every table + column), or
  *   - the pre-runner store, which sat at `user_version` 0 with every column
@@ -251,7 +251,7 @@ function migrateBaselineV1(db: Database): void {
       );
     `);
 
-  // Idempotent column adds for DBs created by an earlier milestone (the M1
+  // Idempotent column adds for DBs created by the earlier schema (the
   // approvals table predates tool_use_id). CREATE TABLE IF NOT EXISTS never
   // alters an existing table, so evolve columns explicitly, then build any
   // index that references them.
@@ -260,26 +260,26 @@ function migrateBaselineV1(db: Database): void {
     `CREATE INDEX IF NOT EXISTS idx_approvals_tooluse ON approvals (session_id, tool_use_id);`,
   );
 
-  // M3: per-repo test command + cost cap, and a per-session cost ceiling.
-  // (deploy_cmd/land_cmd already exist from the M1 repos schema above.)
+  // Per-repo test command + cost cap, and a per-session cost ceiling.
+  // (deploy_cmd/land_cmd already exist from the earlier repos schema above.)
   ensureColumn(db, "repos", "test_cmd", "TEXT");
   ensureColumn(db, "repos", "cost_cap_usd", "REAL");
   ensureColumn(db, "sessions", "budget_limit_usd", "REAL");
 
-  // M3.5: per-session harness capability state + per-repo defaults/trust. NOT
-  // NULL flags carry a DEFAULT so pre-M3.5 rows migrate cleanly (subagents/
+  // Per-session harness capability state + per-repo defaults/trust. NOT
+  // NULL flags carry a DEFAULT so older rows migrate cleanly (subagents/
   // workflows/trusted default off — the conservative posture).
   ensureColumn(db, "sessions", "model", "TEXT");
   ensureColumn(db, "sessions", "effort", "TEXT");
   ensureColumn(db, "sessions", "subagents", "INTEGER NOT NULL DEFAULT 0");
   ensureColumn(db, "sessions", "workflows", "INTEGER NOT NULL DEFAULT 0");
-  // M3.6 Tier 3: the worktree-write opt-in for workflow/escaped calls.
+  // The worktree-write opt-in for workflow/escaped calls.
   ensureColumn(db, "sessions", "workflow_write", "INTEGER NOT NULL DEFAULT 0");
   ensureColumn(db, "repos", "default_model", "TEXT");
   ensureColumn(db, "repos", "default_effort", "TEXT");
   ensureColumn(db, "repos", "trusted", "INTEGER NOT NULL DEFAULT 0");
 
-  // M3.8: architect self-approve (per-session flag, DEFAULT 1 so it is ON by
+  // Architect self-approve (per-session flag, DEFAULT 1 so it is ON by
   // default and existing sessions adopt it on upgrade — the deliberate posture
   // choice, 2026-07-19) + per-repo default. Runtime role grants that survive the
   // boot reseed (`source` separates config-seeded rows, wiped+reseeded each boot,
@@ -295,7 +295,7 @@ function migrateBaselineV1(db: Database): void {
 }
 
 /**
- * Migration **v2** (M4 §3 worktree GC): schedule column for the worktree garbage
+ * Migration **v2** (worktree GC): schedule column for the worktree garbage
  * collector. `cleanup_at` is set only by an explicit `@Condotto stop clean` (to
  * stop-time + retention interval); the GC collects the worktree once due and then
  * discards the session row. A plain stop leaves it NULL — never collected. Plain
@@ -328,7 +328,7 @@ export class Store {
   }
 
   /**
-   * Ordered, append-only schema migrations (M4 §2). Entry `i` (0-based) carries
+   * Ordered, append-only schema migrations. Entry `i` (0-based) carries
    * a store from `user_version` i to i+1; `migrations.length` IS the current
    * schema version. Because an operator upgrades a binary in place over a
    * persistent SQLite store, this list is the contract that never strands an
@@ -336,15 +336,15 @@ export class Store {
    *   - NEVER edit, delete, or reorder a shipped entry — only APPEND. Editing a
    *     past migration diverges freshly-created DBs from upgraded ones.
    *   - Each step + its version bump run in ONE transaction. `bun:sqlite` makes
-   *     DDL and `PRAGMA user_version` transactional (verified, M4 §2 spike), so a
+   *     DDL and `PRAGMA user_version` transactional (verified), so a
    *     crash mid-upgrade rolls the whole step back and the next boot retries it.
    *   - A store from a NEWER binary (version > what we know) is refused, not
    *     silently run against — downgrades are unsupported.
    */
   private migrate(): void {
     const migrations: Array<(db: Database) => void> = [
-      migrateBaselineV1, // v1: the M0–M3.8 schema as one idempotent baseline.
-      migrateV2, // v2: sessions.cleanup_at for the M4 §3 worktree GC.
+      migrateBaselineV1, // v1: the schema as one idempotent baseline.
+      migrateV2, // v2: sessions.cleanup_at for the worktree GC.
       // v3+: append new migrations here. They only ever run on a store already
       // at the prior version, so they can be plain forward DDL — no IF NOT EXISTS
       // gymnastics.
@@ -481,7 +481,7 @@ export class Store {
     const effort = s.effort ?? null;
     const subagents = s.subagents ?? 0;
     const workflows = s.workflows ?? 0;
-    // M3.8: on by default (matches the column DEFAULT and the shipped posture);
+    // On by default (matches the column DEFAULT and the shipped posture);
     // assign passes the repo/daemon-resolved value explicitly.
     const autoApprove = s.auto_approve ?? 1;
     try {
@@ -608,33 +608,33 @@ export class Store {
       .run({ id, now: new Date().toISOString() });
   }
 
-  /** Raise/lower a session's cost ceiling (architect `@Condotto budget`, M3). */
+  /** Raise/lower a session's cost ceiling (architect `@Condotto budget`). */
   setSessionBudgetLimit(id: string, usd: number): void {
     this.db.query(`UPDATE sessions SET budget_limit_usd = $usd WHERE id = $id`).run({ id, usd });
   }
 
-  /** Set a session's model token (M3.5, `@Condotto model`). null = daemon default. */
+  /** Set a session's model token (`@Condotto model`). null = daemon default. */
   setSessionModel(id: string, model: string | null): void {
     this.db.query(`UPDATE sessions SET model = $model WHERE id = $id`).run({ id, model });
   }
 
-  /** Set a session's effort token (M3.5, `@Condotto effort`). null = daemon default. */
+  /** Set a session's effort token (`@Condotto effort`). null = daemon default. */
   setSessionEffort(id: string, effort: string | null): void {
     this.db.query(`UPDATE sessions SET effort = $effort WHERE id = $id`).run({ id, effort });
   }
 
-  /** Toggle a session's subagent tools (M3.5 Tier B, `@Condotto subagents`). */
+  /** Toggle a session's subagent tools (`@Condotto subagents`). */
   setSessionSubagents(id: string, on: boolean): void {
     this.db.query(`UPDATE sessions SET subagents = $v WHERE id = $id`).run({ id, v: on ? 1 : 0 });
   }
 
-  /** Toggle a session's architect self-approve (M3.8, `@Condotto auto-approve`). */
+  /** Toggle a session's architect self-approve (`@Condotto auto-approve`). */
   setSessionAutoApprove(id: string, on: boolean): void {
     this.db.query(`UPDATE sessions SET auto_approve = $v WHERE id = $id`).run({ id, v: on ? 1 : 0 });
   }
 
   /**
-   * Toggle a session's Workflow tool (M3.6, part of the `ultra` preset). Turning
+   * Toggle a session's Workflow tool (part of the `ultra` preset). Turning
    * it OFF also clears the worktree-write opt-in (invariant: workflow_write ⟹
    * workflows), so a re-enable never silently resurrects write mode.
    */
@@ -647,7 +647,7 @@ export class Store {
   }
 
   /**
-   * Toggle a session's worktree-write opt-in for workflow/escaped calls (M3.6 Tier 3).
+   * Toggle a session's worktree-write opt-in for workflow/escaped calls.
    * Enabling it also asserts the `write ⟹ workflows ⟹ subagents` invariant in the DB
    * (defense-in-depth — the manager already enables both first, but this keeps the
    * store self-consistent no matter the caller).
@@ -661,7 +661,7 @@ export class Store {
   }
 
   /**
-   * Cumulative spend for a session in USD (M3 runaway cap, DESIGN §4). Sums the
+   * Cumulative spend for a session in USD (runaway cap, DESIGN §4). Sums the
    * per-turn `cost_usd` the harness reported; SQLite returns NULL for an empty
    * set, coalesced to 0.
    */
@@ -674,7 +674,7 @@ export class Store {
     return row?.total ?? 0;
   }
 
-  // -- worktree GC (M4 §3) --------------------------------------------------
+  // -- worktree GC --------------------------------------------------
 
   /**
    * Schedule this session's worktree for collection at `cleanupAt` (ISO) — set by
@@ -792,9 +792,9 @@ export class Store {
 
   /**
    * Upsert a role mapping. scope is a channel_id or '*' (all channels). `source`
-   * (M3.8) separates config-seeded rows — wiped + reseeded every boot by
+   * separates config-seeded rows — wiped + reseeded every boot by
    * `clearConfigRoles` — from runtime grants (`'grant'`), which survive restart.
-   * Default `'config'` keeps every pre-M3.8 caller (boot reseed, assign, tests)
+   * Default `'config'` keeps every earlier caller (boot reseed, assign, tests)
    * unchanged. `roleOf`/`isArchitect` ignore `source`, so a grant is authoritative
    * exactly like a config row.
    */
@@ -852,7 +852,7 @@ export class Store {
 
   /**
    * Daemon-wide count of distinct principals holding an `architect` role at any
-   * scope (M4 §4 operator status config summary). Counts a person once even if
+   * scope (operator status config summary). Counts a person once even if
    * they are an architect in several channels — the gauge is "how many people can
    * approve", not "how many role rows exist".
    */
@@ -864,7 +864,7 @@ export class Store {
   }
 
   /**
-   * The exact role row for a (principal, scope) pair, with its source (M3.8) — used
+   * The exact role row for a (principal, scope) pair, with its source — used
    * by `grant`/`revoke` to reason about provenance (e.g. refuse to shadow-demote a
    * config architect). Null when no row exists at that exact scope. NOTE: this is an
    * EXACT-scope lookup, not the effective-role precedence of `roleOf`.
@@ -878,7 +878,7 @@ export class Store {
   }
 
   /**
-   * Remove all role mappings. Config is the source of truth for roles in M2, so
+   * Remove all role mappings. Config is the source of truth for roles, so
    * the daemon clears and re-seeds at boot — removing a principal from config
    * must actually revoke their authority, not leave a stale row behind.
    */
@@ -887,7 +887,7 @@ export class Store {
   }
 
   /**
-   * Boot reconcile (M3.8): remove only config-seeded rows so runtime `@Condotto
+   * Boot reconcile: remove only config-seeded rows so runtime `@Condotto
    * grant` delegations (source='grant') survive the restart, then the daemon
    * reseeds config rows. Removing a principal from config still revokes their
    * config authority; grants are a separate, additive namespace.
@@ -904,7 +904,7 @@ export class Store {
     toolUseId: string | null;
     toolName: string;
     toolInput: unknown;
-    /** M3.8: principalKey of the human whose turn caused this call (see ApprovalRow). */
+    /** principalKey of the human whose turn caused this call (see ApprovalRow). */
     initiatedBy?: string | null;
   }): void {
     this.db
@@ -924,7 +924,7 @@ export class Store {
   }
 
   /**
-   * Record an M3.8 architect auto-approval as an already-decided `approved` row —
+   * Record an architect auto-approval as an already-decided `approved` row —
    * so the `approvals` ledger stays complete (every consequential action is
    * attributable) with no transient `pending` window that `hasPendingApproval`
    * would trip. `decided_by` = the architect whose standing authority stood in.
@@ -972,7 +972,7 @@ export class Store {
   }
 
   /**
-   * Daemon-wide count of undecided approvals (M4 §4 operator status). Every
+   * Daemon-wide count of undecided approvals (operator status). Every
    * pending row is a session waiting on an architect's Approve/Deny click, so the
    * total is the operator's "how many threads are blocked on me right now" gauge.
    */

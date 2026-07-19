@@ -1,11 +1,11 @@
 #!/usr/bin/env bun
-// Build a Condotto release with `bun build --compile` (M4 §2).
+// Build a Condotto release with `bun build --compile`.
 //
 // A release is TWO files shipped together:
 //   dist/<platform>/condotto   — the compiled daemon (a ~60MB Bun binary)
 //   dist/<platform>/claude    — the SDK's native runtime CLI (~236MB) the daemon
-//                               spawns; it can't be bundled into the binary (M4
-//                               §2 spike / DECISIONS.md), so it rides alongside.
+//                               spawns; it can't be bundled into the binary
+//                               (spike / DECISIONS.md), so it rides alongside.
 // At runtime the daemon finds `claude` next to itself, or via CONDOTTO_CLAUDE_CLI.
 //
 // Usage:

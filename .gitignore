@@ -11,7 +11,7 @@ dist/
 *.bun-build
 # The single config file holds secrets (Slack tokens) — track only the example.
 condotto.toml
-# Legacy config files (superseded by condotto.toml in M4 §1); ignored so any that
+# Legacy config files (superseded by condotto.toml); ignored so any that
 # still linger on an installed box are never committed.
 condotto.repos.json
 condotto.roles.json

@@ -1,9 +1,9 @@
-// M2 smoke, phase 1: exercise the REAL claude-code adapter + policy engine.
+// Gate smoke, phase 1: exercise the REAL claude-code adapter + policy engine.
 // The agent attempts a Write; the policy engine gates it; the adapter defers the
 // turn with the pending call preserved. Persist the handle for phase 2 (which
 // "approves" it from a separate OS process — `bun run smoke:approve`).
 //
-// Proves the M2-specific mechanic end-to-end on live subscription auth: a `gate`
+// Proves the gating mechanic end-to-end on live subscription auth: a `gate`
 // decision becomes an SDK `defer`, and the adapter surfaces it as a `deferred`
 // TurnEvent with the pending tool call — everything the daemon needs to post an
 // approval. Nothing is written during this turn.
@@ -16,7 +16,7 @@ import { ClaudeCodeAdapter } from "../src/adapters/claude-code/adapter";
 import { evaluate } from "../src/core/policy";
 import type { GateFn, ToolCall } from "../src/core/types";
 
-const STATE_PATH = join(homedir(), "tmp", "condotto-m2-smoke.json");
+const STATE_PATH = join(homedir(), "tmp", "condotto-gate-smoke.json");
 
 const config = loadConfig();
 const repo = config.repos.find((r) => r.name === "testrepo") ?? config.repos[0]!;
@@ -27,7 +27,7 @@ const worktree = await worktrees.create({
   defaultBranch: repo.defaultBranch,
   sessionId,
 });
-const target = join(worktree.path, "HELLO_M2.txt");
+const target = join(worktree.path, "HELLO.txt");
 console.log(`[smoke] worktree: ${worktree.path} (${worktree.branch})`);
 
 const gate: GateFn = async (call) => {
@@ -41,13 +41,13 @@ const gate: GateFn = async (call) => {
 const adapter = new ClaudeCodeAdapter();
 const session = await adapter.create({
   cwd: worktree.path,
-  system: "You are Condotto (M2 smoke). Be terse.",
+  system: "You are Condotto (smoke). Be terse.",
 });
 
 let deferred: ToolCall | null = null;
 for await (const ev of session.turn(
   {
-    text: "Create a file named HELLO_M2.txt whose entire content is exactly: hello from m2\nUse a single Write tool call and do nothing else.",
+    text: "Create a file named HELLO.txt whose entire content is exactly: hello\nUse a single Write tool call and do nothing else.",
   },
   gate,
 )) {

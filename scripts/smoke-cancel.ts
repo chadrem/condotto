@@ -1,4 +1,4 @@
-// M4 §5 smoke: drive BOTH riders through the REAL claude-code adapter (not the
+// smoke: drive BOTH riders through the REAL claude-code adapter (not the
 // injectable-query test seam) on subscription auth against the throwaway testrepo.
 //
 //   Part A — env-scrub: a real turn runs Bash; the daemon's planted SLACK_*/CONDOTTO_*
@@ -112,7 +112,7 @@ console.log(`  Part B ${bOk ? "PASS" : "FAIL"} — running workflow cancelled, s
 if (!bOk) failures++;
 
 if (failures === 0) {
-  console.log("[smoke] PASS — both M4 §5 riders work end-to-end through the real adapter.");
+  console.log("[smoke] PASS — both riders work end-to-end through the real adapter.");
   process.exit(0);
 }
 console.error(`[smoke] FAIL — ${failures} part(s) failed; see above.`);

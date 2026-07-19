@@ -49,7 +49,7 @@ export type CommandName =
   | "assign"
   | "status"
   | "stop"
-  // M4 §5 — interrupt the session's IN-FLIGHT turn (a wedged/over-cap multi-agent
+  // interrupt the session's IN-FLIGHT turn (a wedged/over-cap multi-agent
   // workflow) without ending the session, mirroring `stop`'s architect-only,
   // thread-scoped shape. The detached background task is halted via q.interrupt()
   // and its spend is drained into the ledger (spike 2026-07-19, DECISIONS.md).
@@ -58,19 +58,19 @@ export type CommandName =
   | "deploy"
   | "budget"
   | "help"
-  // M3.5 — harness capability controls (architect-only). model/effort tune the
+  // harness capability controls (architect-only). model/effort tune the
   // implementer; subagents/ultra expose multi-agent power (opt-in, gated).
   | "model"
   | "effort"
   | "subagents"
-  // M3.6 — the multi-agent Workflow tool (opt-in, gated + confined). Args are
-  // "on"|"off" or "write on"|"write off" (the worktree-write opt-in, Tier 3).
+  // the multi-agent Workflow tool (opt-in, gated + confined). Args are
+  // "on"|"off" or "write on"|"write off" (the worktree-write opt-in).
   | "workflows"
   | "ultra"
-  // M3.8 — architect self-approve toggle ("on"|"off"): an architect-initiated
+  // architect self-approve toggle ("on"|"off"): an architect-initiated
   // turn's gated actions run without the Approve click (hard-deny floor stays).
   | "auto-approve"
-  // M3.8 — in-thread role delegation (architect-only). `grant` args carry the
+  // in-thread role delegation (architect-only). `grant` args carry the
   // resolved target principal key + role (+ optional "everywhere"); `revoke`
   // carries the target (+ optional "everywhere"). The adapter resolves the Slack
   // <@U…> mention to a principal key so no surface id shape crosses the port.
@@ -98,7 +98,7 @@ export type InboundEvent =
       args: string;
     }
   | {
-      kind: "approval_decision"; // M2
+      kind: "approval_decision";
       requestId: string;
       decider: Principal;
       decision: "approved" | "denied";
@@ -130,7 +130,7 @@ export interface SurfaceCapabilities {
 }
 
 /**
- * A guided choice presented to a human (M3.1). The core builds it (it knows the
+ * A guided choice presented to a human. The core builds it (it knows the
  * options — e.g. which repos exist); the surface renders it natively (Slack:
  * buttons) and a click comes back as a `choice` InboundEvent carrying `choiceId`
  * and the selected `value`. Generic so future thread-setup questions (branch,
@@ -149,15 +149,15 @@ export interface ChoicePrompt {
   architectOnly?: boolean;
 }
 
-/** M2 — carried in the port from day one so the seam doesn't drift. */
+/** Carried in the port from day one so the seam doesn't drift. */
 export interface ApprovalPrompt {
   requestId: string;
   toolName: string;
   toolInput: unknown;
   summary: string;
   /**
-   * An optional human-facing warning that raises the stakes of this approval
-   * (M3), e.g. "investigating production data — in-thread results must be
+   * An optional human-facing warning that raises the stakes of this approval,
+   * e.g. "investigating production data — in-thread results must be
    * aggregates only." Surfaces render it prominently; it is decoration for the
    * decider, never authority.
    */
@@ -173,7 +173,7 @@ export interface SurfaceAdapter {
   /** Only called when capabilities.editMessages is true. */
   update(ref: PostedRef, msg: OutboundMessage): Promise<void>;
   requestApproval(conv: ConversationRef, req: ApprovalPrompt): Promise<void>;
-  /** Present a guided choice (M3.1). Only called when capabilities.buttons. */
+  /** Present a guided choice. Only called when capabilities.buttons. */
   requestChoice(conv: ConversationRef, prompt: ChoicePrompt): Promise<void>;
 }
 
@@ -185,21 +185,21 @@ export interface ToolCall {
   name: string;
   input: unknown;
   /**
-   * Set when the call was initiated by a SUBAGENT rather than the main agent
-   * (M3.5 Tier B). Opaque origin marker — the harness adapter fills it from the
+   * Set when the call was initiated by a SUBAGENT rather than the main agent.
+   * Opaque origin marker — the harness adapter fills it from the
    * subagent id the runtime reports (Claude Code: the PreToolUse hook's
    * `agent_id`, present only inside a subagent). The policy engine treats
    * subagent-initiated calls more strictly: reads pass (confined), but any gated
    * action or nested spawn is denied, because a subagent call cannot be paused
    * for out-of-band approval the way a main-agent call can (spike 2026-07-18).
-   * WORKFLOW agents also carry `agentId` (M3.6): under bypassPermissions the
+   * WORKFLOW agents also carry `agentId`: under bypassPermissions the
    * background workflow's tool calls route through the PreToolUse hook with an
    * `agent_id`, so the same subagent policy confines them read-only.
    */
   agentId?: string;
   /**
    * Set when the call reached the gate via the harness's un-deferrable backstop
-   * path (Claude Code: `canUseTool`) rather than the main PreToolUse hook (M3.6).
+   * path (Claude Code: `canUseTool`) rather than the main PreToolUse hook.
    * Such a call CANNOT be paused for approval, so the policy engine confines it
    * instead of gating: confined reads pass, and (with the worktree-write opt-in)
    * confined writes pass, but anything that would otherwise `gate` is DENIED —
@@ -217,7 +217,7 @@ export interface ToolCall {
  *  - `deny`  — refuse; the reason is fed back to the agent so it adapts.
  *  - `gate`  — pause for out-of-band human approval. The adapter maps this to
  *    the SDK's `defer`: the turn ends with the pending call preserved, and a
- *    later `approval_decision` resumes the session (M0-verified handshake).
+ *    later `approval_decision` resumes the session (verified handshake).
  */
 export type GateDecision =
   | { decision: "allow"; updatedInput?: unknown }
@@ -230,7 +230,7 @@ export type TurnEvent =
   | { kind: "progress"; text: string }
   /**
    * The turn's final reply. `workflow` marks a turn that ran a multi-agent
-   * workflow (M3.6), so the surface can append a terse "what ran + cost" summary
+   * workflow, so the surface can append a terse "what ran + cost" summary
    * footer — the synthesized text is the agent's; the footer is Condotto's.
    */
   | { kind: "reply"; text: string; costUsd?: number; workflow?: boolean }
@@ -257,7 +257,7 @@ export type TurnEvent =
 export type SessionHandle = unknown;
 
 /**
- * Per-turn harness capability configuration (M3.5). Everything here is OPAQUE to
+ * Per-turn harness capability configuration. Everything here is OPAQUE to
  * the core: it persists these values and passes them through, never interpreting
  * them as policy (DESIGN §1 north-star, §4 ports). The adapter maps `model`
  * tokens to concrete SDK model IDs and validates `effort`; `subagents`/`workflows`
@@ -272,10 +272,10 @@ export interface HarnessTurnOptions {
   model?: string;
   /** Reasoning effort (e.g. "high"|"xhigh"|"max"); passed through. Omit = default. */
   effort?: string;
-  /** Enable subagent tools (Agent/Task). Default off — Tier B, architect opt-in. */
+  /** Enable subagent tools (Agent/Task). Default off — architect opt-in. */
   subagents?: boolean;
   /**
-   * Enable the multi-agent Workflow tool (M3.6, architect opt-in, default off).
+   * Enable the multi-agent Workflow tool (architect opt-in, default off).
    * When on, the adapter re-enables the `Workflow` tool AND switches the query to
    * `permissionMode: "bypassPermissions"` — which, contrary to its name, routes the
    * background workflow's sub-agent tool calls THROUGH our PreToolUse hook (with an
@@ -284,10 +284,10 @@ export interface HarnessTurnOptions {
    * resume loop is unaffected (hooks outrank permission mode). Implies subagents.
    */
   workflows?: boolean;
-  /** Load the repo's project settings + skills. Tier C, TRUSTED repos only. */
+  /** Load the repo's project settings + skills. TRUSTED repos only. */
   projectConfig?: boolean;
 }
-// NOTE (M3.6 Tier 3): the informed worktree-write opt-in is NOT a harness-tool
+// NOTE: the informed worktree-write opt-in is NOT a harness-tool
 // option — it does not change the model, tools, or permission mode. It is a POLICY
 // decision (PolicyContext.workflowWrite, set by the session manager from the
 // session row), so it lives in the core gate, not in HarnessTurnOptions.
@@ -295,14 +295,14 @@ export interface HarnessTurnOptions {
 export interface TurnInput {
   text: string;
   /**
-   * Optional per-turn cost ceiling in USD (M3). The harness enforces it as an
+   * Optional per-turn cost ceiling in USD. The harness enforces it as an
    * intra-turn runaway brake (Claude Code: the SDK's `maxBudgetUsd`), stopping a
    * single turn before it can blow the thread budget. The core computes it from
    * the session's remaining headroom; omitted = no per-turn limit.
    */
   budgetUsd?: number;
   /**
-   * Per-turn harness capabilities (M3.5) — opaque config the core forwards, never
+   * Per-turn harness capabilities — opaque config the core forwards, never
    * core policy. Omitted = the adapter's own defaults.
    */
   harness?: HarnessTurnOptions;
@@ -320,12 +320,12 @@ export interface HarnessCapabilities {
   costReporting: boolean;
   imageInput: boolean;
   /**
-   * Model tokens the architect may select (M3.5), e.g. ["opus","sonnet","fable"].
+   * Model tokens the architect may select, e.g. ["opus","sonnet","fable"].
    * The core validates an architect's `@Condotto model <x>` against this list —
    * membership only, so it never needs to know SDK model IDs (kept in the adapter).
    */
   supportedModels: string[];
-  /** Reasoning-effort levels the architect may select (M3.5), e.g. ["low",…,"max"]. */
+  /** Reasoning-effort levels the architect may select, e.g. ["low",…,"max"]. */
   supportedEfforts: string[];
 }
 
@@ -351,28 +351,28 @@ export interface RepoConfig {
   /** Commands that run without approval (exact or word-boundary prefix match). */
   safeBashAllowlist: string[];
   /**
-   * The repo's real test command (M3). Auto-allowed as a Bash call so the agent
+   * The repo's real test command. Auto-allowed as a Bash call so the agent
    * can verify its own work without approval, and surfaced in the system prompt.
    * `undefined` = no test command; the agent must gate any bash it runs.
    */
   testCmd?: string;
   /**
-   * The repo's land/deploy path (M3, DESIGN §2 journey 4). Architect-ordered
+   * The repo's land/deploy path (DESIGN §2 journey 4). Architect-ordered
    * (`@Condotto land` / `deploy`) and run by the daemon through the approval gate,
    * never by the agent's shell. Build-time safety: these are `echo`/no-ops on the
-   * throwaway repo until M4 hardening. `undefined` = the action is unavailable.
+   * throwaway repo until later hardening. `undefined` = the action is unavailable.
    */
   landCmd?: string;
   deployCmd?: string;
   /**
-   * Per-thread cost ceiling in USD (M3, DESIGN §4). A session whose cumulative
+   * Per-thread cost ceiling in USD (DESIGN §4). A session whose cumulative
    * `total_cost_usd` reaches this pauses and pings the architect; the ceiling is
    * seeded onto each session and an architect can raise it. `undefined` = fall
    * back to the daemon-wide default.
    */
   costCapUsd?: number;
   /**
-   * Per-repo default model/effort tokens (M3.5 Tier A). Seeded onto each new
+   * Per-repo default model/effort tokens. Seeded onto each new
    * session (the architect can then change them per thread); opaque tokens
    * validated by the harness adapter. `undefined` = fall back to the daemon-wide
    * default (Opus + high).
@@ -380,7 +380,7 @@ export interface RepoConfig {
   defaultModel?: string;
   defaultEffort?: string;
   /**
-   * Trust flag (M3.5 Tier C). A trusted repo loads its own project config —
+   * Trust flag. A trusted repo loads its own project config —
    * `CLAUDE.md`, skills, `.claude/agents`, and daemon-configured MCP — while the
    * §4 gate still applies. Default (false/undefined) keeps the untrusted-repo
    * isolation (`settingSources: []`). Set ONLY for repos the admin vouches for:
@@ -389,7 +389,7 @@ export interface RepoConfig {
    */
   trusted?: boolean;
   /**
-   * Per-repo default for the M3.8 architect self-approve setting. Seeded onto
+   * Per-repo default for the architect self-approve setting. Seeded onto
    * each new session (the architect can then toggle it per thread with
    * `@Condotto auto-approve on|off`). `undefined` = fall back to the daemon-wide
    * default (`SessionManagerOptions.defaultAutoApprove`, on by default).

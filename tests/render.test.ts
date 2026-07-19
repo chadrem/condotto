@@ -68,7 +68,7 @@ describe("approvalBlocks", () => {
     expect(JSON.stringify(blocks)).toContain("npm install left-pad");
   });
 
-  test("a policy concern renders a warning context block (M3 production-data)", () => {
+  test("a policy concern renders a warning context block (production-data)", () => {
     const { blocks } = approvalBlocks({
       requestId: "req-p",
       toolName: "Bash",
@@ -111,7 +111,7 @@ describe("approvalBlocks", () => {
   });
 });
 
-describe("choiceBlocks (M3.1 guided choice)", () => {
+describe("choiceBlocks (guided choice)", () => {
   test("renders one button per option carrying its value; block_id round-trips", () => {
     const { blocks, text } = choiceBlocks({
       choiceId: "assign_repo",

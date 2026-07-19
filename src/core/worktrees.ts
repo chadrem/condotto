@@ -26,7 +26,7 @@ export interface WorktreeInfo {
   branch: string;
 }
 
-/** Outcome of a teardown (M4 §3) — best-effort, so callers can audit what happened. */
+/** Outcome of a teardown — best-effort, so callers can audit what happened. */
 export interface WorktreeRemoveResult {
   /** True when the directory is gone at the end (removed or already absent). */
   removed: boolean;
@@ -84,7 +84,7 @@ export class WorktreeManager {
   }
 
   /**
-   * Tear down a session's worktree (M4 §3): `git worktree remove --force`, delete
+   * Tear down a session's worktree: `git worktree remove --force`, delete
    * the condotto branch (`branch -D`), then `git worktree prune`. **Best-effort and
    * idempotent** — a missing directory, an already-deleted branch, or an
    * unregistered worktree are not errors, so the GC never crashes on one bad tree,

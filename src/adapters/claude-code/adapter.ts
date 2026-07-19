@@ -26,7 +26,7 @@ export type QueryFn = (args: { prompt: unknown; options: Record<string, any> }) 
 
 // Claude Code harness adapter over the Agent SDK.
 //
-// Verified facts this code builds on (M0 spike 2026-07-16 + live docs, see
+// Verified facts this code builds on (spike 2026-07-16 + live docs, see
 // DECISIONS.md and DESIGN.md Appendix B):
 //  - Auth is the machine's Claude subscription login (keychain OAuth). There is
 //    no ANTHROPIC_API_KEY in this deployment and this file must never read one.
@@ -36,12 +36,12 @@ export type QueryFn = (args: { prompt: unknown; options: Record<string, any> }) 
 //    context (it invents paths) — always use the preset + append.
 //  - `session_id` arrives on the `system`/`init` message.
 //
-// M2 scope: the core GateFn now answers allow/deny/gate for every tool call.
+// The core GateFn answers allow/deny/gate for every tool call.
 //  - allow  -> PreToolUse `allow` (reads stay auto-approved; the hook still
 //              confines them, which beats allowedTools per the SDK precedence).
 //  - deny   -> PreToolUse `deny` with a reason fed back to the agent.
 //  - gate   -> PreToolUse `defer`: the turn ends un-executed with the pending
-//              call preserved (M0-verified); the core records an approval, and a
+//              call preserved (verified); the core records an approval, and a
 //              later architect decision resumes the session to re-drive it.
 // `canUseTool` is the deny-by-default backstop for the one batching caveat:
 // when the model issues several tool calls in one batch, `defer` is ignored and
@@ -53,7 +53,7 @@ export type QueryFn = (args: { prompt: unknown; options: Record<string, any> }) 
  * Opaque to the core. Owned entirely by this adapter. Deliberately does NOT
  * carry the system prompt — that is core policy, re-supplied on every
  * create/resume so a posture change reaches existing sessions. (Legacy handles
- * from M1 may still contain a `system` field; asHandle ignores it.)
+ * from an earlier version may still contain a `system` field; asHandle ignores it.)
  */
 interface ClaudeCodeHandle {
   v: 1;
@@ -63,7 +63,7 @@ interface ClaudeCodeHandle {
 // `allowedTools` auto-approves reads (the hook still denies out-of-worktree
 // reads — a hook `deny` beats an allow rule). Write/Edit/Bash are deliberately
 // NEITHER allowed (they must gate) NOR disallowed (they must be reachable so the
-// agent can propose them). NOTE (M3.6): when the Workflow tool is enabled we clear
+// agent can propose them). NOTE: when the Workflow tool is enabled we clear
 // allowedTools and drive reads through the PreToolUse hook instead — in
 // allowedTools a tool is "auto-approved before the callback is consulted", and for
 // a background workflow's sub-agents that shadow path silently DENIES the read
@@ -73,23 +73,23 @@ const ALLOWED_TOOLS = ["Read", "Glob", "Grep", "TodoWrite"];
 // Always removed from context, regardless of capability flags: plan-mode meta,
 // slash commands, and network reads are out of scope for the implementer.
 const BASE_DISALLOWED = ["ExitPlanMode", "SlashCommand", "WebFetch", "WebSearch"];
-// Subagent tools, disabled BY DEFAULT (M3.5 Tier B is architect opt-in). Both the
+// Subagent tools, disabled BY DEFAULT (subagents are architect opt-in). Both the
 // current `Agent` name and the legacy `Task` alias are listed so "subagents off"
 // is genuinely off regardless of which the runtime exposes. Un-disallowed per-turn
 // only when the session enables the capability; even then every tool call a
 // subagent makes still hits the PreToolUse gate (agent_id-tagged).
 const SUBAGENT_TOOLS = ["Agent", "Task"];
-// The multi-agent Workflow tool (M3.6, architect opt-in). Disabled by default and
+// The multi-agent Workflow tool (architect opt-in). Disabled by default and
 // re-enabled per-turn only when the session enables workflows. When enabled the
 // query runs under `permissionMode: "bypassPermissions"` so the background
 // workflow's sub-agent tool calls route THROUGH the PreToolUse hook (agent_id-
 // tagged) where the read-only subagent policy confines them — the hook still
 // outranks permission mode, so main-agent defer/deny are unaffected (spike
-// 2026-07-18, DECISIONS.md). Was disabled outright in M3.5 (which used
+// 2026-07-18, DECISIONS.md). Was disabled outright earlier (which used
 // permissionMode "default", under which the same agents default-DENY off-gate).
 const WORKFLOW_TOOL = "Workflow";
 
-// M3.5 Tier A. The core passes an opaque model token; the adapter is the only
+// Model/effort. The core passes an opaque model token; the adapter is the only
 // place that knows SDK model IDs (keeps the port clean). Unrecognized tokens
 // pass through (the SDK also accepts bare aliases / full IDs), but the core has
 // already validated against `supportedModels`, so that path is belt-and-braces.
@@ -104,7 +104,7 @@ const SUPPORTED_MODELS = Object.keys(MODEL_IDS);
 const SUPPORTED_EFFORTS = ["low", "medium", "high", "xhigh", "max"];
 
 /**
- * Daemon-side subagent definitions (M3.5 Tier B). When the architect enables
+ * Daemon-side subagent definitions. When the architect enables
  * subagents, the implementer fans out to these for parallel READ-ONLY work; their
  * tool calls still hit the gate (agent_id-tagged), and the restricted `tools` list
  * is defense-in-depth. Subagents never write/run shell — the policy engine denies
@@ -139,7 +139,7 @@ function resolveEffort(token: string | undefined): string | undefined {
  * Subagent / workflow tools are removed from context unless the architect opted
  * in. When workflows are ON, reads move OUT of allowedTools onto the hook (so the
  * background workflow's sub-agents aren't shadow-denied — see WORKFLOW_TOOL);
- * otherwise reads stay auto-allowed via allowedTools (unchanged M2 behaviour).
+ * otherwise reads stay auto-allowed via allowedTools (unchanged behaviour).
  * Write/bash are always absent from both lists so they gate.
  */
 function toolPosture(h: HarnessTurnOptions | undefined): {
@@ -206,7 +206,7 @@ const TURN_INACTIVITY_MS = 10 * 60_000;
 const DRAIN_AFTER_ABORT_MS = 30_000;
 
 /**
- * M4 §5 rider (a): env-scrub the agent shell. The SDK's `options.env` REPLACES the
+ * rider (a): env-scrub the agent shell. The SDK's `options.env` REPLACES the
  * subprocess environment entirely (sdk.d.ts:1411), so this is a DENYLIST over a
  * spread of `process.env`: drop the daemon's own secret namespaces (`SLACK_*`,
  * `CONDOTTO_*`) so an in-worktree Bash command can never read the daemon's Slack
@@ -215,7 +215,7 @@ const DRAIN_AFTER_ABORT_MS = 30_000;
  * auth token (which never matches these prefixes, so keychain OAuth AND a headless
  * `CLAUDE_CODE_OAUTH_TOKEN` both survive). Belt-and-braces over the §4 policy floor
  * (credential/secret hard-deny stays); spike-proven under keychain OAuth
- * (spikes/m4/env-scrub.ts, 2026-07-19). Distinct from CommandRunner's scrub, which
+ * (verified 2026-07-19). Distinct from CommandRunner's scrub, which
  * drops a fixed NAME list incl. the Claude auth token because a deploy command,
  * unlike the agent, does not need it.
  */
@@ -230,7 +230,7 @@ export function scrubDaemonEnv(base: NodeJS.ProcessEnv): Record<string, string> 
   return out;
 }
 
-/** M4 §5 rider (b): the reason a turn's query was interrupted, for the notice. */
+/** rider (b): the reason a turn's query was interrupted, for the notice. */
 type AbortReason = "timeout" | "cancel" | "budget";
 function abortNotice(reason: AbortReason, sawWorkflow: boolean, costUsd: number | undefined): string {
   const what = sawWorkflow ? "the running workflow" : "the running turn";
@@ -268,8 +268,8 @@ function isCompiledBinary(): boolean {
  * Under `bun run` (dev / clone-and-run) the SDK resolves it from `node_modules`
  * itself — return `undefined` and change nothing. A `bun build --compile` binary
  * can't: the SDK resolves its native CLI relative to a `$bunfs` path no child
- * process can exec, and the 236MB per-platform package was never bundled (M4 §2
- * spike). So when compiled, point the SDK at a real `claude`, in priority order:
+ * process can exec, and the 236MB per-platform package was never bundled. So when
+ * compiled, point the SDK at a real `claude`, in priority order:
  *   1. CONDOTTO_CLAUDE_CLI — explicit operator override (any installed `claude`,
  *      or a custom sidecar path). `extractFromBunfs` is a no-op on a real path
  *      and future-proofs an embedded (`type: "file"` → `$bunfs`) path pointed here.
@@ -326,7 +326,7 @@ class ClaudeCodeSession implements HarnessSession {
     private turnInactivityMs: number = TURN_INACTIVITY_MS,
   ) {}
 
-  /** The in-flight query, so an out-of-band interrupt() can reach it (M4 §5).
+  /** The in-flight query, so an out-of-band interrupt() can reach it.
    *  Null when no turn is running. */
   private activeQuery: ReturnType<QueryFn> | null = null;
   /** Set when interrupt() actually fired on the active query — the turn loop then
@@ -359,7 +359,7 @@ class ClaudeCodeSession implements HarnessSession {
           id: toolUseID ?? "",
           name: call.tool_name ?? "unknown",
           input: call.tool_input,
-          // M3.5 Tier B: present ONLY inside a subagent. The core policy treats
+          // Present ONLY inside a subagent. The core policy treats
           // subagent-initiated calls read-only (gated actions denied) since a
           // subagent call can't be paused for approval (defer is main-thread-only).
           agentId: call.agent_id,
@@ -385,27 +385,27 @@ class ClaudeCodeSession implements HarnessSession {
       return { hookSpecificOutput: { hookEventName: "PreToolUse" as const, ...out } };
     };
 
-    // M3.5: per-turn harness capabilities (opaque config from the core). model/
+    // Per-turn harness capabilities (opaque config from the core). model/
     // effort tune the implementer; subagents/workflows toggle multi-agent tools;
-    // projectConfig loads a trusted repo's settings (Tier C).
+    // projectConfig loads a trusted repo's settings.
     const h = input.harness;
     const { allowedTools, disallowedTools } = toolPosture(h);
     const model = resolveModel(h?.model);
     const effort = resolveEffort(h?.effort);
-    // Tier C: a trusted repo loads its own project settings + skills; the §4 gate
+    // A trusted repo loads its own project settings + skills; the §4 gate
     // still applies (the PreToolUse hook fires regardless of settingSources, and a
     // hook deny/defer beats any repo allow-rule per SDK precedence). Untrusted
     // (default) stays isolated: no repo CLAUDE.md/.mcp.json/.claude/, no skills.
     const settingSources: ("user" | "project" | "local")[] = h?.projectConfig ? ["project"] : [];
 
-    // M3.6: workflows run under bypassPermissions ONLY so the background workflow's
+    // Workflows run under bypassPermissions ONLY so the background workflow's
     // sub-agent tool calls route through the PreToolUse hook (agent_id-tagged) where
     // the policy confines them — NOT to weaken gating. Hooks outrank permission
     // mode, so main-agent defer/deny and the canUseTool backstop still hold (spike
     // 2026-07-18: diag3/diag4). Non-workflow sessions stay "default" (unchanged).
     const permissionMode = h?.workflows ? ("bypassPermissions" as const) : ("default" as const);
 
-    // The canUseTool backstop (M2) now runs the CORE policy on an `escaped` call —
+    // The canUseTool backstop now runs the CORE policy on an `escaped` call —
     // a call that reached this un-deferrable path instead of the hook (a batched
     // gated call, or a workflow-agent call that didn't carry agent_id). The policy
     // confines it: reads pass, a would-be gate becomes deny (can't defer here), and
@@ -434,34 +434,34 @@ class ClaudeCodeSession implements HarnessSession {
       options: {
         cwd: this.cwd,
         resume: this._handle.sessionId ?? undefined,
-        // M4 §5 rider (a): scrub the daemon's own SLACK_*/CONDOTTO_* secrets from the
+        // rider (a): scrub the daemon's own SLACK_*/CONDOTTO_* secrets from the
         // environment the agent's Bash inherits (belt-and-braces over the §4 policy
         // floor). options.env REPLACES the subprocess env, so this is a denylist
         // spread of process.env that keeps PATH/HOME + the toolchain + the Claude
         // auth token the SDK needs (spike-proven under keychain OAuth).
         env: scrubDaemonEnv(process.env),
         // Point the SDK at the native `claude` CLI when running as a compiled
-        // binary (M4 §2); omitted under `bun run`, where the SDK finds it itself.
+        // binary; omitted under `bun run`, where the SDK finds it itself.
         ...(claudeCliPath() ? { pathToClaudeCodeExecutable: claudeCliPath()! } : {}),
         systemPrompt: { type: "preset", preset: "claude_code", append: this.system },
         allowedTools,
         disallowedTools,
         permissionMode,
-        // M3.5 Tier A: exact SDK model id + reasoning effort. Omitted = SDK
+        // Exact SDK model id + reasoning effort. Omitted = SDK
         // defaults; the core always supplies them (default Opus + high).
         ...(model ? { model } : {}),
         ...(effort ? { effort: effort as "low" | "medium" | "high" | "xhigh" | "max" } : {}),
-        // Intra-turn runaway brake (M3, DESIGN §4). The SDK stops the turn if it
+        // Intra-turn runaway brake (DESIGN §4). The SDK stops the turn if it
         // exceeds this, returning an `error_max_budget_usd` result we surface as
         // a clear Slack notice (never a silent stall). The core passes the
         // session's remaining thread headroom; omitted = no per-turn cap.
         ...(typeof input.budgetUsd === "number" && input.budgetUsd > 0
           ? { maxBudgetUsd: input.budgetUsd }
           : {}),
-        // Tier B: when subagents are enabled, offer the read-only `explorer`
+        // When subagents are enabled, offer the read-only `explorer`
         // subagent (restricted toolset — defense-in-depth over the gate).
         ...(h?.subagents ? { agents: SUBAGENT_DEFS } : {}),
-        // Tier C: load the trusted repo's skills alongside its project settings.
+        // Load the trusted repo's skills alongside its project settings.
         ...(h?.projectConfig ? { skills: "all" as const } : {}),
         // Untrusted (default): never load filesystem settings (CLAUDE.md,
         // .mcp.json, .claude/) from the worktree — repo content is untrusted
@@ -478,7 +478,7 @@ class ClaudeCodeSession implements HarnessSession {
     });
 
     // Expose the running query so an out-of-band interrupt() (architect `@Condotto
-    // cancel`, M4 §5) can reach it. Cleared in the finally.
+    // cancel`) can reach it. Cleared in the finally.
     this.activeQuery = q;
     let sawResult = false;
     // A workflow turn produces MULTIPLE `result` messages: an intermediate
@@ -487,11 +487,11 @@ class ClaudeCodeSession implements HarnessSession {
     // success and deliver only it at turn end, so the human sees the real answer,
     // not "launched; waiting". A terminal deferred/error supersedes and clears it.
     let pendingReply: { text: string; costUsd?: number } | null = null;
-    // M3.6 Tier 2: track the background workflow so we can stream a live status
+    // Track the background workflow so we can stream a live status
     // line and tag the final reply for the summary footer.
     let sawWorkflow = false;
     let lastWorkflowDesc = "";
-    // M4 §5 rider (b): when a turn is interrupted — inactivity timeout, an architect
+    // rider (b): when a turn is interrupted — inactivity timeout, an architect
     // `@Condotto cancel`, or a budget breach that hit a RUNNING workflow — we stop the
     // (possibly detached) background task and DRAIN the aborted result's cost into the
     // ledger, then post one notice. `q.interrupt()` is the only lever that actually
@@ -553,7 +553,7 @@ class ClaudeCodeSession implements HarnessSession {
           }
           continue;
         }
-        // M3.6 Tier 2: a running workflow emits background-task lifecycle system
+        // A running workflow emits background-task lifecycle system
         // messages (task_started/task_progress/task_updated, background_tasks_
         // changed). Note the workflow ran, and stream a live status line — but only
         // when the description changes (task_progress repeats per agent as tokens
@@ -595,7 +595,7 @@ class ClaudeCodeSession implements HarnessSession {
             | { id?: string; name?: string; input?: unknown }
             | undefined;
           if (m.terminal_reason === "tool_deferred" || deferred) {
-            // A gated tool call was deferred (M0-verified handshake). Hand the
+            // A gated tool call was deferred (verified handshake). Hand the
             // preserved pending call to the core to record an approval; the turn
             // is over until an architect decides and the session is resumed. A
             // defer is the real outcome — drop any buffered intermediate reply.
@@ -631,7 +631,7 @@ class ClaudeCodeSession implements HarnessSession {
               await q.interrupt().catch(() => {});
               continue;
             }
-            // The turn hit its cost budget and stopped (M3). Surface it clearly
+            // The turn hit its cost budget and stopped. Surface it clearly
             // with the spend — the core will then pause the session (§4).
             pendingReply = null;
             yield {
@@ -700,7 +700,7 @@ class ClaudeCodeSession implements HarnessSession {
   }
 
   /**
-   * Interrupt the in-flight turn's query (M4 §5): halts a wedged/over-cap multi-agent
+   * Interrupt the in-flight turn's query: halts a wedged/over-cap multi-agent
    * workflow — `q.interrupt()` is the only lever that actually stops the DETACHED
    * background task (spike b) — and lets the turn loop drain the aborted result's
    * cost. A no-op when no turn is running, so an architect `@Condotto cancel` on an
@@ -747,7 +747,7 @@ function describeToolUse(name: string, input: unknown): string {
 }
 
 /**
- * A live status line for a workflow background-task system message (M3.6 Tier 2).
+ * A live status line for a workflow background-task system message.
  * Returns null for events not worth surfacing. `task_progress.description` is the
  * per-agent activity (e.g. "Read: read-readme"); `background_tasks_changed` marks
  * the running set. Kept terse (Slack ergonomics) — the caller de-dups repeats.
@@ -783,11 +783,11 @@ export class ClaudeCodeAdapter implements HarnessAdapter {
     private turnInactivityMs: number = TURN_INACTIVITY_MS,
   ) {}
   readonly capabilities: HarnessCapabilities = {
-    mechanicalGating: true, // defer-based gating (M0-verified), wired live in M2
+    mechanicalGating: true, // defer-based gating (verified), wired live
     resumeAfterRestart: true,
     costReporting: true, // notional API pricing on subscription auth — usage governance only
-    imageInput: true, // the runtime accepts images; the TurnInput image path arrives with M3 attachments
-    // M3.5: the tokens the core validates an architect's model/effort against.
+    imageInput: true, // the runtime accepts images; the TurnInput image path arrives with attachments
+    // The tokens the core validates an architect's model/effort against.
     supportedModels: SUPPORTED_MODELS, // ["opus","sonnet","fable"]
     supportedEfforts: SUPPORTED_EFFORTS, // ["low","medium","high","xhigh","max"]
   };

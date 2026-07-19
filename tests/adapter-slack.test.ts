@@ -8,7 +8,7 @@ import type { Principal } from "../src/core/types";
 const BOT = "UBOT123";
 const parse = (text: string) => parseMentionCommand(`<@${BOT}> ${text}`, BOT);
 
-describe("resolveUserMention (M3.8)", () => {
+describe("resolveUserMention", () => {
   test("a linkified mention resolves to a principal key; the id case is preserved", () => {
     expect(resolveUserMention("<@U0ABBY>", BOT)).toBe("slack:U0ABBY");
     expect(resolveUserMention("<@U0ABBY|abby>", BOT)).toBe("slack:U0ABBY"); // label ignored
@@ -22,7 +22,7 @@ describe("resolveUserMention (M3.8)", () => {
   });
 });
 
-describe("parseMentionCommand — grant/revoke/auto-approve (M3.8)", () => {
+describe("parseMentionCommand — grant/revoke/auto-approve", () => {
   test("grant resolves the target and lowercases the role, preserving the id case", () => {
     expect(parse("grant <@U0ABBY> architect")).toEqual({ name: "grant", args: "slack:U0ABBY architect" });
     expect(parse("grant <@U0ABBY> Architect")).toEqual({ name: "grant", args: "slack:U0ABBY architect" });
@@ -49,7 +49,7 @@ describe("parseMentionCommand — grant/revoke/auto-approve (M3.8)", () => {
   });
 });
 
-describe("slashEphemeralText — /condotto console routing (M4 §4)", () => {
+describe("slashEphemeralText — /condotto console routing", () => {
   const author: Principal = { surface: "slack", externalId: "U1" };
   const op: OperatorConsole = {
     operatorStatus: (a, ch) => `OPS ${a.externalId}@${ch}`,
@@ -71,20 +71,20 @@ describe("slashEphemeralText — /condotto console routing (M4 §4)", () => {
 });
 
 describe("parseMentionCommand — existing forms still parse (regression)", () => {
-  test("M3.5/M3.6 controls are unchanged", () => {
+  test("controls are unchanged", () => {
     expect(parse("model opus")).toEqual({ name: "model", args: "opus" });
     expect(parse("subagents on")).toEqual({ name: "subagents", args: "on" });
     expect(parse("workflows write on")).toEqual({ name: "workflows", args: "write on" });
     expect(parse("stop")).toEqual({ name: "stop", args: "" });
   });
 
-  test("`stop clean` parses to the clean variant; a stray arg stays conversation (M4 §3)", () => {
+  test("`stop clean` parses to the clean variant; a stray arg stays conversation", () => {
     expect(parse("stop clean")).toEqual({ name: "stop", args: "clean" });
     expect(parse("stop please")).toBeNull(); // not a command → conversation
     expect(parse("stop clean now")).toBeNull(); // over-arity → conversation
   });
 
-  test("`cancel` parses; a stray arg stays conversation (M4 §5)", () => {
+  test("`cancel` parses; a stray arg stays conversation", () => {
     expect(parse("cancel")).toEqual({ name: "cancel", args: "" });
     expect(parse("cancel the workflow")).toBeNull(); // over-arity → conversation, not a command
   });

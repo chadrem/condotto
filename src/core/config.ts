@@ -3,7 +3,7 @@ import { resolve } from "node:path";
 import { existsSync, readFileSync } from "node:fs";
 import type { RepoConfig, Role } from "./types";
 
-// Condotto's single source of truth is one TOML file, `condotto.toml` (M4 §1),
+// Condotto's single source of truth is one TOML file, `condotto.toml`,
 // consolidating what used to be scattered across `.env`, `condotto.repos.json`,
 // `condotto.roles.json`, and `CONDOTTO_*` env vars. This module is the ONLY config
 // parser: it discovers, reads, validates, and shapes that file into the core
@@ -29,20 +29,20 @@ export interface CondottoConfig {
   worktreesRoot: string; // absolute; worktree paths must be stable forever
   repos: RepoConfig[];
   roles: RoleMapping[]; // seeded into the store at boot
-  /** Daemon-wide per-thread cost ceiling (M3), used when a repo sets none. */
+  /** Daemon-wide per-thread cost ceiling, used when a repo sets none. */
   defaultCostCapUsd: number;
-  /** Max harness turns running at once across all sessions (M3 §7 concurrency). */
+  /** Max harness turns running at once across all sessions (concurrency). */
   maxConcurrentTurns: number;
   /**
-   * Daemon-wide default model/effort tokens (M3.5 Tier A), used when a repo sets
+   * Daemon-wide default model/effort tokens, used when a repo sets
    * none. Opaque tokens the harness adapter validates; the north-star wants the
    * implementer to be first-class, so the default is Opus + high (DESIGN §1, §8).
    */
   defaultModel: string;
   defaultEffort: string;
   /**
-   * Daemon-wide default for the M3.8 architect self-approve setting, used when a
-   * repo sets no `auto_approve`. On by default (DESIGN §4:441-444 sanctions
+   * Daemon-wide default for the architect self-approve setting, used when a
+   * repo sets no `auto_approve`. On by default (DESIGN §4 sanctions
    * per-thread widening; the architect dials it off per thread/repo). Override
    * with `[defaults].auto_approve = false` or `CONDOTTO_AUTO_APPROVE=off`.
    */
@@ -60,14 +60,14 @@ export const DEFAULT_COST_CAP_USD = 10;
 /** Default cap on concurrently-executing harness turns (protects the box). */
 export const DEFAULT_MAX_CONCURRENT_TURNS = 6;
 /**
- * Default implementer model/effort (M3.5 Tier A). Opus + high: the implementer
+ * Default implementer model/effort. Opus + high: the implementer
  * must be first-class for a PM to build a real feature (DESIGN §1 north-star).
  * Opaque tokens — the harness adapter maps/validates them.
  */
 export const DEFAULT_MODEL = "opus";
 export const DEFAULT_EFFORT = "high";
 
-/** Default location and env override for the single config file (M4 §1). */
+/** Default location and env override for the single config file. */
 export const DEFAULT_CONFIG_PATH = "condotto.toml";
 
 /**
@@ -77,10 +77,10 @@ export const DEFAULT_CONFIG_PATH = "condotto.toml";
  *
  * NOTE (deviation from DESIGN.md §4's examples, logged in DECISIONS.md): `cat`
  * and `ls` are intentionally NOT here. Auto-allowing them via Bash would bypass
- * worktree read-confinement (Bash arg confinement is only heuristic in M2), so
+ * worktree read-confinement (Bash arg confinement is only heuristic), so
  * file reads go through the confined Read/Grep tools instead. A repo may add its
  * own commands (incl. its test command) via `safe_bash_allowlist` if it accepts
- * the risk. Positive Bash-arg confinement is M3/M4.
+ * the risk. Positive Bash-arg confinement is future hardening.
  */
 export const DEFAULT_SAFE_BASH_ALLOWLIST = [
   "git status",
@@ -259,15 +259,15 @@ function parseRepoEntry(entry: unknown, where: string): RepoConfig {
     landCmd: optString(e.land_cmd, `${where}.land_cmd`),
     deployCmd: optString(e.deploy_cmd, `${where}.deploy_cmd`),
     costCapUsd: optPosNumber(e.cost_cap_usd, `${where}.cost_cap_usd`),
-    // M3.5: opaque model/effort tokens (validated by the harness adapter) and the
-    // Tier C trust flag. `trusted` must be an explicit boolean true — a truthy
+    // Opaque model/effort tokens (validated by the harness adapter) and the
+    // trust flag. `trusted` must be an explicit boolean true — a truthy
     // string won't do, since it opens a repo's config/MCP to the agent. optBool
     // fails fast on a non-boolean (e.g. trusted = "true"), so a typo can't
     // silently disable trust the operator thinks they enabled.
     defaultModel: optString(e.default_model, `${where}.default_model`),
     defaultEffort: optString(e.default_effort, `${where}.default_effort`),
     trusted: optBool(e.trusted, `${where}.trusted`) === true,
-    // M3.8: per-repo default for architect self-approve. Only an explicit boolean
+    // Per-repo default for architect self-approve. Only an explicit boolean
     // pins it; anything else (absent) = fall back to the daemon-wide default.
     autoApprove: optBool(e.auto_approve, `${where}.auto_approve`),
   };
@@ -319,7 +319,7 @@ function parseRepos(toml: Record<string, unknown>, env: Record<string, string | 
  * list, the single-architect convenience). A principal is surface-qualified:
  * "slack:U0123ABC".
  *
- * Precedence (matches the pre-M4 reader): on a same-(principal, scope) collision
+ * Precedence (matches the previous reader): on a same-(principal, scope) collision
  * the FILE wins over the env `CONDOTTO_ARCHITECTS` quick-list — so an explicit
  * `[[roles]]` demotion in the authoritative file sticks even if the same
  * principal is still named in the env var. (This is the one place env does NOT
@@ -382,7 +382,7 @@ const PATHS_KEYS = ["db", "worktrees_root"] as const;
 const DEFAULTS_KEYS = ["model", "effort", "auto_approve", "cost_cap_usd", "max_concurrent_turns"] as const;
 
 /**
- * Load and validate the core configuration from `condotto.toml` (M4 §1). `env`
+ * Load and validate the core configuration from `condotto.toml`. `env`
  * supplies overrides (defaults to `process.env`); `configPathOverride` is the
  * daemon's `--config` argument. Throws fast with an actionable message on a
  * missing file, malformed TOML, or an invalid required field.
@@ -399,7 +399,7 @@ export function loadConfig(
   const defaults = toml.defaults === undefined ? {} : asTable(toml.defaults, "[defaults]");
   warnUnknownKeys(defaults, DEFAULTS_KEYS, "[defaults]");
 
-  // M3.8 architect self-approve, on unless explicitly disabled. Accept the usual
+  // Architect self-approve, on unless explicitly disabled. Accept the usual
   // falsey spellings so `CONDOTTO_AUTO_APPROVE=off|false|0|no` all turn it off.
   const autoApproveEnv = envStr(env.CONDOTTO_AUTO_APPROVE)?.toLowerCase();
   const autoApproveFile = optBool(defaults.auto_approve, "[defaults].auto_approve");

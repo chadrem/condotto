@@ -13,7 +13,7 @@ import { SlackAdapter } from "./adapters/slack/adapter";
 
 const log = (msg: string) => console.log(`${new Date().toISOString()} ${msg}`);
 
-/** How often the daemon sweeps for collectible worktrees (M4 §3). A boot sweep
+/** How often the daemon sweeps for collectible worktrees. A boot sweep
  *  plus this tick reclaim clean-stopped (past-retention) and orphaned trees; the
  *  sweep never touches a live/parked worktree (§2 journey 5). */
 const WORKTREE_GC_INTERVAL_MS = 60 * 60 * 1000; // hourly
@@ -44,8 +44,8 @@ function helpText(prog: string): string {
   ].join("\n");
 }
 
-/** Minimal `--config <path>` / `--config=<path>` argv scan (M4 §1; the rest of
- *  the CLI — --version/--help — is M4 §2). Env `CONDOTTO_CONFIG` also works. A
+/** Minimal `--config <path>` / `--config=<path>` argv scan (the rest of
+ *  the CLI — --version/--help — is handled separately). Env `CONDOTTO_CONFIG` also works. A
  *  `--config` with no path (or a flag-shaped/empty value) is an error, not a
  *  silent fall-through to default discovery. */
 function parseConfigArg(argv: string[]): string | undefined {
@@ -64,7 +64,7 @@ function parseConfigArg(argv: string[]): string | undefined {
 }
 
 async function main(): Promise<void> {
-  // Informational CLI (M4 §2) short-circuits before any config work, so
+  // Informational CLI short-circuits before any config work, so
   // `--help`/`--version` always succeed — even without a valid condotto.toml, and
   // regardless of a malformed `--config` elsewhere on the line.
   const argv = process.argv;
@@ -77,7 +77,7 @@ async function main(): Promise<void> {
     return;
   }
 
-  // Single source of truth is condotto.toml (M4 §1). A bad --config flag, a
+  // Single source of truth is condotto.toml. A bad --config flag, a
   // missing file, malformed TOML, or a bad required field throws here with an
   // actionable message — never a half-started daemon.
   let config: ReturnType<typeof loadConfig>;
@@ -106,7 +106,7 @@ async function main(): Promise<void> {
   for (const repo of config.repos) store.upsertRepo(repo);
   // Config is the source of truth for CONFIG roles: clear and re-seed so removing a
   // principal from config actually revokes their authority. Runtime `@Condotto grant`
-  // delegations (source='grant') are preserved across the reseed (M3.8).
+  // delegations (source='grant') are preserved across the reseed.
   store.clearConfigRoles();
   for (const r of config.roles) store.setRole(r.principal, r.role, r.scope);
   const architects = config.roles.filter((r) => r.role === "architect").length;
@@ -131,7 +131,7 @@ async function main(): Promise<void> {
     defaultAutoApprove: config.defaultAutoApprove,
   });
   // Warn loudly if the configured default model/effort isn't one the harness
-  // accepts — better a boot-time warning than a silent per-turn fallback (M3.5).
+  // accepts — better a boot-time warning than a silent per-turn fallback.
   if (!harness.capabilities.supportedModels.includes(config.defaultModel)) {
     log(`[daemon] WARNING: default model "${config.defaultModel}" not in harness models [${harness.capabilities.supportedModels.join(", ")}] — turns fall back to the SDK default`);
   }
@@ -145,7 +145,7 @@ async function main(): Promise<void> {
       `architect auto-approve ${config.defaultAutoApprove ? "ON" : "off"} by default`,
   );
 
-  // Worktree GC (M4 §3): sweep once at boot — before any surface is live, so a
+  // Worktree GC: sweep once at boot — before any surface is live, so a
   // reactivation can't race the initial teardown — then hand off to a timer below.
   // Never touches a live/parked worktree (§2 journey 5); best-effort, never fatal.
   {
@@ -166,7 +166,7 @@ async function main(): Promise<void> {
   const slack = new SlackAdapter(
     slackCreds,
     { isArchitect: (p, channelId) => store.isArchitect(principalKey(p), channelId) },
-    // Operator console (M4 §4): the core renders the daemon-wide `/condotto status`
+    // Operator console: the core renders the daemon-wide `/condotto status`
     // dashboard and the `/condotto stop` session list; the adapter delivers them
     // ephemerally. Least-privilege object literal (not the whole manager).
     {
@@ -183,7 +183,7 @@ async function main(): Promise<void> {
   const parked = store.listSessions({ surfaceId: slack.id }).length;
   log(`[daemon] ready — db=${config.dbPath}, sessions on record: ${parked}`);
 
-  // Periodic worktree GC (M4 §3). unref() so it never keeps the process alive; a
+  // Periodic worktree GC. unref() so it never keeps the process alive; a
   // re-entrancy guard skips a tick if the prior sweep is still running (git spawns).
   let gcRunning = false;
   const gcTimer = setInterval(() => {

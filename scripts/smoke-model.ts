@@ -1,4 +1,4 @@
-// M3.5 Tier A smoke: prove the REAL claude-code adapter applies `model` + `effort`
+// model/effort smoke: prove the REAL claude-code adapter applies `model` + `effort`
 // via query() options on live subscription auth. Runs two trivial read-only turns
 // on one session — Opus/high, then a mid-session switch to Fable/low — and confirms
 // each completes with a reply and no error. This exercises the exact SDK model IDs
@@ -26,7 +26,7 @@ const adapter = new ClaudeCodeAdapter();
 console.log(`[smoke] adapter supportedModels=${adapter.capabilities.supportedModels.join(",")} supportedEfforts=${adapter.capabilities.supportedEfforts.join(",")}`);
 const session = await adapter.create({
   cwd: worktree.path,
-  system: "You are Condotto (M3.5 smoke). Answer in one short sentence, no tools.",
+  system: "You are Condotto (smoke). Answer in one short sentence, no tools.",
 });
 
 const cases: { model: string; effort: string }[] = [

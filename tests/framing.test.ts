@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { frameMessage, sanitizeDisplayName } from "../src/core/framing";
 
 // Appendix A1 / DESIGN section 4: framing must be unforgeable by message content
-// — the exact content-forges-authority attack found in the prototype. M3
+// — the exact content-forges-authority attack found in the prototype. The framing
 // red-teams it: header-only authority, an unforgeable random-nonce body fence,
 // and line quoting after normalizing every break + stripping control/bidi chars.
 

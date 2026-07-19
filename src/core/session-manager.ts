@@ -20,7 +20,7 @@ import { frameMessage } from "./framing";
 import { evaluate, describeCall, type PolicyContext, type PolicyConcern } from "./policy";
 
 /**
- * A surface-qualified principal key, e.g. "slack:U0123ABC" (M3.8 grant/revoke).
+ * A surface-qualified principal key, e.g. "slack:U0123ABC" (grant/revoke).
  * Same shape config validates (config.ts) — the adapter resolves a Slack mention to
  * this before it reaches the core, or emits a sentinel that fails this test.
  */
@@ -42,10 +42,10 @@ const CONCERN_TEXT: Record<PolicyConcern, string> = {
 // nothing platform-shaped crosses into here. One conversation maps to exactly
 // one session forever; the store's UNIQUE constraint backs that invariant.
 //
-// M2 adds the policy engine + approval loop (DESIGN.md §4, §8). Every tool call
+// The policy engine + approval loop (DESIGN.md §4, §8) run here. Every tool call
 // flows through an approval-aware gate:
 //   - a re-driven call with a recorded architect decision short-circuits to
-//     allow/deny (the resume half of the M0 defer handshake);
+//     allow/deny (the resume half of the defer handshake);
 //   - otherwise the policy engine classifies it allow / gate / deny.
 // A `gate` becomes a `defer` in the harness; when the turn ends deferred, the
 // manager records an approval and asks the surface to post Approve/Deny. An
@@ -74,14 +74,14 @@ function condottoSystemPrompt(opts: {
     ? `- You can run this repo's tests without approval: \`${opts.testCmd}\`. Run them ` +
       `to verify your changes before proposing to land.`
     : null;
-  // M3.5 Tier B: guidance when the architect has enabled subagents.
+  // Guidance when the architect has enabled subagents.
   const delegation = opts.subagents
     ? `- You can delegate READ-ONLY exploration and analysis to subagents (the Agent tool) so they ` +
       `investigate in parallel. Subagents CANNOT write files, run shell commands, or spawn more ` +
       `subagents — those are gated and only you, the main agent, may do them so an architect can ` +
       `approve. Use subagents to gather findings; you make the edits yourself.`
     : null;
-  // M3.6: guidance when the architect has enabled multi-agent workflows. Note the
+  // Guidance when the architect has enabled multi-agent workflows. Note the
   // real toolset limit: workflow sub-agents reliably READ/analyze files in parallel,
   // but can't Grep or run shell (an SDK background-task restriction), so do the
   // grep/enumeration YOURSELF first, then fan the found files out to be read.
@@ -160,7 +160,7 @@ interface LiveEntry {
   chain: Promise<void>;
   /**
    * The `subagents:workflows` state the cached harness's system prompt was built
-   * with (M3.5). getOrAttachHarness re-attaches when it differs from the fresh
+   * with. getOrAttachHarness re-attaches when it differs from the fresh
    * session row, so a capability toggle always yields fresh delegation guidance —
    * without an out-of-band cache invalidation that could race an in-flight attach.
    */
@@ -168,41 +168,41 @@ interface LiveEntry {
 }
 
 export interface SessionManagerOptions {
-  /** Per-thread cost ceiling (USD) when a repo sets none (M3, DESIGN §4). */
+  /** Per-thread cost ceiling (USD) when a repo sets none (DESIGN §4). */
   defaultCostCapUsd?: number;
-  /** Max harness turns running at once across all sessions (M3 §7). */
+  /** Max harness turns running at once across all sessions. */
   maxConcurrentTurns?: number;
-  /** Runs repo land/deploy commands (M3); injectable for tests. */
+  /** Runs repo land/deploy commands; injectable for tests. */
   commandRunner?: CommandRunnerLike;
   /**
-   * Daemon-wide default model/effort tokens (M3.5 Tier A), used when a session
+   * Daemon-wide default model/effort tokens, used when a session
    * (and its repo) sets none. Opaque — validated against the harness adapter's
    * capabilities. Default Opus + high (DESIGN §1 north-star: a first-class agent).
    */
   defaultModel?: string;
   defaultEffort?: string;
   /**
-   * Daemon-wide default for architect self-approve (M3.8), used when a session's
-   * repo sets no `default_auto_approve`. On by default (DESIGN §4:441-444).
+   * Daemon-wide default for architect self-approve, used when a session's
+   * repo sets no `default_auto_approve`. On by default (DESIGN §4).
    */
   defaultAutoApprove?: boolean;
   /**
    * How long after an explicit `@Condotto stop clean` the GC keeps the worktree
-   * before collecting it (M4 §3). A grace window: the clean-stopped session stays
+   * before collecting it. A grace window: the clean-stopped session stays
    * reactivatable until it elapses (a reactivation cancels the teardown). Default
    * 24h. A plain `stop` is never scheduled, so this never applies to it.
    */
   worktreeRetentionMs?: number;
   /**
    * Grace period an orphan directory (a worktree with no session row) must exceed
-   * before the GC collects it (M4 §3). Guards the GC-vs-create race: an in-flight
+   * before the GC collects it. Guards the GC-vs-create race: an in-flight
    * assign creates its worktree on disk a beat before its DB row exists, so a
    * just-created tree must never be mistaken for an orphan. Default 10 min — vastly
    * longer than an assign, so a real crash-orphan still ages out promptly.
    */
   orphanMinAgeMs?: number;
   /**
-   * Epoch-ms the daemon started (M4 §4 operator status uptime). The manager is
+   * Epoch-ms the daemon started (operator status uptime). The manager is
    * constructed once at boot, so it defaults to construction time — a faithful
    * proxy for daemon uptime. Injectable so tests get a deterministic uptime.
    */
@@ -211,14 +211,14 @@ export interface SessionManagerOptions {
 
 /** Prefix marking an approval whose action the daemon runs itself (land/deploy) */
 const SHIP_TOOL_PREFIX = "condotto:";
-/** The multi-agent Workflow tool name (M4 §5). An approved Workflow LAUNCH resumes
+/** The multi-agent Workflow tool name. An approved Workflow LAUNCH resumes
  *  into a background workflow that can run away, so — unlike a single approved write —
  *  its resume turn is budget-capped so the auto-cancel-on-breach brake arms. */
 const WORKFLOW_TOOL_NAME = "Workflow";
 
 /**
  * Counting semaphore bounding how many harness turns execute concurrently across
- * all sessions (M3, DESIGN §7). Per-session turns are already serialized by the
+ * all sessions (DESIGN §7). Per-session turns are already serialized by the
  * FIFO; this protects the box from N simultaneous heavy `query()` processes when
  * many threads are active. FIFO order guarantees no deadlock: a turn never waits
  * on another turn of the same session while holding a slot.
@@ -242,14 +242,14 @@ class Semaphore {
     if (next) next(); // hand the slot to the next waiter (active unchanged)
     else this.active--; // no waiter — free the slot
   }
-  /** Point-in-time load for the operator status (M4 §4): turns running now, the
+  /** Point-in-time load for the operator status: turns running now, the
    *  cap, and how many are queued waiting for a slot. */
   snapshot(): { active: number; max: number; waiting: number } {
     return { active: this.active, max: this.max, waiting: this.waiters.length };
   }
 }
 
-/** Human-readable elapsed time for the operator status uptime (M4 §4). Coarse by
+/** Human-readable elapsed time for the operator status uptime. Coarse by
  *  design — two largest units — since operators glance at it, not stopwatch it. */
 function formatDuration(ms: number): string {
   const s = Math.max(0, Math.floor(ms / 1000));
@@ -275,7 +275,7 @@ export class SessionManager {
   private readonly orphanMinAgeMs: number;
   private readonly turnSlots: Semaphore;
   private readonly commandRunner: CommandRunnerLike;
-  /** Daemon start time for the operator-status uptime (M4 §4). */
+  /** Daemon start time for the operator-status uptime. */
   private readonly startedAt: number;
 
   constructor(
@@ -298,7 +298,7 @@ export class SessionManager {
     this.startedAt = opts.startedAt ?? Date.now();
   }
 
-  // -- harness capability helpers (M3.5) ------------------------------------
+  // -- harness capability helpers ------------------------------------
 
   private supportsModel(token: string): boolean {
     return this.harness.capabilities.supportedModels.includes(token);
@@ -314,11 +314,11 @@ export class SessionManager {
     return session.effort ?? this.defaultEffort;
   }
   /**
-   * "Ultra" is a preset, not stored state (M3.5/M3.6): it means subagents on AND
+   * "Ultra" is a preset, not stored state: it means subagents on AND
    * workflows on AND xhigh effort — the full "max it out" posture (the SDK analogue
    * of CLI "ultracode"). Derived so the label always reflects the effective posture,
-   * however it was reached. (M3.6 re-folded the Workflow tool back in — it was
-   * dropped in M3.5 while workflows were disabled.)
+   * however it was reached. (The Workflow tool was re-folded back in — it was
+   * dropped earlier while workflows were disabled.)
    */
   private isUltra(session: SessionRow): boolean {
     return (
@@ -327,7 +327,7 @@ export class SessionManager {
       this.effectiveEffort(session) === "xhigh"
     );
   }
-  /** One-line human summary of a session's harness capabilities (M3.5/M3.6). */
+  /** One-line human summary of a session's harness capabilities. */
   private capabilitySummary(session: SessionRow): string {
     const parts = [
       `model \`${this.effectiveModel(session)}\``,
@@ -345,7 +345,7 @@ export class SessionManager {
 
   /**
    * A settings announcement posted when Condotto joins (or rejoins) a thread —
-   * like Claude Code's startup banner (M3.5). Lists EVERY setting, including the
+   * like Claude Code's startup banner. Lists EVERY setting, including the
    * ones that are off, so the current posture is unambiguous at a glance. The
    * repo row supplies trust + the test command.
    */
@@ -516,7 +516,7 @@ export class SessionManager {
       // Serialize through the FIFO so it cannot overlap an in-flight turn.
       const entry = this.entryFor(existing.id);
       entry.chain = entry.chain.then(async () => {
-        // Re-read under the FIFO: the worktree GC (M4 §3) may have discarded a
+        // Re-read under the FIFO: the worktree GC may have discarded a
         // clean-stopped session in the tiny window between our top-of-method read
         // and this link. If so, there is nothing to reactivate — the tree/branch
         // are gone; ask for a fresh assign rather than post a false "reactivated".
@@ -529,7 +529,7 @@ export class SessionManager {
         }
         this.store.updateSessionStatus(existing.id, "parked");
         // A clean-stopped session being reactivated cancels its scheduled teardown
-        // (M4 §3) — the worktree lives on for the resumed work (journey 6).
+        // — the worktree lives on for the resumed work (journey 6).
         this.store.clearSessionCleanup(existing.id);
         // Drop any approval left pending from before the stop — it refers to an
         // abandoned turn and would otherwise wedge the reactivated session (#7).
@@ -571,7 +571,7 @@ export class SessionManager {
     if (repo.default_effort && !this.supportsEffort(repo.default_effort)) {
       this.log(`[assign] repo ${repo.name} default_effort "${repo.default_effort}" is unsupported — using daemon default`);
     }
-    // Seed architect self-approve (M3.8): repo override (0/1), else daemon default.
+    // Seed architect self-approve: repo override (0/1), else daemon default.
     const seedAutoApprove = repo.default_auto_approve ?? (this.defaultAutoApprove ? 1 : 0);
 
     let session: SessionRow;
@@ -589,16 +589,16 @@ export class SessionManager {
         status: "parked",
         // Seed the per-thread cost ceiling: repo override, else daemon default.
         budget_limit_usd: repo.cost_cap_usd ?? this.defaultCostCapUsd,
-        // Seed model/effort (M3.5); null = fall back to the daemon default at turn time.
+        // Seed model/effort; null = fall back to the daemon default at turn time.
         model: seedModel,
         effort: seedEffort,
-        // Seed architect self-approve (M3.8).
+        // Seed architect self-approve.
         auto_approve: seedAutoApprove,
       });
     } catch (err) {
       if (err instanceof ConflictError) {
         // Lost an assign race: the worktree we just created (at our own losing
-        // session id) has no session row and would leak (M4 §3). Tear it down
+        // session id) has no session row and would leak. Tear it down
         // immediately — precise, since we hold the exact repo + branch. Best-effort:
         // the GC orphan sweep is the backstop if this fails.
         await this.worktrees
@@ -633,7 +633,7 @@ export class SessionManager {
   }
 
   /**
-   * Guide a human who pinged Condotto (M3.1). State-aware: an assigned thread gets
+   * Guide a human who pinged Condotto. State-aware: an assigned thread gets
    * the command summary; an UNASSIGNED thread gets onboarding — "which repo?" as
    * clickable choices where the surface supports them (assignment is architect-
    * only; the core re-verifies on the click), else a text fallback listing the
@@ -674,7 +674,7 @@ export class SessionManager {
     });
   }
 
-  /** A human picked an option from a ChoicePrompt (M3.1). */
+  /** A human picked an option from a ChoicePrompt. */
   private async handleChoice(event: Extract<InboundEvent, { kind: "choice" }>): Promise<void> {
     if (event.choiceId === "assign_repo") {
       // Authority is (re-)verified inside assign — a non-architect click is refused.
@@ -686,7 +686,7 @@ export class SessionManager {
 
   /**
    * `@Condotto status` (in-thread mention) — the CHANNEL-scoped session list, posted
-   * publicly into the thread. Unchanged in M4 §4: the daemon-wide operator view moved
+   * publicly into the thread. Unchanged: the daemon-wide operator view moved
    * to the `/condotto status` slash command (see `operatorStatus`); this stays the
    * lightweight "what's running here" a member can ask for.
    */
@@ -699,7 +699,7 @@ export class SessionManager {
   }
 
   /**
-   * The channel-scoped session list as text (M4 §4 shared helper), or null when
+   * The channel-scoped session list as text (shared helper), or null when
    * the channel has none. Feeds the in-thread `@Condotto status` and the operator's
    * `/condotto stop` session listing. Scoped to `surfaceId` when given (the mention
    * path knows it); the slash path passes only the channel (a channel id is unique
@@ -717,8 +717,8 @@ export class SessionManager {
   }
 
   /**
-   * `/condotto status` — the daemon-wide, architect-only OPERATOR dashboard (M4 §4,
-   * DESIGN §8-(5)). Called synchronously by the surface adapter (like `isArchitect`,
+   * `/condotto status` — the daemon-wide, architect-only OPERATOR dashboard
+   * (DESIGN §8-(5)). Called synchronously by the surface adapter (like `isArchitect`,
    * mirroring the `SurfaceAuthority` injection) and rendered as an EPHEMERAL reply,
    * so it never spams a channel. Read-only telemetry: uptime, session counts across
    * ALL channels, turns-in-flight vs the concurrency cap, the daemon-wide pending-
@@ -755,7 +755,7 @@ export class SessionManager {
   }
 
   /**
-   * `/condotto stop` — the operator's ephemeral guidance (M4 §4). A custom slash
+   * `/condotto stop` — the operator's ephemeral guidance. A custom slash
    * command can't run inside a thread, so it can't target a stop; instead it lists
    * this channel's live sessions (so the operator can find the thread) and points
    * them at the in-thread `@Condotto stop` (mirroring `@Condotto assign`). Closes the
@@ -775,7 +775,7 @@ export class SessionManager {
    * `@Condotto stop [clean]` (architect-only, DESIGN §2 journey 6). Plain `stop`
    * ends the session but KEEPS its worktree for reactivation (journey 6 / §2 j5);
    * `stop clean` additionally schedules the worktree for teardown a retention
-   * interval later (M4 §3) — a grace window in which a re-assign still recovers it.
+   * interval later — a grace window in which a re-assign still recovers it.
    */
   private async stopSession(conv: ConversationRef, author: Principal, args: string): Promise<void> {
     const surface = this.surfaceFor(conv);
@@ -846,7 +846,7 @@ export class SessionManager {
   }
 
   /**
-   * `@Condotto cancel` (M4 §5) — architect-only. Interrupt the session's IN-FLIGHT
+   * `@Condotto cancel` — architect-only. Interrupt the session's IN-FLIGHT
    * turn (a wedged or over-cap multi-agent workflow) WITHOUT ending the session, so
    * the thread continues. The harness halts the — possibly detached — background task
    * via `q.interrupt()` (the only lever that actually stops it — spike b) and drains
@@ -882,7 +882,7 @@ export class SessionManager {
     await this.live.get(session.id)?.harness?.interrupt().catch(() => {});
   }
 
-  /** Human label for the worktree retention window (M4 §3 stop-clean messaging). */
+  /** Human label for the worktree retention window (stop-clean messaging). */
   private retentionLabel(): string {
     const hours = this.worktreeRetentionMs / 3_600_000;
     if (hours >= 1) {
@@ -894,7 +894,7 @@ export class SessionManager {
   }
 
   /**
-   * Worktree garbage collection (M4 §3, DESIGN §8-(3)). Reclaims disk from
+   * Worktree garbage collection (DESIGN §8-(3)). Reclaims disk from
    * worktrees no longer bound to a live or parked session, and NEVER touches one
    * that is — the park-and-resume invariant (§2 journey 5). Two collection targets:
    *
@@ -978,7 +978,7 @@ export class SessionManager {
     return { cleaned, orphans };
   }
 
-  /** `@Condotto budget <usd>` — architect raises/lowers the thread cost cap (M3). */
+  /** `@Condotto budget <usd>` — architect raises/lowers the thread cost cap. */
   private async setBudget(conv: ConversationRef, author: Principal, args: string): Promise<void> {
     const surface = this.surfaceFor(conv);
     const session = this.store.getSessionByConversation(conv.surfaceId, conv.conversationId);
@@ -1005,7 +1005,7 @@ export class SessionManager {
   }
 
   /**
-   * `@Condotto model <opus|sonnet|fable>` (M3.5 Tier A). Architect tunes the
+   * `@Condotto model <opus|sonnet|fable>`. Architect tunes the
    * implementer's model per thread. The token is opaque to the core — it is only
    * validated for membership in the harness adapter's advertised `supportedModels`
    * (the adapter maps it to the concrete SDK id), so the core never learns SDK
@@ -1040,7 +1040,7 @@ export class SessionManager {
   }
 
   /**
-   * `@Condotto effort <low|medium|high|xhigh|max>` (M3.5 Tier A). Architect tunes
+   * `@Condotto effort <low|medium|high|xhigh|max>`. Architect tunes
    * reasoning effort per thread. Opaque token, validated against the adapter's
    * `supportedEfforts`. Higher effort burns more of the plan's rate limit (§4);
    * lower effort is the dial-down.
@@ -1080,7 +1080,7 @@ export class SessionManager {
   }
 
   /**
-   * `@Condotto subagents on|off` (M3.5 Tier B). Architect opt-in, default off.
+   * `@Condotto subagents on|off`. Architect opt-in, default off.
    * On: the implementer may fan out READ-ONLY exploration to subagents; it still
    * makes edits itself (gated). Turning it off also turns workflows off (a
    * workflow orchestrates subagents, so it needs the base capability).
@@ -1118,14 +1118,14 @@ export class SessionManager {
   }
 
   /**
-   * `@Condotto workflows on|off` (M3.6, architect opt-in, default off). On: the
+   * `@Condotto workflows on|off` (architect opt-in, default off). On: the
    * implementer may launch multi-agent WORKFLOWS for parallel read-only
    * research/analysis. Their sub-agents are gated read-only and worktree-confined
    * (via the PreToolUse hook under bypassPermissions — spike 2026-07-18); the main
    * agent still makes edits itself (gated). Enabling workflows implies subagents
    * (a workflow orchestrates sub-agents).
    *
-   * `@Condotto workflows write on|off` (Tier 3, the informed insecure opt-in): lets
+   * `@Condotto workflows write on|off` (the informed insecure opt-in): lets
    * workflow/subagent-origin (and batched) calls WRITE and run bash confined to the
    * worktree WITHOUT per-write approval. Off by default; enabling it posts a
    * mandatory, non-skippable warning. out-of-worktree/credential/prod-data stay
@@ -1145,7 +1145,7 @@ export class SessionManager {
     }
 
     const parts = args.trim().toLowerCase().split(/\s+/).filter(Boolean);
-    // Tier 3: `workflows write on|off` — the informed worktree-write opt-in.
+    // `workflows write on|off` — the informed worktree-write opt-in.
     if (parts[0] === "write") {
       const on = this.parseOnOff(parts[1] ?? "");
       if (on === null) {
@@ -1217,7 +1217,7 @@ export class SessionManager {
   }
 
   /**
-   * `@Condotto ultra on|off` (M3.5/M3.6). The power preset: `xhigh` effort +
+   * `@Condotto ultra on|off`. The power preset: `xhigh` effort +
    * subagents + the Workflow tool — the SDK analogue of CLI "ultracode". Off
    * restores subagents/workflows off and effort to the daemon default. Burns the
    * plan's rate limit fastest (§4), so it's an explicit, architect-only opt-in.
@@ -1240,7 +1240,7 @@ export class SessionManager {
       return;
     }
     if (on) {
-      // Ultra = the "max it out" preset (M3.6): xhigh reasoning + parallel
+      // Ultra = the "max it out" preset: xhigh reasoning + parallel
       // subagents + the Workflow tool (re-folded back in now that workflows are
       // gateable — spike 2026-07-18). All gated + worktree-confined, READ-ONLY:
       // ultra never turns on the dangerous worktree-write opt-in (kept explicit),
@@ -1266,9 +1266,9 @@ export class SessionManager {
   }
 
   /**
-   * `@Condotto auto-approve on|off` (M3.8). When on, a gated tool call on a turn an
+   * `@Condotto auto-approve on|off`. When on, a gated tool call on a turn an
    * architect initiated runs WITHOUT the Approve click — the architect is already
-   * the trusted human driving (DESIGN §4:441-444 sanctions this per-thread
+   * the trusted human driving (DESIGN §4 sanctions this per-thread
    * widening). The hard-deny floor (out-of-worktree, credential/secret files,
    * daemon secrets, `rm -rf` escapes) still refuses regardless; members' turns
    * still gate; and it applies only on verified-identity surfaces. Architect-only.
@@ -1305,7 +1305,7 @@ export class SessionManager {
   }
 
   /**
-   * `@Condotto grant @user <architect|member|observer> [everywhere]` (M3.8). An
+   * `@Condotto grant @user <architect|member|observer> [everywhere]`. An
    * architect delegates authority to another surface-verified user. Channel-scoped
    * by default ("this project"); `everywhere`/`global` = all channels. Persisted as
    * a `source='grant'` row that survives the boot reseed (config rows don't). The
@@ -1366,7 +1366,7 @@ export class SessionManager {
   }
 
   /**
-   * `@Condotto revoke @user [everywhere]` (M3.8). Removes a runtime `grant` role;
+   * `@Condotto revoke @user [everywhere]`. Removes a runtime `grant` role;
    * the user falls back to `member` (or whatever config says). Only `source='grant'`
    * rows are removed — a config architect can't be revoked at runtime (change config
    * instead). Architect-only; channel-level, no session needed.
@@ -1426,7 +1426,7 @@ export class SessionManager {
   }
 
   /**
-   * `@Condotto land` / `@Condotto deploy` (M3, DESIGN §2 journey 4). Architect-
+   * `@Condotto land` / `@Condotto deploy` (DESIGN §2 journey 4). Architect-
    * ordered, and still gated behind an explicit Approve/Deny click (§4: the
    * deploy path is a gated action). Records a `condotto:land`/`condotto:deploy`
    * approval that, when approved, the daemon runs itself via CommandRunner —
@@ -1556,14 +1556,14 @@ export class SessionManager {
     );
     if (!session || session.status === "stopped") {
       // Not a chatbot: unassigned threads are ignored — UNLESS someone actually
-      // @-mentioned Condotto, in which case guide them into setup (M3.1) rather
+      // @-mentioned Condotto, in which case guide them into setup rather
       // than staying silent.
       if (event.mentioned) await this.guide(event.conv);
       return;
     }
 
     // Don't stack a turn on top of a deferred one: while an approval is pending
-    // the session is mid-action. Ask the human to resolve it first (M2
+    // the session is mid-action. Ask the human to resolve it first (a
     // simplification; a queued-message design can come later).
     if (this.store.hasPendingApproval(session.id)) {
       await this.surfaceFor(event.conv)
@@ -1590,7 +1590,7 @@ export class SessionManager {
           framedText: framed,
           placeholder: "…thinking",
           inbound: { principal: principalKey(event.author), text: event.text },
-          // M3.8: the turn's initiator governs architect auto-approve.
+          // The turn's initiator governs architect auto-approve.
           initiator: principalKey(event.author),
         }),
       )
@@ -1687,11 +1687,11 @@ export class SessionManager {
           conv,
           framedText: "",
           placeholder: outcome === "approved" ? "…applying the approved action" : "…noting your decision",
-          // M3.8: carry the ORIGINAL initiator (never the approving decider) so a
+          // Carry the ORIGINAL initiator (never the approving decider) so a
           // member-initiated turn can't be laundered into architect auto-approval;
           // an architect-initiated turn stays consistent across the resume.
           initiator: approval.initiated_by ?? undefined,
-          // M4 §5: an approved WORKFLOW launch resumes into a runaway-capable background
+          // An approved WORKFLOW launch resumes into a runaway-capable background
           // workflow, so cap this resume to arm the auto-cancel-on-breach brake.
           workflowResume: approval.tool_name === WORKFLOW_TOOL_NAME,
         }),
@@ -1714,7 +1714,7 @@ export class SessionManager {
     placeholder: string;
     inbound?: { principal: string; text: string };
     /**
-     * M3.8: the principalKey of the human whose turn this is — the identity that
+     * The principalKey of the human whose turn this is — the identity that
      * governs architect auto-approve. For a fresh human turn it equals
      * `inbound.principal`; for an approval-resume it is the ORIGINAL initiator
      * carried from the approval (never the approving decider — that would launder
@@ -1722,7 +1722,7 @@ export class SessionManager {
      */
     initiator?: string;
     /**
-     * M4 §5: this resume re-drives an approved multi-agent WORKFLOW launch. Such a
+     * This resume re-drives an approved multi-agent WORKFLOW launch. Such a
      * resume is budget-capped (unlike an ordinary approved single action, which runs
      * uncapped to avoid stranding it) so the SDK budget signal arms the adapter's
      * auto-cancel-on-breach interrupt for the background workflow.
@@ -1749,7 +1749,7 @@ export class SessionManager {
       return;
     }
 
-    // Runaway cost cap (M3, DESIGN §4). Block a NEW human turn once cumulative
+    // Runaway cost cap (DESIGN §4). Block a NEW human turn once cumulative
     // spend reaches the thread budget; an architect raises it with `@Condotto
     // budget`. Approval-resume turns (no `inbound`) are NOT blocked — they finish
     // an action an architect already approved and must not be stranded.
@@ -1769,8 +1769,8 @@ export class SessionManager {
     }
     // Per-turn cap. NEW human turns are always capped at the remaining headroom. An
     // approval-resume (no `inbound`) normally runs UNCAPPED — capping a re-driven single
-    // approved action to a tiny remaining could strand it (error_max_budget_usd), the M3
-    // fix. EXCEPTION (M4 §5): a resume that re-drives an approved WORKFLOW LAUNCH is
+    // approved action to a tiny remaining could strand it (error_max_budget_usd), the earlier
+    // fix. EXCEPTION: a resume that re-drives an approved WORKFLOW LAUNCH is
     // capped, because a background workflow ignores the cap unless the SDK budget SIGNAL
     // fires — the adapter turns that signal into a real interrupt (auto-cancel on breach;
     // the signal alone doesn't stop the detached task — spike b). Scoped to the workflow
@@ -1791,12 +1791,12 @@ export class SessionManager {
       // folded in here, not into the repo's stored allowlist, so config stays
       // pristine and cost/prod checks still apply to everything else.
       safeBashAllowlist: [...(repo?.safe_bash_allowlist ?? []), ...(repo?.test_cmd ? [repo.test_cmd] : [])],
-      // M3.5 Tier B: let the MAIN agent spawn subagents when enabled (delegation
+      // Let the MAIN agent spawn subagents when enabled (delegation
       // isn't itself gated; subagent tool calls are gated downstream). The MAIN
-      // agent's Workflow launch is always gated (M3.6 Tier 2), so there is no
+      // agent's Workflow launch is always gated, so there is no
       // workflowsEnabled flag. Subagent-initiated gated calls are denied by policy.
       subagentsEnabled: session.subagents === 1,
-      // M3.6 Tier 3: the worktree-write opt-in — subagent/workflow/escaped calls may
+      // The worktree-write opt-in — subagent/workflow/escaped calls may
       // WRITE (confined) without per-write approval; bash stays gated to the main agent.
       workflowWrite: session.workflow_write === 1,
     };
@@ -1810,9 +1810,9 @@ export class SessionManager {
       this.store.audit({ sessionId, actor: inbound.principal, event: "message_in" });
     }
 
-    // M3.8 architect self-approve: an architect driving their own turn has already
+    // Architect self-approve: an architect driving their own turn has already
     // exercised their authority, so a gate-tier action runs without a redundant
-    // Approve click (DESIGN §4:441-444 sanctions this per-thread widening). Resolved
+    // Approve click (DESIGN §4 sanctions this per-thread widening). Resolved
     // ONCE per turn (snapshots authority for the turn; a mid-turn revoke takes effect
     // next turn). Requires a verified-identity surface (§4: architect authority only
     // from `verified` surfaces — never a spoofable sender). The hard-deny FLOOR is
@@ -1877,7 +1877,7 @@ export class SessionManager {
           tool: call.name,
           toolUseId: call.id || undefined,
           decision: auditDecision,
-          // M3.5 Tier B: record which subagent originated the call, if any.
+          // Record which subagent originated the call, if any.
           ...(call.agentId ? { agentId: call.agentId } : {}),
           ...(call.id && gateConcerns.has(call.id) ? { concern: gateConcerns.get(call.id) } : {}),
         },
@@ -1972,7 +1972,7 @@ export class SessionManager {
       if (!this.store.tryActivate(sessionId)) return;
       const harnessSession = await this.getOrAttachHarness(session);
 
-      // M3.5: forward the session's harness capabilities (model/effort/subagents/
+      // Forward the session's harness capabilities (model/effort/subagents/
       // workflows + repo trust) with the turn. Opaque config the adapter applies.
       const harnessOpts = this.harnessOptionsFor(session, (repo?.trusted ?? 0) === 1);
       for await (const ev of harnessSession.turn({ text: framedText, budgetUsd: turnBudgetUsd, harness: harnessOpts }, gate)) {
@@ -1987,7 +1987,7 @@ export class SessionManager {
             producedOutput = true;
             // A resumed (empty-prompt) turn can emit more than one result; record
             // and post only the first — recording every result would double-count
-            // cost, since total_cost_usd is cumulative per query (M3).
+            // cost, since total_cost_usd is cumulative per query.
             if (!replyDelivered) {
               this.store.insertTurn({
                 sessionId,
@@ -1997,7 +1997,7 @@ export class SessionManager {
                 resultSubtype: "success",
               });
               this.store.audit({ sessionId, actor: "agent", event: "message_out", detail: { costUsd: ev.costUsd, ...(ev.workflow ? { workflow: true } : {}) } });
-              // M3.6 Tier 2: a workflow turn's reply is the synthesized summary;
+              // A workflow turn's reply is the synthesized summary;
               // append a terse footer with the spend so "what ran + cost" is visible.
               const footer =
                 ev.workflow && ev.costUsd !== undefined
@@ -2068,7 +2068,7 @@ export class SessionManager {
     call: { id: string; name: string; input: unknown },
     deliverFinal: (text: string) => Promise<void>,
     concern?: PolicyConcern,
-    /** M3.8: the turn's initiator, persisted so a resume is governed by it. */
+    /** The turn's initiator, persisted so a resume is governed by it. */
     initiatedBy?: string,
   ): Promise<void> {
     const requestId = crypto.randomUUID();
@@ -2111,13 +2111,13 @@ export class SessionManager {
     // Re-attach when the prompt-affecting capability state changed since the
     // cached harness was built (a subagents/ultra toggle). Reading the fresh row
     // here makes this race-free — no reliance on out-of-band invalidation that a
-    // toggle landing mid-attach could miss (M3.5 review fix).
+    // toggle landing mid-attach could miss.
     const promptKey = `${session.subagents}:${session.workflows}:${session.workflow_write}`;
     if (entry.harness && entry.promptKey === promptKey) return entry.harness;
 
     // The system prompt is current Condotto policy, re-supplied on resume too —
-    // never the stale one a session was created with (e.g. an M1 read-only
-    // session reactivated under M2 must now know it can propose gated actions).
+    // never the stale one a session was created with (e.g. a read-only
+    // session reactivated later must now know it can propose gated actions).
     const repo = this.store.getRepo(session.repo_id);
     const system = condottoSystemPrompt({
       repoName: session.repo_id,

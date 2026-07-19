@@ -58,11 +58,11 @@ function makeWorld(
     costCap?: number;
     maxConcurrentTurns?: number;
     identityStrength?: "verified" | "weak";
-    /** Isolated worktree root (M4 §3 GC tests count orphans within it). Default: shared. */
+    /** Isolated worktree root (GC tests count orphans within it). Default: shared. */
     worktreesRoot?: string;
-    /** M4 §3: `stop clean` retention window. */
+    /** `stop clean` retention window. */
     worktreeRetentionMs?: number;
-    /** M4 §4: fixed daemon start time for deterministic operator-status uptime. */
+    /** fixed daemon start time for deterministic operator-status uptime. */
     startedAt?: number;
   } = {},
 ): World {
@@ -215,7 +215,7 @@ describe("conversing", () => {
     const w1 = makeWorld(new Store(dbPath));
     await assignAndMessage(w1, "410.000001", "hello");
     const row = w1.store.getSessionByConversation("fake", "410.000001")!;
-    // Simulate a session created under the old M1 posture: overwrite its stored
+    // Simulate a session created under the old read-only posture: overwrite its stored
     // handle with a stale read-only prompt.
     w1.store.updateSessionHandle(row.id, { fake: true, sessionId: "fake-session-1", system: "OLD — you are READ-ONLY" });
     w1.store.close();
@@ -228,7 +228,7 @@ describe("conversing", () => {
       text: "can you change things now?",
       attachments: [],
     });
-    // The core supplied the current (M2) prompt on resume — the stale one is gone.
+    // The core supplied the current prompt on resume — the stale one is gone.
     expect(w2.harness.resumed[0]!.system).not.toContain("READ-ONLY");
     expect(w2.harness.resumed[0]!.system).toContain("approval");
   });
@@ -315,7 +315,7 @@ describe("stop & status", () => {
   });
 });
 
-describe("operator status & slash stop guidance (M4 §4)", () => {
+describe("operator status & slash stop guidance", () => {
   async function assign(w: World, id: string, channelId = "C1"): Promise<void> {
     await w.manager.handleEvent({
       kind: "command",
@@ -376,7 +376,7 @@ describe("operator status & slash stop guidance (M4 §4)", () => {
       args: "",
     });
     // A gated write on another leaves a pending approval (session parks). The
-    // author is a MEMBER — an architect-initiated turn would auto-approve (M3.8),
+    // author is a MEMBER — an architect-initiated turn would auto-approve,
     // leaving nothing pending.
     w.harness.scriptTurn([{ id: "tu-w", name: "Write", input: { file_path: "x.txt", content: "hi" } }]);
     await w.manager.handleEvent({
@@ -435,7 +435,7 @@ describe("operator status & slash stop guidance (M4 §4)", () => {
   });
 });
 
-describe("guided onboarding (M3.1)", () => {
+describe("guided onboarding", () => {
   test("@Condotto in an unassigned thread offers a repo picker (anyone can ask)", async () => {
     const w = makeWorld();
     await w.manager.handleEvent({ kind: "command", conv: conv("h00.000001"), author: member, name: "help", args: "" });
@@ -500,7 +500,7 @@ describe("guided onboarding (M3.1)", () => {
   });
 });
 
-describe("roles: command authority (M2)", () => {
+describe("roles: command authority", () => {
   test("a member cannot assign a session", async () => {
     const w = makeWorld();
     await w.manager.handleEvent({ kind: "command", conv: conv("a00.000001"), author: member, name: "assign", args: "" });
@@ -518,7 +518,7 @@ describe("roles: command authority (M2)", () => {
   });
 });
 
-describe("gating & approval loop (M2)", () => {
+describe("gating & approval loop", () => {
   const writeCall = { id: "tu-write", name: "Write", input: { file_path: "hello.txt", content: "hi" } };
 
   async function assignWithScript(w: World, id: string, calls: any[]): Promise<void> {
@@ -644,7 +644,7 @@ describe("gating & approval loop (M2)", () => {
     expect(w.harness.executed.map((c) => c.name)).toEqual(["Bash"]);
   });
 
-  test("a production-data bash call gates and surfaces the aggregates-only concern (M3)", async () => {
+  test("a production-data bash call gates and surfaces the aggregates-only concern", async () => {
     const w = makeWorld();
     await assignWithScript(w, "b75.000001", [
       { id: "tu-psql", name: "Bash", input: { command: "psql -c 'select count(*) from users'" } },
@@ -662,7 +662,7 @@ describe("gating & approval loop (M2)", () => {
     expect((reqAudit!.detail as any).concern).toBe("production-data");
   });
 
-  test("the repo's test command auto-runs without approval (M3)", async () => {
+  test("the repo's test command auto-runs without approval", async () => {
     const w = makeWorld();
     // makeWorld's testrepo has allowlist ["git status"]; give it a test command.
     w.store.upsertRepo({ name: "testrepo", path: repoPath, defaultBranch: "main", safeBashAllowlist: ["git status"], testCmd: "bun test" });
@@ -704,7 +704,7 @@ describe("gating & approval loop (M2)", () => {
   });
 });
 
-describe("land / deploy (M3, DESIGN §2 journey 4)", () => {
+describe("land / deploy (DESIGN §2 journey 4)", () => {
   async function assign(w: World, id: string): Promise<string> {
     await w.manager.handleEvent({ kind: "command", conv: conv(id), author: architect, name: "assign", args: "" });
     return w.store.getSessionByConversation("fake", id)!.id;
@@ -770,7 +770,7 @@ describe("land / deploy (M3, DESIGN §2 journey 4)", () => {
   });
 });
 
-describe("cost budgets & runaway cap (M3, DESIGN §4)", () => {
+describe("cost budgets & runaway cap (DESIGN §4)", () => {
   async function assignAndSpend(w: World, id: string, spent: number): Promise<string> {
     await w.manager.handleEvent({ kind: "command", conv: conv(id), author: architect, name: "assign", args: "" });
     const sid = w.store.getSessionByConversation("fake", id)!.id;
@@ -845,7 +845,7 @@ describe("cost budgets & runaway cap (M3, DESIGN §4)", () => {
     expect(w.store.getSessionByConversation("fake", "e30.000001")!.budget_limit_usd).toBe(5);
   });
 
-  test("an approved WORKFLOW-launch resume IS capped at the remaining headroom (auto-cancel on breach, M4 §5)", async () => {
+  test("an approved WORKFLOW-launch resume IS capped at the remaining headroom (auto-cancel on breach)", async () => {
     const w = makeWorld(undefined, { costCap: 5 });
     const c = conv("e50.000001");
     await w.manager.handleEvent({ kind: "command", conv: c, author: architect, name: "assign", args: "" });
@@ -863,7 +863,7 @@ describe("cost budgets & runaway cap (M3, DESIGN §4)", () => {
     expect(w.harness.allTurns.at(-1)!.budgetUsd).toBeCloseTo(0.1, 5); // 5 - 4.9
   });
 
-  test("a NON-workflow approved action resumes UNCAPPED even in a workflow-enabled session (M4 §5 precision)", async () => {
+  test("a NON-workflow approved action resumes UNCAPPED even in a workflow-enabled session (precision)", async () => {
     const w = makeWorld(undefined, { costCap: 5 });
     const c = conv("e55.000001");
     await w.manager.handleEvent({ kind: "command", conv: c, author: architect, name: "assign", args: "" });
@@ -883,7 +883,7 @@ describe("cost budgets & runaway cap (M3, DESIGN §4)", () => {
   });
 });
 
-describe("cancel a running turn (M4 §5)", () => {
+describe("cancel a running turn", () => {
   test("an architect cancels an in-flight turn: interrupts the harness, acks, audits, session lives on", async () => {
     const w = makeWorld();
     const c = conv("cn1.000001");
@@ -937,7 +937,7 @@ describe("cancel a running turn (M4 §5)", () => {
   });
 });
 
-describe("streaming progress (M3)", () => {
+describe("streaming progress", () => {
   test("a burst of progress events is coalesced into the one status message and never clobbers the reply", async () => {
     const w = makeWorld();
     w.harness.progressBurst = 5; // emits 5 extra progress events before the reply
@@ -956,7 +956,7 @@ describe("streaming progress (M3)", () => {
   });
 });
 
-describe("concurrency (M3, DESIGN §7)", () => {
+describe("concurrency (DESIGN §7)", () => {
   test("turns across different sessions run concurrently but never exceed the cap", async () => {
     const w = makeWorld(undefined, { maxConcurrentTurns: 2 });
     const ids = ["f00.000001", "f01.000001", "f02.000001", "f03.000001"];
@@ -1018,7 +1018,7 @@ describe("concurrency (M3, DESIGN §7)", () => {
   });
 });
 
-describe("harness capabilities — model & effort (M3.5 Tier A)", () => {
+describe("harness capabilities — model & effort", () => {
   async function assign(w: World, id: string): Promise<void> {
     await w.manager.handleEvent({ kind: "command", conv: conv(id), author: architect, name: "assign", args: "" });
   }
@@ -1043,7 +1043,7 @@ describe("harness capabilities — model & effort (M3.5 Tier A)", () => {
     const last = w.harness.allTurns.at(-1)!;
     expect(last.harness?.model).toBe("sonnet");
     expect(last.harness?.effort).toBe("high"); // unchanged default
-    expect(last.harness?.subagents).toBe(false); // Tier B off by default
+    expect(last.harness?.subagents).toBe(false); // subagents off by default
     expect(last.harness?.workflows).toBe(false);
   });
 
@@ -1131,7 +1131,7 @@ describe("harness capabilities — model & effort (M3.5 Tier A)", () => {
   });
 });
 
-describe("harness capabilities — subagents & ultra (M3.5 Tier B)", () => {
+describe("harness capabilities — subagents & ultra", () => {
   async function assign(w: World, id: string): Promise<void> {
     await w.manager.handleEvent({ kind: "command", conv: conv(id), author: architect, name: "assign", args: "" });
   }
@@ -1270,7 +1270,7 @@ describe("harness capabilities — subagents & ultra (M3.5 Tier B)", () => {
   });
 });
 
-describe("harness capabilities — workflows (M3.6)", () => {
+describe("harness capabilities — workflows", () => {
   async function assign(w: World, id: string): Promise<void> {
     await w.manager.handleEvent({ kind: "command", conv: conv(id), author: architect, name: "assign", args: "" });
   }
@@ -1351,7 +1351,7 @@ describe("harness capabilities — workflows (M3.6)", () => {
     expect(w.surface.posts.at(-1)!.text).toContain("workflows *on*");
   });
 
-  test("a workflow LAUNCH gates → architect approves → the workflow runs (Tier 2)", async () => {
+  test("a workflow LAUNCH gates → architect approves → the workflow runs", async () => {
     const w = makeWorld();
     const c = conv("wf7.000001");
     await assign(w, "wf7.000001");
@@ -1377,7 +1377,7 @@ describe("harness capabilities — workflows (M3.6)", () => {
     expect(w.surface.transcript().some((t) => /multi-agent workflow · \$/.test(t))).toBe(true);
   });
 
-  test("a workflow launch DENY runs nothing (Tier 2)", async () => {
+  test("a workflow launch DENY runs nothing", async () => {
     const w = makeWorld();
     const c = conv("wf8.000001");
     await assign(w, "wf8.000001");
@@ -1392,7 +1392,7 @@ describe("harness capabilities — workflows (M3.6)", () => {
   });
 });
 
-describe("informed worktree-write opt-in (M3.6 Tier 3)", () => {
+describe("informed worktree-write opt-in", () => {
   async function assign(w: World, id: string): Promise<void> {
     await w.manager.handleEvent({ kind: "command", conv: conv(id), author: architect, name: "assign", args: "" });
   }
@@ -1509,7 +1509,7 @@ describe("informed worktree-write opt-in (M3.6 Tier 3)", () => {
   });
 });
 
-describe("trust-scoped project config (M3.5 Tier C)", () => {
+describe("trust-scoped project config", () => {
   async function assign(w: World, id: string): Promise<void> {
     await w.manager.handleEvent({ kind: "command", conv: conv(id), author: architect, name: "assign", args: "" });
   }
@@ -1557,7 +1557,7 @@ describe("trust-scoped project config (M3.5 Tier C)", () => {
   });
 });
 
-describe("architect auto-approve (M3.8)", () => {
+describe("architect auto-approve", () => {
   const writeCall = { id: "tu-w", name: "Write", input: { file_path: "hello.txt", content: "hi" } };
 
   async function assignAndScript(w: World, id: string, author: Principal, calls: any[]): Promise<void> {
@@ -1658,7 +1658,7 @@ describe("architect auto-approve (M3.8)", () => {
   });
 });
 
-describe("role delegation — grant/revoke (M3.8)", () => {
+describe("role delegation — grant/revoke", () => {
   const abby = "fake:U_ABBY";
   const abbyP: Principal = { surface: "fake", externalId: "U_ABBY" };
 
@@ -1769,12 +1769,12 @@ describe("role delegation — grant/revoke (M3.8)", () => {
 });
 
 // ---------------------------------------------------------------------------
-// M4 §3 — worktree cleanup. Heavy tests around the retention/GC invariant
+// worktree cleanup. Heavy tests around the retention/GC invariant
 // (DESIGN §8-(3), §2 journeys 5 & 6). These drive REAL git worktrees, so the
 // teardown is observed on disk, not mocked. Each uses an isolated worktree root
 // so orphan counting is exact.
 
-describe("worktree cleanup — GC & the park-and-resume invariant (M4 §3)", () => {
+describe("worktree cleanup — GC & the park-and-resume invariant", () => {
   /** A world with its own worktree root (clean orphan counting) + a retention window. */
   function isolatedWorld(retentionMs?: number): World {
     const root = mkdtempSync(join(tmpdir(), "condotto-gc-root-"));
@@ -1909,7 +1909,7 @@ describe("worktree cleanup — GC & the park-and-resume invariant (M4 §3)", () 
     const c = conv("gc-race");
     // Two architects assign the SAME fresh thread concurrently: both read no
     // session, both provision a worktree, one insert wins and one hits the UNIQUE
-    // constraint. The loser must remove its now-orphaned worktree (M4 §3 fix).
+    // constraint. The loser must remove its now-orphaned worktree (fix).
     await Promise.all([
       w.manager.handleEvent({ kind: "command", conv: c, author: architect, name: "assign", args: "" }),
       w.manager.handleEvent({ kind: "command", conv: c, author: architect, name: "assign", args: "" }),

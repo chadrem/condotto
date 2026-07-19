@@ -149,7 +149,7 @@ export function resolveApprovalMessage(
   return { text: `${verb} by <@${deciderUserId}>`, blocks: kept };
 }
 
-// -- guided choice rendering (M3.1) -----------------------------------------
+// -- guided choice rendering -----------------------------------------
 
 export const CHOICE_ACTION = "condotto_choice";
 

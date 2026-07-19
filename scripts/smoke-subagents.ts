@@ -1,4 +1,4 @@
-// M3.5 Tier B smoke: prove the REAL claude-code adapter surfaces subagent origin
+// subagent smoke: prove the REAL claude-code adapter surfaces subagent origin
 // to the core gate. With subagents enabled, the main agent delegates a READ to the
 // daemon-defined `explorer` subagent; the gate (real policy engine) must see that
 // call carrying `agentId` — proving `agent_id` plumbs adapter → gate → policy, so
@@ -49,7 +49,7 @@ const adapter = new ClaudeCodeAdapter();
 const session = await adapter.create({
   cwd: worktree.path,
   system:
-    "You are Condotto (M3.5 Tier B smoke). You may delegate read-only work to the 'explorer' subagent " +
+    "You are Condotto (smoke). You may delegate read-only work to the 'explorer' subagent " +
     "via the Agent tool. Be terse.",
 });
 

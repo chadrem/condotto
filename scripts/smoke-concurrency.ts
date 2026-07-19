@@ -1,4 +1,4 @@
-// M3 smoke (DESIGN §7): prove multiple in-process query() sessions run
+// smoke (DESIGN §7): prove multiple in-process query() sessions run
 // concurrently under load on the REAL claude-code adapter + subscription auth.
 // Spins up N sessions, each in its own worktree of the throwaway repo, and runs
 // one turn per session concurrently; asserts all reply, with DISTINCT session

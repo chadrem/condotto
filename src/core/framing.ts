@@ -7,7 +7,7 @@ import { principalKey } from "./types";
 // exact attack — a message body forging a header that attributes a command to
 // the architect — was found and fixed in the prototype.
 //
-// M3 hardening (red-teamed; tests in framing.test.ts). Three independent layers,
+// Hardening (red-teamed; tests in framing.test.ts). Three independent layers,
 // any one of which defeats the content-forges-authority attack:
 //
 //  1. Authority is header-only. The verified principal comes from the platform

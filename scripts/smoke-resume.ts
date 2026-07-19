@@ -14,14 +14,14 @@ const gate: GateFn = async (call) => {
   console.log(`[gate] ${call.name} -> ${allowed ? "allow" : "deny"}`);
   return allowed
     ? { decision: "allow" }
-    : { decision: "deny", reason: "M1 is read-only." };
+    : { decision: "deny", reason: "This session is read-only." };
 };
 
 const state = await Bun.file(STATE_PATH).json();
 console.log(`[smoke] resuming with handle: ${JSON.stringify(state.handle).slice(0, 200)}`);
 
 const adapter = new ClaudeCodeAdapter();
-const session = await adapter.resume(state.handle, state.cwd, "You are Condotto (M1 smoke test). You are read-only. Be terse.");
+const session = await adapter.resume(state.handle, state.cwd, "You are Condotto (smoke test). You are read-only. Be terse.");
 
 let reply = "";
 for await (const ev of session.turn(

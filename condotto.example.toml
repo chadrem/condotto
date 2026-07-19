@@ -19,7 +19,7 @@
 # ---------------------------------------------------------------------------
 # Architects — surface-qualified principals ("slack:U0123ABC") with command
 # authority: assign/stop sessions, approve gated actions, order land/deploy,
-# and (M3.8) auto-approve their own turns + delegate roles at runtime.
+# and auto-approve their own turns + delegate roles at runtime.
 # Find a user's ID in Slack: profile → ⋯ → "Copy member ID".
 # WITHOUT at least one architect, no one can approve gated actions.
 # Env override/append: CONDOTTO_ARCHITECTS (comma/space separated).
@@ -58,7 +58,7 @@ model = "opus"              # implementer model token: opus | sonnet | fable.
                             #   Env override: CONDOTTO_DEFAULT_MODEL
 effort = "high"             # reasoning effort: low | medium | high | xhigh | max.
                             #   Env override: CONDOTTO_DEFAULT_EFFORT
-auto_approve = true         # M3.8: architect-initiated turns skip the Approve
+auto_approve = true         # architect-initiated turns skip the Approve
                             #   click (the mechanical hard-deny floor still holds).
                             #   Env override: CONDOTTO_AUTO_APPROVE=off|false|0|no
 cost_cap_usd = 10           # per-thread cost ceiling; a runaway thread pauses here.

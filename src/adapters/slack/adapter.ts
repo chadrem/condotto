@@ -36,7 +36,7 @@ export interface SurfaceAuthority {
 }
 
 /**
- * Core-provided operator queries for the `/condotto` slash console (M4 §4). Both
+ * Core-provided operator queries for the `/condotto` slash console. Both
  * are synchronous, read-only text renderers the core owns — the adapter only
  * decides HOW to deliver them (an ephemeral `respond`, so a channel is never
  * spammed). Same injection shape as `SurfaceAuthority`: the composition root wires
@@ -54,7 +54,7 @@ export interface OperatorConsole {
  * The ephemeral text a `/condotto <sub>` slash command should `respond` with, or
  * null when the sub-command is NOT an ephemeral console query (assign, unknown) and
  * the caller handles it. Pure and module-level so the console routing is unit-
- * testable without a live Bolt App (M4 §4).
+ * testable without a live Bolt App.
  */
 export function slashEphemeralText(
   sub: string,
@@ -114,7 +114,7 @@ function threadTsOf(conv: ConversationRef): string | undefined {
  * domain principal key ("slack:U0ABBY"). Returns null for plain text, a malformed
  * token, or a mention of the bot itself — so no raw Slack id shape ever crosses the
  * port, and a `grant` can never target Condotto. Built via `principalKey` so the key
- * format stays in lockstep with the core (M3.8). Pure (no `this`) for unit testing.
+ * format stays in lockstep with the core. Pure (no `this`) for unit testing.
  */
 export function resolveUserMention(token: string, botUserId: string | null): string | null {
   const m = token.match(/^<@([A-Z0-9]+)(?:\|[^>]*)?>$/);
@@ -146,7 +146,7 @@ export function parseMentionCommand(
   if (first === "take" && second === "this" && third === undefined) return { name: "assign", args: "" };
   if (first === "stop" && words.length === 1) return { name: "stop", args: "" };
   if (first === "stop" && second === "clean" && words.length === 2) return { name: "stop", args: "clean" };
-  // M4 §5: interrupt the in-flight turn (e.g. a runaway workflow); the session lives on.
+  // Interrupt the in-flight turn (e.g. a runaway workflow); the session lives on.
   if (first === "cancel" && words.length === 1) return { name: "cancel", args: "" };
   if (first === "status" && words.length === 1) return { name: "status", args: "" };
   if (first === "land" && words.length === 1) return { name: "land", args: "" };
@@ -156,13 +156,13 @@ export function parseMentionCommand(
   if (first === "effort" && words.length === 2) return { name: "effort", args: words[1]! };
   if (first === "subagents" && words.length === 2) return { name: "subagents", args: words[1]! };
   if (first === "ultra" && words.length === 2) return { name: "ultra", args: words[1]! };
-  // M3.8: single whitespace-free token, so `split(/\s+/)` keeps it intact.
+  // Single whitespace-free token, so `split(/\s+/)` keeps it intact.
   if (first === "auto-approve" && words.length === 2) return { name: "auto-approve", args: words[1]! };
   if (first === "workflows" && words.length === 2) return { name: "workflows", args: words[1]! };
   if (first === "workflows" && second === "write" && words.length === 3) {
     return { name: "workflows", args: `write ${words[2]!}` };
   }
-  // M3.8 role delegation. args carry the resolved principal key (or "?") + the
+  // Role delegation. args carry the resolved principal key (or "?") + the
   // lowercased remainder: grant -> "<key|?> <role> [everywhere]", revoke -> "<key|?> [everywhere]".
   if (first === "grant" && words.length >= 2 && words.length <= 4) {
     const target = resolveUserMention(words[1]!, botUserId) ?? "?";
@@ -260,7 +260,7 @@ export class SlackAdapter implements SurfaceAdapter {
     this.app.action(APPROVE_ACTION, onDecision);
     this.app.action(DENY_ACTION, onDecision);
 
-    // Guided-choice buttons (M3.1): action_ids look like `condotto_choice:<value>`.
+    // Guided-choice buttons: action_ids look like `condotto_choice:<value>`.
     this.app.action(new RegExp(`^${CHOICE_ACTION}:`), async (args: any) => {
       await args.ack();
       try {
@@ -292,7 +292,7 @@ export class SlackAdapter implements SurfaceAdapter {
     // `/condotto status` (daemon-wide operator dashboard) and `/condotto stop`
     // (session list + how to stop in-thread) are EPHEMERAL operator-console
     // queries: the core renders the text, and we deliver it privately via
-    // `respond` — never a public channel post (M4 §4, DESIGN §8-(5)).
+    // `respond` — never a public channel post (DESIGN §8-(5)).
     const ephemeral = slashEphemeralText(sub, author, channelId, this.operator);
     if (ephemeral !== null) {
       await respond({ response_type: "ephemeral", text: renderMrkdwn(ephemeral) });
@@ -357,7 +357,7 @@ export class SlackAdapter implements SurfaceAdapter {
    */
   private mentionCommand(text: string): { name: CommandName; args: string } | null {
     // Parsing is a pure module-level function (unit-tested without a live App);
-    // the mention forms, incl. M3.5/M3.6/M3.8 controls, live there.
+    // the mention forms, incl. those controls, live there.
     return parseMentionCommand(text, this.botUserId);
   }
 
@@ -514,7 +514,7 @@ export class SlackAdapter implements SurfaceAdapter {
   }
 
   /**
-   * A guided-choice button click (M3.1), e.g. picking a repo to assign. Same
+   * A guided-choice button click, e.g. picking a repo to assign. Same
    * pattern as approvals: Bolt has verified the signature; we pre-check authority
    * for UX on architect-only choices, and the core re-verifies when it acts.
    */

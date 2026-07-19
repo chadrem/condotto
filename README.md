@@ -547,10 +547,10 @@ first). Worktrees are disposable; their branches live in your real repos.
 ## Further reading
 
 - **[DESIGN.md](DESIGN.md)** — the authoritative product & engineering design
-  (architecture, the two ports, the security model, the build plan; Appendix C is
-  the full Slack app setup).
-- **[DECISIONS.md](DECISIONS.md)** — the decision & verified-facts log, milestone
-  by milestone.
+  (architecture, the two ports, the security model, current capabilities;
+  Appendix C is the full Slack app setup).
+- **[DECISIONS.md](DECISIONS.md)** — the chronological decision & verified-facts
+  log.
 - **[CLAUDE.md](CLAUDE.md)** — orientation for working in this codebase.
 
 ## License

@@ -81,7 +81,7 @@ describe("store sessions", () => {
     expect(store.getRepo("r2")?.safe_bash_allowlist).toEqual([]);
   });
 
-  test("session model/effort/subagents/workflows seed on create and default off (M3.5)", () => {
+  test("session model/effort/subagents/workflows seed on create and default off", () => {
     const store = memoryStore();
     // Omitted → model/effort null (daemon default), flags 0 (opt-in, off).
     store.createSession({ ...baseSession, id: "s1", conversation_id: "1.1" });
@@ -97,7 +97,7 @@ describe("store sessions", () => {
     expect(seeded.effort).toBe("xhigh");
   });
 
-  test("session model/effort/subagents/workflows setters (M3.5)", () => {
+  test("session model/effort/subagents/workflows setters", () => {
     const store = memoryStore();
     store.createSession({ ...baseSession, id: "s1", conversation_id: "1.1" });
     store.setSessionModel("s1", "fable");
@@ -117,7 +117,7 @@ describe("store sessions", () => {
     expect(row.model).toBeNull();
   });
 
-  test("auto_approve defaults ON and the setter round-trips (M3.8)", () => {
+  test("auto_approve defaults ON and the setter round-trips", () => {
     const store = memoryStore();
     store.createSession({ ...baseSession, id: "s1", conversation_id: "1.1" });
     // On by default (matches the column DEFAULT 1 and the shipped posture).
@@ -131,7 +131,7 @@ describe("store sessions", () => {
     expect(store.getSession("s2")!.auto_approve).toBe(0);
   });
 
-  test("workflow_write defaults off and turning workflows off clears it (M3.6 invariant)", () => {
+  test("workflow_write defaults off and turning workflows off clears it (invariant)", () => {
     const store = memoryStore();
     store.createSession({ ...baseSession, id: "s1", conversation_id: "1.1" });
     expect(store.getSession("s1")!.workflow_write).toBe(0);
@@ -145,7 +145,7 @@ describe("store sessions", () => {
     expect(row.workflow_write).toBe(0);
   });
 
-  test("repo default model/effort and trust flag round-trip (M3.5)", () => {
+  test("repo default model/effort and trust flag round-trip", () => {
     const store = memoryStore();
     store.upsertRepo({ name: "r", path: "/tmp/r", defaultBranch: "main", defaultModel: "sonnet", defaultEffort: "xhigh", trusted: true });
     const r = store.getRepo("r")!;
@@ -160,7 +160,7 @@ describe("store sessions", () => {
     expect(r2.trusted).toBe(0);
   });
 
-  test("repo default_auto_approve round-trips; undefined = null (M3.8)", () => {
+  test("repo default_auto_approve round-trips; undefined = null", () => {
     const store = memoryStore();
     store.upsertRepo({ name: "r", path: "/tmp/r", defaultBranch: "main", autoApprove: false });
     expect(store.getRepo("r")!.default_auto_approve).toBe(0);
@@ -171,7 +171,7 @@ describe("store sessions", () => {
     expect(store.getRepo("r")!.default_auto_approve).toBeNull();
   });
 
-  test("repo test/land/deploy commands and cost cap round-trip (M3)", () => {
+  test("repo test/land/deploy commands and cost cap round-trip", () => {
     const store = memoryStore();
     store.upsertRepo({
       name: "r",
@@ -187,7 +187,7 @@ describe("store sessions", () => {
     expect(r.land_cmd).toBe("echo land");
     expect(r.deploy_cmd).toBe("echo deploy");
     expect(r.cost_cap_usd).toBe(3.5);
-    // Omitted M3 fields are null, and upsert overwrites them back to null.
+    // Omitted fields are null, and upsert overwrites them back to null.
     store.upsertRepo({ name: "r", path: "/tmp/r", defaultBranch: "main" });
     const r2 = store.getRepo("r")!;
     expect(r2.test_cmd).toBeNull();
@@ -196,7 +196,7 @@ describe("store sessions", () => {
   });
 });
 
-describe("store worktree GC (M4 §3)", () => {
+describe("store worktree GC", () => {
   test("cleanup_at defaults null on create and round-trips via mark/clear", () => {
     const store = memoryStore();
     const s = store.createSession({ ...baseSession, id: "g1", conversation_id: "1" });
@@ -247,7 +247,7 @@ describe("store worktree GC (M4 §3)", () => {
   });
 });
 
-describe("store cost accounting (M3)", () => {
+describe("store cost accounting", () => {
   test("sessionCostUsd sums per-turn cost and is 0 for a fresh session", () => {
     const store = memoryStore();
     store.createSession({ ...baseSession, id: "s1", conversation_id: "1.1" });
@@ -319,7 +319,7 @@ describe("store approvals", () => {
     expect(store.getApprovalByToolUse("s1", "nope")).toBeNull();
   });
 
-  test("createApproval persists initiated_by; default is null (M3.8)", () => {
+  test("createApproval persists initiated_by; default is null", () => {
     const store = withSession();
     store.createApproval({ id: "req-i", sessionId: "s1", toolUseId: "tu-1", toolName: "Write", toolInput: {}, initiatedBy: "slack:U_MEMBER" });
     expect(store.getApproval("req-i")?.initiated_by).toBe("slack:U_MEMBER");
@@ -327,7 +327,7 @@ describe("store approvals", () => {
     expect(store.getApproval("req-n")?.initiated_by).toBeNull();
   });
 
-  test("recordAutoApproval inserts an already-approved row without a pending window (M3.8)", () => {
+  test("recordAutoApproval inserts an already-approved row without a pending window", () => {
     const store = withSession();
     store.recordAutoApproval({ sessionId: "s1", toolUseId: "tu-auto", toolName: "Write", toolInput: { file_path: "x.ts" }, initiator: "slack:U_ARCH" });
     // No transient 'pending' row — hasPendingApproval must stay false.
@@ -397,7 +397,7 @@ describe("store roles (revocation)", () => {
   });
 });
 
-describe("store roles — runtime grants (M3.8)", () => {
+describe("store roles — runtime grants", () => {
   test("setRole defaults to source='config'; a grant carries provenance", () => {
     const store = memoryStore();
     store.setRole("slack:U1", "architect"); // default source
@@ -460,7 +460,7 @@ describe("store roles — runtime grants (M3.8)", () => {
   });
 });
 
-describe("store schema migrations (M4 §2)", () => {
+describe("store schema migrations", () => {
   // The current schema version == the number of migrations in the runner. Bump
   // this constant in lockstep whenever a migration is appended — the tests below
   // pin the runner's behavior to it.

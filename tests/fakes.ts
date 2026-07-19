@@ -139,7 +139,7 @@ class FakeHarnessSession implements HarnessSession {
       // after the leftover call is resolved (models the agent moving on).
       if (input.text.trim().length === 0) {
         // Optional: a test-queued continuation models NEW gated calls the agent
-        // emits after the approved action, within this resumed turn (M3.8 resume
+        // emits after the approved action, within this resumed turn (resume
         // auto-approve semantics). Isolated queue so it never interferes with the
         // fresh-turn script queue.
         const cont = this.parent.nextResumeScript();
@@ -157,7 +157,7 @@ class FakeHarnessSession implements HarnessSession {
           }
         }
         // Model a workflow run: approving a Workflow launch "runs" the workflow,
-        // so its reply is a workflow-tagged summary (M3.6 Tier 2 cost footer).
+        // so its reply is a workflow-tagged summary (cost footer).
         yield { kind: "reply", text: note, costUsd: 0.01, workflow: call.name === "Workflow" };
         return;
       }
@@ -179,7 +179,7 @@ class FakeHarnessSession implements HarnessSession {
       return;
     }
 
-    // A scripted turn (M2 gating tests): run the queued tool calls in order.
+    // A scripted turn (gating tests): run the queued tool calls in order.
     const scripted = this.parent.nextScript();
     if (scripted) {
       const denials: string[] = [];
@@ -203,7 +203,7 @@ class FakeHarnessSession implements HarnessSession {
       return;
     }
 
-    // Default (M1 echo) behavior: one in-worktree read (allowed) and one escape
+    // Default (echo) behavior: one in-worktree read (allowed) and one escape
     // attempt (denied), then a reply that reports both gate decisions.
     const inside: ToolCall = { id: "t1", name: "Read", input: { file_path: "README.md" } };
     const outside: ToolCall = { id: "t2", name: "Read", input: { file_path: "/etc/hosts" } };
@@ -225,7 +225,7 @@ class FakeHarnessSession implements HarnessSession {
   }
 
   async interrupt(): Promise<void> {
-    // M4 §5: record the cancel + let a test release a held turn (models the real
+    // Record the cancel + let a test release a held turn (models the real
     // adapter halting its query). The turn's own cancellation notice is covered by
     // the adapter-level tests; here we only assert the manager wired interrupt().
     this.parent.interruptCount++;
@@ -252,7 +252,7 @@ export class FakeHarness implements HarnessAdapter {
   executed: ToolCall[] = [];
   /** Queue of scripted tool-call lists, one per upcoming fresh turn. */
   private scripts: ToolCall[][] = [];
-  /** Queue of scripted calls for an upcoming empty-prompt RESUME (M3.8 tests). */
+  /** Queue of scripted calls for an upcoming empty-prompt RESUME. */
   private resumeScripts: ToolCall[][] = [];
   /** Test hook: awaited at the start of every turn (lets tests hold a turn open). */
   beforeReply: (() => Promise<void>) | null = null;
@@ -260,9 +260,9 @@ export class FakeHarness implements HarnessAdapter {
   progressBurst = 0;
   /** If set, the next turn ends in an error carrying this cost (budget tests). */
   nextError: { message: string; costUsd?: number } | null = null;
-  /** M4 §5: how many times a live session's interrupt() was called (cancel tests). */
+  /** How many times a live session's interrupt() was called (cancel tests). */
   interruptCount = 0;
-  /** M4 §5: fired inside interrupt() so a test can release a held turn. */
+  /** Fired inside interrupt() so a test can release a held turn. */
   onInterrupt: (() => void) | null = null;
 
   /** Queue the tool calls the agent will attempt on its next fresh turn. */
@@ -274,7 +274,7 @@ export class FakeHarness implements HarnessAdapter {
     return this.scripts.shift() ?? null;
   }
 
-  /** Queue calls the agent attempts during the next empty-prompt resume (M3.8). */
+  /** Queue calls the agent attempts during the next empty-prompt resume. */
   scriptResume(calls: ToolCall[]): void {
     this.resumeScripts.push(calls);
   }

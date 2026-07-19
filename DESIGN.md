@@ -6,13 +6,12 @@
 > The software engineer becomes the architect. (Slack and Claude Code are the
 > defaults — both sit behind swappable adapters.)
 
-**How to use this document.** This file seeds a fresh Claude Code session in a
-new, empty project. It is deliberately self-contained: the product vision, the
-verified technical facts, the security model, and the build plan are all here,
-including hard-won lessons from a working manual prototype (built inside a
-private Rails monorepo called acme — that code is *not* part of this
-project, but its lessons are). Start at **Milestone 0** in §8. Keep a
-`DECISIONS.md` log as you build; update this document when reality disagrees
+**How to use this document.** This file is the self-contained design for
+Condotto: the product vision, the verified technical facts, the security model,
+and the current capabilities are all here, including hard-won lessons from a
+working manual prototype (built inside a private Rails monorepo called acme —
+that code is *not* part of this project, but its lessons are). Keep the
+`DECISIONS.md` log current; update this document when reality disagrees
 with it.
 
 **Status of the facts below.** The Claude Agent SDK API surface in §6 and
@@ -55,7 +54,7 @@ the *what* and *why* in plain language; the implementer does the coding; the
 architect approves the consequential moves and keeps quality/safety honest. For
 that to be real, the implementer must be a **first-class Claude Code agent** —
 best model, high reasoning effort, subagents/workflows, the team's skills — not a
-toy. Exposing those capabilities to the thread is Milestone 3.5, and it is
+toy. Exposing those capabilities to the thread is
 what turns "a chatbot that edits files" into "a PM shipping a feature with an
 engineer riding shotgun."
 
@@ -68,7 +67,7 @@ the product; Condotto is how they empower the domain experts — who hold the
 product knowledge and vary in coding depth — to do real engineering
 (prototyping, design, speccing features, fixing bugs) in the surface they
 already live in. The "empower domain experts" mechanic already exists (grant +
-auto-approve, M3.8); the product's remaining job is to package it. Because
+auto-approve); the product's remaining job is to package it. Because
 **everyone with Slack-and-repo access is trusted, enforcing that boundary is
 the installer's responsibility** — documented, not engineered against. Condotto
 therefore invests in mechanical gating, unforgeable framing, and audit (defense
@@ -107,9 +106,9 @@ daemon, and replaces the honor-system protocol with mechanical enforcement.
   role mappings. (Initially: the same person as the architect.)
 - **Architect** — Slack users (by user ID) with command authority: assign
   sessions, approve gated actions, order landings/deploys, stop sessions.
-  Configured via `condotto.toml` (`architects`/`[[roles]]`) or `CONDOTTO_ARCHITECTS`
-  (M4 §1: the single config file), or delegated at
-  runtime by another architect (M3.8: `@Condotto grant @user architect
+  Configured via `condotto.toml` (`architects`/`[[roles]]`) or `CONDOTTO_ARCHITECTS`,
+  or delegated at
+  runtime by another architect (`@Condotto grant @user architect
   [everywhere]`, channel-scoped by default; persisted across restarts, while
   config stays authoritative for config-sourced roles).
 - **Member** — PMs/engineers who converse with sessions. Their questions get
@@ -156,8 +155,8 @@ web UI. The journeys themselves are surface-agnostic.)
    resumes exactly where it paused; on denial the reason is fed back to the
    session so it adapts.
 
-4. **Ship.** On an architect's explicit go-ahead (`@Condotto land`/`deploy`,
-   M3), the **daemon** runs the repo's configured land/deploy command (whatever
+4. **Ship.** On an architect's explicit go-ahead (`@Condotto land`/`deploy`),
+   the **daemon** runs the repo's configured land/deploy command (whatever
    the repo defines) in the worktree — never the agent's shell, so exactly the
    authoritative command runs — and still behind the Approve/Deny gate. The
    agent may propose that it's time to land, but cannot run the path itself.
@@ -321,7 +320,7 @@ interface HarnessCapabilities {
 
 The Claude Code adapter implements this with the Agent SDK: `create`/`resume`
 map to `query()` with `cwd`/`resume`; `GateFn` maps to the `PreToolUse` hook
-returning `defer` (settled by the M0 spike — §6; `canUseTool` stays as the
+returning `defer` (the reference gate handshake — §6; `canUseTool` stays as the
 deny-by-default backstop for batched calls); `TurnEvent` maps to the SDK's
 streaming messages; `handle` is the SDK session id plus the worktree path.
 
@@ -334,7 +333,7 @@ OS-level confinement (container, read-only repo mount, no credentials, no
 network) or not at all. Never simulate gating by watching output — by the time
 a command appears in a transcript, it has already run.
 
-**Reference gate semantics (M0-verified).** The Claude Code adapter sets the
+**Reference gate semantics.** The Claude Code adapter sets the
 bar future harness adapters (Codex, OpenCode, ACP, …) are measured against:
 (1) the gated call pauses **un-executed**, with the pending call exposed as
 data (`{id, name, input}`) for rendering the approval; (2) the wait costs
@@ -466,7 +465,7 @@ the agent cannot talk its way past.
 The mapping from tool call → {allow, gate, deny} is the **policy engine**, and
 it is per-repo and per-thread configurable. Default posture is deny/gate-heavy;
 an architect can widen it for a given thread ("auto-approve edits in this
-session") — but never for the hard-deny set. *(Implemented in M3.8: `@Condotto
+session") — but never for the hard-deny set. *(Architect auto-approve: `@Condotto
 auto-approve`, on by default — a gate-tier call on an architect-initiated turn on a
 `verified` surface runs without the click; the hard-deny floor is untouched. The
 widening lives in the session-manager gate closure, not the pure policy engine, since
@@ -528,14 +527,14 @@ prompt.
   **scope these to the daemon** (its own least-privilege GitHub deploy key, its
   own cloud role — never a human's personal keychain); on a self-hosted box that
   scoping is the installer's setup, documented in the runbook, not the daemon's
-  code. The agent's own shell is **env-scrubbed** (M4) so an in-worktree command
+  code. The agent's own shell is **env-scrubbed** so an in-worktree command
   cannot read the daemon's Slack/cloud secrets — only the Claude auth the SDK
   needs survives.
 - Every worktree is disposable and isolated; the hard-deny set prevents writes
   outside it.
 - **Audit everything.** Every tool call (allowed, gated, denied), every
   approval and who clicked it, every deploy, mirrored to an append-only audit
-  log and (deferred past M4) a read-only Slack log channel. The audit trail is
+  log and (not yet built) a read-only Slack log channel. The audit trail is
   load-bearing, not a nicety — for a trusted team it's how you reconstruct what
   the agent did and who approved it.
 
@@ -639,26 +638,25 @@ surface gets `Bun.serve` for free.
 **The one Bun risk, and the cheap hedge.** The load-bearing dependency is the
 Agent SDK, which is developed and tested against Node. Bun's Node
 compatibility is broad, and the SDK's actual runtime is a child process it
-spawns (so the daemon mostly needs `child_process` + streams compat), but do
-not take this on faith: **Milestone 0 runs entirely under Bun** and doubles as
-the compatibility check — spawn, streaming, hooks, resume. If something
+spawns (so the daemon mostly needs `child_process` + streams compat), but this
+is verified, not assumed: the gate spike ran end-to-end **under Bun** and doubled as
+the compatibility check — spawn, streaming, hooks, resume all work. If something
 breaks, the hedge is cheap because the code is plain TypeScript either way:
 isolate the SDK in a Node child process behind the harness port (invisible to
 the core), or worst case run the daemon on Node until the incompatibility is
-fixed. The same check applies to `@slack/bolt`'s Socket Mode WebSocket in M1.
+fixed. The same check applies to `@slack/bolt`'s Socket Mode WebSocket.
 
 > The precise, verified SDK surface — `query()` options, streaming message
 > types, the `PreToolUse` defer/approval mechanics, and session-storage paths —
 > is in **Appendix B**, with doc URLs. Build the session manager and policy
-> engine against that appendix. **Milestone 0 exists specifically to
-> de-risk the one load-bearing uncertainty: pausing a turn on a gated tool and
-> resuming it after an out-of-band Slack approval.**
+> engine against that appendix. **The one load-bearing uncertainty —
+> pausing a turn on a gated tool and resuming it after an out-of-band Slack
+> approval — is verified end-to-end (below).**
 
-### The one thing to prove first — PROVEN (M0 spike, 2026-07-16)
+### The core gate handshake — verified 2026-07-16
 
-The entire product rests on this loop, and the M0 spike ran it end-to-end
-under Bun on subscription auth (full facts in DECISIONS.md; scripts in
-`spikes/m0/`):
+The entire product rests on this loop, which runs end-to-end
+under Bun on subscription auth (full facts in DECISIONS.md):
 
 1. A turn runs; the agent calls a gated tool.
 2. A `PreToolUse` hook returns `permissionDecision: "defer"` — the query ends
@@ -666,8 +664,8 @@ under Bun on subscription auth (full facts in DECISIONS.md; scripts in
    `deferred_tool_use` carries the pending call (`{id, name, input}`): exactly
    what the daemon needs to render a Slack approval. Nothing executes; no
    process needs to stay alive.
-3. Out-of-band time passes. The spike resumed from a **separate OS process**,
-   so this is proven across daemon restarts, not just within one.
+3. Out-of-band time passes. Resume works from a **separate OS process**,
+   so this holds across daemon restarts, not just within one.
 4. To resume: `query({ prompt: "", options: { resume: sessionId } })`. The
    pending tool call is re-driven mechanically (same `tool_use_id`) and flows
    through `PreToolUse` again, where the daemon — now holding the recorded
@@ -678,7 +676,7 @@ So the gate is: **defer → persist `deferred_tool_use` + session id → approva
 arrives → resume + allow-by-`tool_use_id`.** `canUseTool` is not needed for
 human-latency gates.
 
-**Caveat from the live docs (M2 must handle):** if the model issues several
+**Caveat from the live docs (the policy engine handles this):** if the model issues several
 tool calls in one batch, `defer` is ignored with a warning and the call
 proceeds through the normal permission flow — resume can only re-drive one
 pending tool. The policy engine therefore needs a deny-by-default backstop
@@ -710,7 +708,7 @@ so a batched gated call can never slip through.
   its worktree — a durable summary the agent re-reads, independent of transcript
   compaction.
 - **Concurrency & the SDK.** Confirm behavior of many concurrent `query()`
-  calls in one process under load in Milestone 3; don't assume it's free.
+  calls in one process under load; don't assume it's free.
 - **Edits & deletes in Slack.** A human editing a message after the agent read
   it won't naturally re-notify; decide whether to diff-and-resurface or to
   instruct the agent to re-read before acting on anything decision-critical
@@ -723,316 +721,162 @@ so a batched gated call can never slip through.
 
 ---
 
-## 8. Build plan (milestones)
+## 8. Current capabilities
 
-Each milestone is independently demoable. Keep `DECISIONS.md` from M0.
+Condotto is feature-complete and installable. Everything below is live; each
+capability is independently demoable, and `DECISIONS.md` is the chronological log
+of how it was built and verified.
 
-**Prerequisites (before M0):** Bun 1.2+ (`curl -fsSL https://bun.sh/install |
-bash`); `bun add @anthropic-ai/claude-agent-sdk` (SQLite needs no package —
-`bun:sqlite` is built in); `bun add @slack/bolt` (needed from M1, not M0);
-auth via the machine's existing Claude subscription login (verified — no
-`ANTHROPIC_API_KEY` needed; on a box with no keychain login, `claude
-setup-token` → `CLAUDE_CODE_OAUTH_TOKEN`). M0 needs **no Slack app at all** —
-it's a local script. The Slack app (with the exact scopes and
-Socket Mode setup) is only needed from M1; that setup is **Appendix C**.
+**Setup.** Bun 1.2+ (`curl -fsSL https://bun.sh/install | bash`); `bun add
+@anthropic-ai/claude-agent-sdk` (SQLite needs no package — `bun:sqlite` is built
+in) and `bun add @slack/bolt`; auth via the machine's existing Claude subscription
+login (no `ANTHROPIC_API_KEY` needed; on a box with no keychain login, `claude
+setup-token` → `CLAUDE_CODE_OAUTH_TOKEN`). The Slack app (exact scopes + Socket
+Mode) is **Appendix C**.
 
-**Build-time safety (applies to every milestone).** You are building a tool
-that runs shell commands and can deploy. While *building* it: point it only at
-a **throwaway git repo** — never a real production repo or real deploy path —
-and wire the deploy/land commands (M3) as **no-ops or `echo`**. The approval
-loop is now proven (M2/M3/M3.8), so an *operating* team that points its install
-at a real repo and a real per-repo deploy command is making its own call —
-guarding *who* has Slack-and-repo access is the installer's responsibility (§1),
-not a hardening milestone. The
-daemon's whole risk surface is "text from Slack → shell on a real machine";
-treat your own dev loop with the same suspicion the product treats its users.
-(Slack side: development runs in the real company workspace by explicit
-architect decision, 2026-07-18 — see DECISIONS.md. Prefer a dedicated test
-channel; the repo/deploy guardrails above are unaffected.)
+**Build-time safety.** Condotto runs shell commands and can deploy. When
+*developing Condotto itself*, point it only at a **throwaway git repo** — never a
+real production repo or deploy path — and wire the deploy/land commands as
+**no-ops or `echo`**. The approval loop is proven, so an *operating* team that
+points its install at a real repo and a real per-repo deploy command is making its
+own call — guarding *who* has Slack-and-repo access is the installer's
+responsibility (§1). The daemon's whole risk surface is "text from Slack → shell
+on a real machine"; treat your own dev loop with the same suspicion the product
+treats its users. (Slack development runs in the real company workspace by
+explicit architect decision, 2026-07-18 — see DECISIONS.md; prefer a dedicated
+test channel.)
 
-**Milestone 0 — Prove the gated-resume loop (spike, throwaway ok).**
-**✅ DONE 2026-07-16.** All success criteria met under Bun 1.3.14 on
-subscription OAuth (no API key): `defer` pauses with the pending call
-preserved; a separate process resumed by session id and the approved tool
-executed; resume-by-id and cwd-keyed storage confirmed. Verified handshake in
-§6; full log in DECISIONS.md; spike scripts in `spikes/m0/`. Original
-milestone text follows for reference.
-No Slack. **First, verify the `defer` mechanism actually exists and how it
-resumes** — read the current hooks doc (Appendix B links) and confirm
-`permissionDecision: "defer"` is real and what re-drives the paused tool call.
-The exact resume handshake was NOT fully verified for this doc and is the one
-load-bearing unknown; do not assume it works as described until you've run it.
-Then: a tiny script that starts a `query()` in a temp git repo, makes the agent
-attempt a `Write`, intercepts it with a `PreToolUse` hook returning `defer`,
-pauses, waits on a keypress (stand-in for a Slack click), then resumes the
-session so the write completes. **Success = the turn continues correctly after
-an out-of-band delay.** This retires the product's core technical risk.
-**If `defer` doesn't exist or its resume is awkward, use the `canUseTool`
-fallback** (Appendix B4): the callback holds an unresolved promise until the
-"approval" arrives — simpler and definitely real, at the cost of keeping the
-session's generator open during the wait. Pick one with a working spike and
-record it in `DECISIONS.md`. Also capture `session_id` from the `system/init`
-message and prove resume-by-id across two separate `query()` calls. Run the
-whole spike **under Bun** — it doubles as the SDK-on-Bun compatibility check
-(§6): spawn, streaming, hooks, and resume all via `bun run`. If Bun trips,
-record the exact failure in `DECISIONS.md` and pick a hedge from §6.
+**The implementer loop.** A session holds a real, repo-aware conversation in a
+Slack thread and parks/resumes across daemon restarts (assignment via `/condotto
+assign` to root a thread, or `@Condotto assign` to claim one — Slack forbids slash
+commands inside threads). Everything is built against the two ports (§3): Bolt
+lives in `adapters/slack/`, the Agent SDK in `adapters/claude-code/`, and the core
+routes on `(surface, conversation_id)` and `Principal` — a Slack or SDK type
+outside its adapter directory is a review-blocking bug.
 
-**Milestone 1 — Slack echo session. ✅ DONE 2026-07-18** (code-complete, live
-human demo run clean: `/invite` → `/condotto assign` → converse → daemon restart
-→ resume → `@Condotto stop`). Assignment uses two paths because Slack forbids
-slash commands inside threads (DECISIONS.md): `/condotto assign` posts an anchor
-message that roots the thread; `@Condotto assign` claims an existing thread.
-Original text follows for reference.
-Set up the Slack app per **Appendix C**
-(Socket Mode, scopes, `/condotto` command). Bolt over Socket Mode. `/condotto
-assign` in a thread starts a session in a fixed **throwaway** test repo; thread
-messages become turns; the session's text replies post back. No gating yet
-(read-only `allowedTools`). Persist conversation↔session in SQLite; prove park
-& resume (restart the daemon; a thread message resumes the session). **Build
-against the ports from day one** even though each has one implementation: Bolt
-lives in `adapters/slack/`, the Agent SDK in `adapters/claude-code/`, and the
-core routes on `(surface, conversation_id)` and `Principal` — a Slack or SDK
-type outside its adapter directory is a review-blocking bug. **Demo: hold a
-real conversation with a repo-aware session entirely in a Slack thread.**
-
-**Milestone 2 — Gating & roles. ✅ DONE 2026-07-18** (full facts in DECISIONS.md;
-81 tests, real-harness smoke proves defer→approve→cross-process resume→execute;
-a six-dimension adversarial review confirmed and fixed 10 findings). The policy
-engine (`core/policy.ts`) classifies every tool call allow/gate/deny (hard-deny
-first, then auto-allow read-only+confined and allowlisted bash, else gate); a
-`gate` becomes the SDK `defer`, and the approval is driven by the actual
-`deferred_tool_use`. Architect-only for assign/stop/approvals, verified
-server-side; roles are config-authoritative (`CONDOTTO_ARCHITECTS` /
-`condotto.roles.json`). `canUseTool` is the deny-by-default backstop for the
-batching caveat. **Set `CONDOTTO_ARCHITECTS` before the live demo** or no one can
-approve. Original text follows for reference.
-Add the policy engine and the approval loop
-from M0, now over Slack buttons. Roles table; architect-only approvals verified
-by `user.id`; members get "architects only." Auto-allow read-only, gate
-writes/bash/push. Audit log every tool call and decision. **Demo: the session
-proposes an edit, posts Approve/Deny, applies it only on an architect's click,
-and a member's click is rejected.**
-
-**Milestone 3 — Real work end-to-end. ✅ DONE 2026-07-18** (full facts in
-DECISIONS.md; 115 tests, real-harness smokes prove gate→approve→resume and 4
-concurrent in-process sessions; a four-lens framing red-team confirmed the model
-holds and its findings were fixed). Per-repo test/land/deploy commands
-(`repos.test_cmd`/`land_cmd`/`deploy_cmd`); land/deploy are architect-ordered
-(`@Condotto land`/`deploy`) and run by the **daemon** through the Approve/Deny gate
-via a core `CommandRunner` in the worktree — never the agent's shell — echo/no-op
-on `testrepo` (a real land/deploy command is the operating team's per-repo
-config, out of M4). The repo's test command auto-runs (folded into the
-effective allowlist). Streaming progress is one throttled, trailing-flushed status
-message. Concurrency is a daemon-wide turn semaphore over the per-session FIFO
-(in-process `query()` verified under load). Cost governance is two-layer:
+**Gating, roles & real work.** The policy engine (`core/policy.ts`) classifies
+every tool call allow/gate/deny (hard-deny first, then auto-allow read-only +
+confined and allowlisted bash, else gate); a `gate` becomes the SDK `defer` driven
+by the actual `deferred_tool_use`, with `canUseTool` as the deny-by-default
+batching backstop. Assign/stop/approvals are architect-only, verified server-side;
+roles are config-authoritative. Per-repo test/land/deploy run through the
+Approve/Deny gate via the core `CommandRunner` in the worktree (never the agent's
+shell; echo/no-op on `testrepo`, a real land/deploy command is the operating
+team's per-repo config). Streaming progress is one throttled, trailing-flushed
+status message. A daemon-wide turn semaphore bounds concurrency over per-session
+FIFOs (in-process `query()` verified under load). Cost governance is two-layer:
 cumulative `total_cost_usd` pauses a runaway thread and pings the architect
 (recovery via `@Condotto budget <usd>`), and the SDK `maxBudgetUsd` brakes a single
-turn with `error_max_budget_usd` surfaced as a notice. The production-data gate
-gates prod-data access like a build (never auto-allowlistable, aggregates-only in
-the prompt + audit). Injection framing hardened with an unforgeable random-nonce
-fence + protocol-sentinel defang. Original text follows for reference.
-Wire a real repo's test/land/deploy
-commands. Streaming progress into an edited status message. Multiple concurrent
-threads/sessions. Cost budgets and the runaway cap. Harden the injection
-framing (Appendix A) and add the production-data gate (§4). **Demo: a PM
-reports a bug in a thread; the session diagnoses, proposes a fix, gets
-architect approval, runs tests, lands on approval — all in Slack.**
+turn. The production-data gate treats prod-data access like a build (never
+auto-allowlistable; aggregates-only in the prompt + audit). Injection framing uses
+an unforgeable random-nonce fence + protocol-sentinel defang (Appendix A).
 
-**Milestone 3.5 — Full Claude Code power in the thread (harness capabilities).
-✅ DONE 2026-07-18** (full facts in DECISIONS.md; 170 tests, `tsc` + `check-ports`
-clean; real-SDK smokes `smoke:model` and `smoke:subagents`, plus the M3.5 spikes).
-Built in the three tiers below. Tier A ships per-session model + effort (opaque
-tokens the core validates by membership against
-`HarnessCapabilities.supportedModels/supportedEfforts` and forwards via
-`TurnInput.harness`; the adapter maps to SDK ids; default Opus + high). Tier B ships
-subagents + the `ultra` preset (architect opt-in, default off) — the spike found
-**`defer`/resume is main-thread-only**, so subagents fan out READ-ONLY and any
-subagent-initiated gated call or nested spawn is **denied** in the policy engine
-(`ToolCall.agentId` marks origin); the main agent does mutations via the proven
-defer→approve→resume path. **Workflows were spiked and DEFERRED here, then
-RE-ENABLED in Milestone 3.6** (below): the M3.5 spike ran under
-`permissionMode:"default"`, under which the Workflow tool's background agents
-default-deny off-gate; M3.6 found `permissionMode:"bypassPermissions"` routes them
-THROUGH the PreToolUse hook (agent_id-tagged) so the same subagent policy confines
-them — so `ultra` is again `xhigh` + subagents + workflows. Tier C ships
-trust-scoped project config (`trusted: true` → `settingSources:["project"]` +
-`skills`; untrusted stays isolated; the gate still applies). Dial-down is built in
-(cheaper model / lower effort / subagents off / ultra off). Original text (the plan,
-which still lists workflows as a Tier B goal) follows for reference.
-The implementer must be a *first-class* Claude Code agent for the north-star (§1)
-to work: a product manager building a real feature needs the best model, high
-reasoning effort, and — for non-trivial work — subagents/workflows and the team's
-skills. Today the adapter pins none of these: default model, default effort, the
-`Agent`/`Task` tool disallowed, `settingSources: []` (no repo `CLAUDE.md`, skills,
-or MCP). This milestone exposes them to the **architect** as in-thread controls,
-all still behind the §4 gate. Verified SDK facts (2026-07-18, see DECISIONS.md;
-re-confirm against live docs before building): `query()` takes `model`
-(`claude-opus-4-8`/`claude-fable-5`/`claude-sonnet-5`) and `effort`
-(`low|medium|high|xhigh|max`); **`PreToolUse` hooks fire inside subagents too**
-(hook input carries `agent_id`/`agent_type`), so subagent tool calls are gateable
-— enabling subagents does NOT bypass the gate; "ultracode" is CLI-only =
-`xhigh` + standing multi-agent permission, reproduced at the SDK as
-`effort:"xhigh"` + the `Agent`/`Workflow` tools; `settingSources:["project"]`
-(+`skills`) selectively loads a repo's config while the gate still applies.
-Build in tiers, safest first:
+**Harness controls** (architect-only, in-thread, all behind the §4 gate).
+Per-session **model + effort** — opaque tokens the core validates by membership
+against `HarnessCapabilities.supportedModels/supportedEfforts` and forwards via
+`TurnInput.harness`; the adapter maps to SDK ids; default Opus + high.
+**Subagents** (opt-in, default off): they fan out READ-ONLY — a subagent-initiated
+gated call or nested spawn is denied in the policy engine (`ToolCall.agentId` marks
+origin); the main agent does mutations via the defer→approve→resume path.
+**Trust-scoped project config**: a repo marked `trusted: true` enables
+`settingSources:["project"]` + `skills` so its `CLAUDE.md`/skills/`.claude/agents`
+load (daemon-configured MCP via `mcpServers`); untrusted repos stay isolated, and
+the gate still applies. An **`ultra`** preset bundles `xhigh` effort + subagents +
+workflows. Dial-down is built in (cheaper model / lower effort / capabilities off),
+because model×effort×subagents burn the plan's **rate limit** — the real
+constraint on subscription auth (cost budgets are notional, §4).
 
-- **Tier A — model + effort (safe, do first).** Persist `model` and `effort` per
-  session (like `budget_limit_usd`), with per-repo defaults + a global default
-  (default to Opus + high). Architect commands `@Condotto model <…>` /
-  `@Condotto effort <…>`; the harness port carries them (opaque to the core; the
-  adapter validates via `HarnessCapabilities`); shown in the intro/status.
-- **Tier B — subagents + workflows (needs a spike).** Architect opt-in per
-  session, default off: `@Condotto subagents on`, and an `@Condotto ultra on` preset
-  (= `xhigh` + `Agent`+`Workflow` tools). Un-disallow `Agent`/`Workflow`; give
-  subagents restricted default toolsets; **run an M0-style spike first** to confirm
-  the defer→Slack-approval→resume loop survives a *subagent-initiated* gated call
-  (hooks fire for subagents, but resume re-driving a subagent's pending call is
-  M0-proven only for the main agent). Log the result in DECISIONS.md.
-- **Tier C — skills / project config (trust-scoped).** A repo marked
-  `trusted: true` enables `settingSources:["project"]` + `skills` so its
-  `CLAUDE.md`/skills/`.claude/agents` load; daemon-configured MCP via `mcpServers`.
-  Untrusted repos unchanged. Needs a small trust model.
+**Workflows.** Claude Code's multi-agent **Workflow** tool, gated + confined
+(`@Condotto workflows on|off`, folded into `ultra`). Workflow-enabled sessions run
+under **`permissionMode:"bypassPermissions"`**, so the background workflow's
+sub-agent tool calls route THROUGH the PreToolUse hook with an `agent_id` where the
+read-only subagent policy confines them; the main agent's defer→approve→resume and
+the `canUseTool` backstop still hold (hooks outrank permission mode). The **launch**
+is a gated action (Approve/Deny showing the workflow's name/description + a
+fan-out/budget concern); a live throttled status streams the background-task
+lifecycle; the synthesized reply carries a cost footer. An **informed
+worktree-write opt-in** (`@Condotto workflows write on|off`, mandatory warning) lets
+confined subagent/workflow/escaped calls WRITE within the worktree without
+per-write approval — bash stays gated to the main agent (it has no worktree
+confinement), and out-of-worktree/credential/production-data stay hard-denied while
+land/deploy still gate. **Known SDK limitation:** a background workflow sub-agent's
+Grep/Bash/Write can be denied by the SDK's task permission UPSTREAM of our gate, so
+those are best-effort (Read/Glob route reliably; the security boundary holds
+regardless).
 
-Also give the architect a way to *dial down* (cheaper model / lower effort /
-subagents off), because model×effort×subagents burn the plan's **rate limit**
-(the real constraint on subscription auth — cost budgets are notional, §4). Keep
-the harness port honest: model/effort/capability flags are harness config the
-core persists and passes through, never core policy. **Demo: a PM describes a
-feature in plain language; the session (Opus, `xhigh`, subagents on) plans it,
-fans out to implement, the architect approves the writes and the land — the PM
-ships a feature they could not have hand-coded, guided in-thread.**
-
-**Milestone 3.6 — Workflows working in the thread. ✅ DONE 2026-07-18** (full facts
-in DECISIONS.md; 201 tests, `tsc` + `check-ports` clean; real-SDK `smoke:workflows`
-[+ `CONDOTTO_SMOKE_WRITE=1`], spikes in `spikes/m3.6/`). Re-enabled Claude Code's
-multi-agent **Workflow** tool, gated + confined, after the spike-first re-test
-INVERTED the M3.5 conclusion: workflows aren't ungateable — the M3.5 finding was an
-artifact of `permissionMode:"default"`. Under **`permissionMode:"bypassPermissions"`**
-(set only for workflow-enabled sessions) the background workflow's sub-agent tool
-calls route THROUGH the PreToolUse hook with an `agent_id`, where the M3.5 read-only
-subagent policy confines them; the main agent's defer→approve→resume and the
-`canUseTool` batching backstop still hold (hooks outrank permission mode). Built in
-three tiers: **Tier 1** — secure read-only workflows (`@Condotto workflows on|off`,
-re-folded into `ultra`; reads via the hook, not `allowedTools`, so background
-sub-agents aren't shadow-denied; the adapter delivers the LAST of a workflow turn's
-multiple results). **Tier 2** — the running-workflow Slack UX: the launch is a gated
-action (Approve/Deny showing the workflow's name/description + a fan-out/budget
-concern), a live throttled status streams the background-task lifecycle, and the
-synthesized reply carries a cost footer. **Tier 3** — the informed worktree-write
-opt-in (`@Condotto workflows write on|off`, mandatory warning): the policy lets
-confined subagent/workflow/escaped calls WRITE (edit files, confined to the worktree)
-without per-write approval — bash stays gated to the main agent (it has no worktree
-confinement), and out-of-worktree/credential/production-data stay hard-denied
-and land/deploy still gate. **Known SDK limitation (documented):** a background
-workflow sub-agent's Grep/Bash/Write can be denied by the SDK's task permission
-UPSTREAM of our gate, so those are best-effort (Read/Glob route through the gate
-reliably; grep-style search stays with the main agent); the security boundary holds
-regardless. **Demo: a PM asks for a cross-cutting audit; the architect approves
-launching a workflow; it fans out read-only across many files in parallel and posts
-a synthesized, cited summary — gated and worktree-confined throughout.**
-
-**Milestone 3.8 — In-thread role delegation + architect auto-approve. ✅ DONE
-2026-07-19** (full facts in DECISIONS.md; 248 tests, `tsc` + `check-ports` clean).
-Two usability wins for the trusted-PM/dedicated-server case, both composing through
-the existing `roleOf`/`isArchitect` read path (unchanged). **(A) Architect
-auto-approve** — the implementation of the §4:441-444 per-thread widening: a gate-tier
-tool call on a turn an architect *initiated* runs without the Approve click. The seam
-is the session-manager gate closure (`policy.ts` stays pure): when `evaluate` returns
-`gate` AND the turn's initiating principal is an architect on a `verified` surface AND
-the per-session `auto_approve` flag is on, the gate returns allow (recording an
-already-decided approval + an `auto_approved` audit attributed to the architect). Per
-the architect's explicit choice it covers **everything that would prompt** (writes,
+**Role delegation & architect auto-approve** (both compose through the existing
+`roleOf`/`isArchitect` read path). **Auto-approve** is the per-thread widening
+sanctioned in §4: a gate-tier call on a turn an architect *initiated* runs without
+the Approve click. The seam is the session-manager gate closure (`policy.ts` stays
+pure): when `evaluate` returns `gate` AND the turn's initiating principal is an
+architect on a `verified` surface AND the per-session `auto_approve` flag is on, the
+gate returns allow (recording an already-decided approval + an `auto_approved` audit
+attributed to the architect). It covers **everything that would prompt** (writes,
 edits, bash, network, production-data, workflow launches); the **hard-deny floor
-stays** (out-of-worktree, credential/secret files, daemon secrets, `rm -rf` escapes) —
-it never showed a prompt and is the only thing stopping an injection-steered turn from
-exfiltrating the daemon's own credentials. Member turns still gate; a defer→resume is
-governed by the ORIGINAL initiator (never the approving decider — no authority
-laundering). On by default (`@Condotto auto-approve on|off`, per-repo/daemon default).
-**(B) In-thread grant** — `@Condotto grant @user architect [everywhere]` / `@Condotto
-revoke @user`: an architect delegates authority at runtime, channel-scoped by default
-(`everywhere` = global). Persisted with a `roles.source` column so grants survive the
-boot reseed (`clearConfigRoles` clears only config rows); config stays authoritative
-(a config architect can't be revoked at runtime, and a grant can't shadow-demote one).
+stays** (out-of-worktree, credential/secret files, daemon secrets, `rm -rf`
+escapes) — the only thing stopping an injection-steered turn from exfiltrating the
+daemon's own credentials. Member turns still gate; a defer→resume is governed by
+the ORIGINAL initiator, never the approving decider (no authority laundering). On by
+default (`@Condotto auto-approve on|off`, per-repo/daemon default). **In-thread
+grant** — `@Condotto grant @user architect [everywhere]` / `@Condotto revoke @user`:
+an architect delegates authority at runtime, channel-scoped by default (`everywhere`
+= global), persisted with a `roles.source` column so grants survive the boot reseed
+(`clearConfigRoles` clears only config rows) while config stays authoritative (a
+config architect can't be revoked at runtime, and a grant can't shadow-demote one).
 The Slack adapter resolves the `<@U…>` mention to a principal key so no surface id
-shape crosses the port. **Demo: an architect grants a PM architect-in-channel; the PM
-approves a gated action and drives their own auto-approved turns; the grant survives a
-daemon restart.**
+shape crosses the port.
 
-**Milestone 4 — Installable open-source beta (polish & packaging). ✅ DONE
-2026-07-19** (full facts in DECISIONS.md — the six §1–§6 entries; the build plan
-is complete). Shipped, section by section: (§1) the single `condotto.toml`; (§2)
-`bun build --compile` binaries + ordered `user_version` schema migrations; (§3)
-real worktree teardown + assign-race fix + retention GC; (§4) the daemon-wide
-operator `/condotto status` + the two slash-gap fixes; (§5) agent-shell env-scrub +
-background-task cost accounting/cancellation; and (§6) the **README/runbook**
-(install → Slack app → `condotto.toml` → run, the grant + auto-approve trust model,
-and reading the SQLite audit log locally) plus **sample launchd/systemd units** in
-`deploy/`. The scope
-narrowed sharply from the original "dedicated box & hardening" once the audience
-was pinned down (2026-07-19, DECISIONS.md): Condotto ships as open source for a
-*trusted* small team whose architect self-hosts it, so the milestone is
-**making it installable, operable, and polished**, not building tenant-grade
-isolation.
+**Packaging & operations.**
 
-- **(1) A single `condotto.toml`** (TOML via Bun's built-in `Bun.TOML.parse`,
-  zero deps) — the **single source of truth**, replacing today's scattered
-  `.env` + `condotto.repos.json` + `condotto.roles.json` + `CONDOTTO_*` (the legacy
-  readers are removed; a short migration note covers the one live instance). It
-  carries `[slack]` tokens, `architects`, `[defaults]`
-  (model/effort/auto-approve/cost cap), a `[paths]` block (worktree root, SQLite
-  DB), and `[[repos]]` entries enumerating the §5 repo fields (`name`, `path`,
-  `default_branch`, `trusted`, `safe_bash_allowlist`, `land_cmd`, `deploy_cmd`,
-  `policy_overrides`); env vars override any value. Secrets live in the file, so
-  the repo tracks a commented **`condotto.example.toml`** and `.gitignore`s the
-  real one. The daemon discovers it at `./condotto.toml` (override with
-  `--config <path>`/`CONDOTTO_CONFIG`) and **validates at boot** — missing or
-  malformed required fields fail fast with an actionable message, never a
-  half-started daemon.
-- **(2) Install/setup docs** — a README/runbook: install Bun or grab the binary
-  → create the Slack app (Appendix C) → copy and fill `condotto.example.toml` →
-  run, *and* how the grant + auto-approve trust model lets the architect empower
-  domain experts. Since the read-only audit channel is deferred, it also
-  documents reading the SQLite audit log locally.
-- **(3) Worktree cleanup** — a real teardown (`git worktree remove` + branch
-  delete + `git worktree prune`) and a fix for the assign-race orphan leak (a
-  worktree created before the losing DB insert). The retention/GC policy
-  **respects the park-and-resume invariant** (§2 journey 5): it never touches a
-  worktree still bound to a live or parked session — only ones with no session
-  row, or a set interval after an *explicit* `stop`. Default `stop` keeps the
-  worktree for reactivation (journey 6); an explicit clean variant removes it.
-- **(4) `bun build --compile` binaries** (macOS/Linux) with a minimal CLI
-  (`--config`, `--version`, `--help`) + a release story. Because operators
-  upgrade a binary in place over a persistent SQLite store, boot runs an
-  **ordered schema migration** (SQLite `user_version`) so an upgrade never
-  strands an existing install.
-- **(5) A daemon-wide operator `/condotto status`** (across all channels,
-  architect-only: uptime, active/parked counts, in-flight-vs-cap, pending
-  approvals, config summary) and fixes for the two
-  slash gaps: `status` currently posts publicly (make it ephemeral) and `stop`
-  is a no-op — since custom slash commands can't run inside a thread, stop is
-  targeted via in-thread **`@Condotto stop`** (mirroring `@Condotto assign`), with
-  channel-level `/condotto stop` listing sessions or pointing to the thread. Ship
-  a sample launchd/systemd unit.
+1. **A single `condotto.toml`** (TOML via Bun's built-in `Bun.TOML.parse`, zero
+   deps) — the **single source of truth**, replacing the earlier scattered `.env` +
+   `condotto.repos.json` + `condotto.roles.json` + `CONDOTTO_*`. It carries
+   `[slack]` tokens, `architects`, `[defaults]` (model/effort/auto-approve/cost
+   cap), a `[paths]` block (worktree root, SQLite DB), and `[[repos]]` entries
+   enumerating the §5 repo fields (`name`, `path`, `default_branch`, `trusted`,
+   `safe_bash_allowlist`, `land_cmd`, `deploy_cmd`, `policy_overrides`); env vars
+   override any value. Secrets live in the file, so the repo tracks a commented
+   **`condotto.example.toml`** and `.gitignore`s the real one. The daemon discovers
+   it at `./condotto.toml` (override with `--config <path>`/`CONDOTTO_CONFIG`) and
+   **validates at boot** — missing or malformed required fields fail fast with an
+   actionable message, never a half-started daemon.
+2. **Install/setup docs** — a README/runbook: install Bun or grab the binary →
+   create the Slack app (Appendix C) → copy and fill `condotto.example.toml` → run,
+   *and* how the grant + auto-approve trust model lets the architect empower domain
+   experts. It also documents reading the SQLite audit log locally.
+3. **Worktree cleanup** — a real teardown (`git worktree remove` + branch delete +
+   `git worktree prune`) and a fix for the assign-race orphan leak (a worktree
+   created before the losing DB insert). The retention/GC policy **respects the
+   park-and-resume invariant** (§2 journey 5): it never touches a worktree still
+   bound to a live or parked session — only ones with no session row, or a set
+   interval after an *explicit* `stop`. Default `stop` keeps the worktree for
+   reactivation (journey 6); an explicit clean variant removes it.
+4. **`bun build --compile` binaries** (macOS/Linux) with a minimal CLI
+   (`--config`, `--version`, `--help`) + a release story. Because operators upgrade
+   a binary in place over a persistent SQLite store, boot runs an **ordered schema
+   migration** (SQLite `user_version`) so an upgrade never strands an existing
+   install.
+5. **A daemon-wide operator `/condotto status`** (across all channels,
+   architect-only: uptime, active/parked counts, in-flight-vs-cap, pending
+   approvals, config summary), delivered as an ephemeral reply. Stop is targeted via
+   in-thread **`@Condotto stop`** (custom slash commands can't run inside a thread),
+   mirroring `@Condotto assign`, with channel-level `/condotto stop` listing sessions
+   or pointing to the thread. Sample launchd/systemd units ship in `deploy/`.
 
-Plus two cheap riders: **env-scrub the agent's shell** — a *denylist* through
-the SDK's `options.env` that drops the daemon's `SLACK_*`/`CONDOTTO_*` secrets
-while preserving `PATH`/`HOME` and the repo toolchain's environment (the policy
-floor stays as defense-in-depth); and **background-task cost accounting +
-cancellation** — background workflow spend counts against the per-thread runaway
-cap, and a wedged/over-cap workflow is cancellable (architect `@Condotto cancel`,
-plus auto-cancel on cap breach) instead of silently spending after the turn
-parks.
+Plus two riders: **env-scrub the agent's shell** — a *denylist* through the SDK's
+`options.env` that drops the daemon's `SLACK_*`/`CONDOTTO_*` secrets while
+preserving `PATH`/`HOME` and the repo toolchain's environment (the policy floor
+stays as defense-in-depth); and **background-task cost accounting + cancellation**
+— background workflow spend counts against the per-thread runaway cap, and a
+wedged/over-cap workflow is cancellable (architect `@Condotto cancel`, plus
+auto-cancel on cap breach) instead of silently spending after the turn parks.
 
-**Explicitly cut:** dedicated-box provisioning (the installer does it), session
-process isolation (unnecessary for a trusted team — in-process `query()` stays;
-the semaphore bounds load), and real deploy paths (out of M4 entirely; the
-`CommandRunner` plumbing already runs an optional per-repo command through the
-gate). **Deferred past M4:** the read-only Slack audit channel and
-symlink-realpath (vs. lexical) confinement (large, and only fully closed by
-OS-level sandboxing we're not building — interim: don't let `ln -s`
-auto-approve). **Demo: a new team grabs a binary or clones the repo, copies
-`condotto.example.toml`, fills it, runs `./condotto`, and is collaborating in a
-thread minutes later.**
+**Deliberately not built:** dedicated-box provisioning (the installer's job) and
+session process isolation (unnecessary for a trusted team — in-process `query()`
+stays; the semaphore bounds load). **Not yet built:** a read-only Slack audit
+channel and symlink-realpath (vs. lexical) confinement — the latter is only fully
+closed by OS-level sandboxing we're not building (interim: don't let `ln -s`
+auto-approve).
 
 **Later — fleet, shared session storage (SDK `SessionStore`), draft mode,
 per-repo policy UIs, second surface adapter (Teams / email / web app), second
@@ -1047,7 +891,7 @@ harness adapter (evaluate ACP first — §9).**
    `canUseTool` retained only as the deny-by-default backstop for the
    batched-calls caveat.
 2. **In-process vs. child-process/container per session** — start in-process;
-   revisit at M3 concurrency testing.
+   revisit under concurrency testing.
 3. **Assignment UX** — slash command vs. @mention vs. emoji reaction on the
    thread root. (Prototype used an explicit announcement as a visible "claim";
    reuse that to prevent two sessions grabbing one thread.)
@@ -1058,7 +902,7 @@ harness adapter (evaluate ACP first — §9).**
 6. **Where the policy lives** — per-repo config file in the repo itself
    (versioned, reviewable) vs. daemon-side config. (Leaning: in the repo.)
 7. **Model routing** — which model for conversation vs. implementation, and who
-   can change it per thread. **Partially resolved (M3.5): the architect changes
+   can change it per thread. **Partially resolved: the architect changes
    model + effort per thread via `@Condotto model`/`effort` (audited); one model/
    effort applies per session.** Separate conversation-vs-implementation routing
    is still open.
@@ -1071,7 +915,7 @@ harness adapter (evaluate ACP first — §9).**
    already have ACP adapters, and its permission-request flow may map onto our
    gate. If it fits, the harness port becomes "ACP + capability probes" and
    adapters get much cheaper. Verify against live ACP docs first.
-10. **Bun blockers** — **resolved 2026-07-16: none found.** M0 ran spawn,
+10. **Bun blockers** — **resolved 2026-07-16: none found.** The gate spike ran spawn,
     streaming, hooks, `defer`, and resume under Bun 1.3.14 (Homebrew) with no
     incompatibilities.
 
@@ -1164,7 +1008,7 @@ Docs:
 `streaming-output` https://code.claude.com/docs/en/agent-sdk/streaming-output.md
 
 **Package / runtime.** `bun add @anthropic-ai/claude-agent-sdk` (published for
-Node 18+; Condotto runs it under Bun — M0 verifies, see §6); the SDK bundles
+Node 18+; Condotto runs it under Bun — verified, see §6); the SDK bundles
 the Claude Code runtime (no separate CLI). Python:
 `pip install claude-agent-sdk`, Python 3.10+. Auth: `ANTHROPIC_API_KEY`.
 
@@ -1189,8 +1033,8 @@ a string or an `AsyncIterable<SDKUserMessage>`. Key `options` (camelCase):
 | `persistSession` | `boolean` | Default true; false = memory only |
 | `includePartialMessages` | `boolean` | Yield token-level `stream_event`s |
 
-M0 note: without `systemPrompt: { type: "preset", preset: "claude_code" }` the
-default system prompt carries no environment context — in the spike the model
+Note: without `systemPrompt: { type: "preset", preset: "claude_code" }` the
+default system prompt carries no environment context — the model
 didn't know its own cwd and invented `/home/user/…` paths (the `cwd` option
 itself worked; the recovered write landed in the right repo). The harness
 adapter should use the preset plus an appended Condotto protocol prompt so the
@@ -1250,8 +1094,8 @@ hooks: [gateFn] }] }`.
 Re-verified 2026-07-16 against the live hooks doc: `defer` exists ("returning
 `defer` ends the query so you can resume it later"); with `defer`,
 `updatedInput` is **ignored**; when multiple hooks/rules apply, precedence is
-`deny` > `defer` > `ask` > `allow`. The resume handshake is **verified by the
-M0 spike** (2026-07-16): `defer` ends the query with
+`deny` > `defer` > `ask` > `allow`. The resume handshake is **verified**
+(2026-07-16): `defer` ends the query with
 `stop_reason`/`terminal_reason: "tool_deferred"` and
 `result.deferred_tool_use = {id, name, input}`; resuming with
 `query({ prompt: "", options: { resume: sessionId } })` re-drives the pending
@@ -1272,8 +1116,7 @@ canUseTool: async (toolName, input, { signal, suggestions }) => {
 ```
 Because it blocks the turn (holding the async generator open), it can implement
 a Slack approval by awaiting the button click — at the cost of a live process
-for the whole wait. For long human latency prefer `PreToolUse` `defer`. **Which
-to use is the M0 decision.**
+for the whole wait. For long human latency prefer `PreToolUse` `defer`.
 
 **B5. Session storage.** On disk:
 `~/.claude/projects/<encoded-cwd>/<session-id>.jsonl`, where `<encoded-cwd>` is
@@ -1285,20 +1128,20 @@ cwd** — moving a worktree loses the session. Relocate the whole store with
 `listSubkeys` optional) — the SDK writes local disk first then mirrors,
 emitting `system/mirror_error` (non-fatal) if the store is down. An S3 example
 adapter ships in the SDK examples. (Storage path format — encoded cwd +
-`<session-id>.jsonl` — confirmed live by the M0 spike, 2026-07-16.)
+`<session-id>.jsonl` — confirmed live 2026-07-16.)
 
 **B6. Auth.** The bundled runtime reads the CLI's credential chain, so
 subscription OAuth works headless: the machine's `claude` keychain login, or
 `claude setup-token` → `CLAUDE_CODE_OAUTH_TOKEN` on a box with no login.
 Verified 2026-07-16: `query()` succeeded with no `ANTHROPIC_API_KEY` in the
-environment, on a Max-subscription keychain login (Node 24; Bun re-check in
-M0). `ANTHROPIC_API_KEY` is the API-billing alternative; Bedrock/Vertex/
+environment, on a Max-subscription keychain login (Node 24; re-verified under
+Bun, §6). `ANTHROPIC_API_KEY` is the API-billing alternative; Bedrock/Vertex/
 Foundry via `CLAUDE_CODE_USE_BEDROCK=1` / `CLAUDE_CODE_USE_VERTEX=1` /
 `CLAUDE_CODE_USE_FOUNDRY=1` (+ that provider's standard credential chain).
 
 ---
 
-## Appendix C — Slack surface adapter: app setup (needed from Milestone 1)
+## Appendix C — Slack surface adapter: app setup
 
 Create a Slack app (https://api.slack.com/apps → "From scratch") in a
 **scratch workspace** you control. Condotto uses **Socket Mode**, so there is no
@@ -1357,5 +1200,4 @@ the roles table by `body.user.id` — never trust anything client-supplied.
 
 ---
 
-*End of design. First action for the building session: read this file, create
-`DECISIONS.md`, and execute Milestone 0.*
+*End of design. The running log is `DECISIONS.md`.*

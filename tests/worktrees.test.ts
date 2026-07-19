@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { WorktreeManager } from "../src/core/worktrees";
 
-// M4 §3 — real worktree teardown. These exercise the WorktreeManager against a
+// Real worktree teardown. These exercise the WorktreeManager against a
 // REAL git repo (no fakes): create makes a registered worktree + branch; remove
 // tears both down and is best-effort/idempotent; and it never touches anything
 // outside its root.
@@ -36,7 +36,7 @@ beforeEach(async () => {
 const worktreeList = () => run(["git", "-C", repoPath, "worktree", "list", "--porcelain"]);
 const branchList = () => run(["git", "-C", repoPath, "branch", "--list"]);
 
-describe("WorktreeManager.create + remove (M4 §3)", () => {
+describe("WorktreeManager.create + remove", () => {
   test("create registers a worktree + branch; remove deletes both and prunes clean", async () => {
     const wm = new WorktreeManager(root);
     const info = await wm.create({ repoPath, defaultBranch: "main", sessionId: "sess-aaaaaaaa-1" });

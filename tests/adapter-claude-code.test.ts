@@ -3,7 +3,7 @@ import { ClaudeCodeAdapter, scrubDaemonEnv, type QueryFn } from "../src/adapters
 import type { GateFn, TurnEvent } from "../src/core/types";
 
 // Drive the REAL claude-code adapter loop with a scripted SDK message stream (via
-// the injectable query seam), so the M3.6 result-buffering and canUseTool wiring —
+// the injectable query seam), so the result-buffering and canUseTool wiring —
 // which the FakeHarness bypasses entirely — are covered by `bun test`.
 
 /** Build a fake query whose generator body receives the adapter's `options`. */
@@ -23,7 +23,7 @@ async function collect(adapter: ClaudeCodeAdapter, gate: GateFn, harness?: any):
 
 const allowGate: GateFn = async () => ({ decision: "allow" });
 
-describe("claude-code adapter: multi-result buffering (M3.6)", () => {
+describe("claude-code adapter: multi-result buffering", () => {
   test("delivers the LAST success result of a workflow turn (final synthesis, not 'launched')", async () => {
     const q = fakeQuery(async function* () {
       yield { type: "system", subtype: "init", session_id: "s1" };
@@ -79,7 +79,7 @@ describe("claude-code adapter: multi-result buffering (M3.6)", () => {
   });
 });
 
-describe("claude-code adapter: gate wiring (M3.6)", () => {
+describe("claude-code adapter: gate wiring", () => {
   test("the PreToolUse hook forwards agent_id and maps allow/deny/gate→defer", async () => {
     const seen: { name: string; agentId?: string; escaped?: boolean }[] = [];
     const gate: GateFn = async (call) => {
@@ -143,7 +143,7 @@ describe("claude-code adapter: gate wiring (M3.6)", () => {
   });
 });
 
-describe("env-scrub the agent shell (M4 §5 rider a)", () => {
+describe("env-scrub the agent shell (rider a)", () => {
   test("scrubDaemonEnv drops SLACK_*/CONDOTTO_* but keeps PATH/HOME/toolchain/Claude auth", () => {
     const base: NodeJS.ProcessEnv = {
       PATH: "/usr/bin",
@@ -190,7 +190,7 @@ describe("env-scrub the agent shell (M4 §5 rider a)", () => {
   });
 });
 
-describe("claude-code adapter: background cost/cancel (M4 §5 rider b)", () => {
+describe("claude-code adapter: background cost/cancel (rider b)", () => {
   /** A fake query whose interrupt() runs `onInterrupt` (e.g. to increment a counter). */
   function fakeQueryI(
     body: (opts: Record<string, any>) => AsyncGenerator<Record<string, any>>,
@@ -333,7 +333,7 @@ describe("claude-code adapter: background cost/cancel (M4 §5 rider b)", () => {
   });
 });
 
-describe("claude-code adapter: tool posture (M3.6)", () => {
+describe("claude-code adapter: tool posture", () => {
   test("workflows on ⇒ Workflow tool enabled, reads via hook (empty allowedTools), bypassPermissions", async () => {
     let captured: any;
     const q = fakeQuery(async function* (opts) {

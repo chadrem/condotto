@@ -1,8 +1,8 @@
-// Runs a repo's configured land/deploy/test command in its worktree (M3,
-// DESIGN §2 journey 4). Distinct from the harness/agent shell: the command is
+// Runs a repo's configured land/deploy/test command in its worktree
+// (DESIGN §2 journey 4). Distinct from the harness/agent shell: the command is
 // authoritative repo config, never agent-chosen, and it only ever executes
 // after an architect approves it through the gate. Build-time safety: on the
-// throwaway repo these are `echo` no-ops until M4 (see config.ts).
+// throwaway repo these are `echo` no-ops for now (see config.ts).
 //
 // Not a platform seam — this is a core capability, like the git calls in
 // worktrees.ts. It stays free of Slack/SDK types.
@@ -21,7 +21,7 @@ export interface CommandRunnerLike {
 
 /**
  * The daemon's OWN secrets — never handed to a repo's deploy command. A real
- * deploy needs its own scoped credentials (M4), not Condotto's chat/AI tokens;
+ * deploy needs its own scoped credentials, not Condotto's chat/AI tokens;
  * scrubbing these keeps a misbehaving deploy command from exfiltrating them.
  */
 export const DEFAULT_SCRUB_ENV = [

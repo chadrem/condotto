@@ -109,7 +109,7 @@ describe("policy: bash", () => {
     expect(evaluate(bash("env | grep ANTHROPIC_API_KEY"), ctx(allowlist)).action).toBe("deny");
   });
 
-  test("environment dumps are hard-denied — they leak the daemon's own secrets (M3.8 review)", () => {
+  test("environment dumps are hard-denied — they leak the daemon's own secrets (review)", () => {
     // Under architect auto-approve there is no human at the gate, so an env dump
     // piped anywhere must be floored, not merely gated.
     for (const c of [
@@ -149,7 +149,7 @@ describe("policy: bash", () => {
   });
 });
 
-describe("policy: production-data gate (M3, DESIGN §4)", () => {
+describe("policy: production-data gate (DESIGN §4)", () => {
   test("prod database clients and app consoles are flagged as a production-data concern", () => {
     for (const c of [
       "psql -h prod.db -c 'select count(*) from users'",
@@ -233,7 +233,7 @@ describe("offendingPath", () => {
   });
 });
 
-describe("policy: multi-agent tools (M3.5 Tier B)", () => {
+describe("policy: multi-agent tools", () => {
   const subCall = (name: string, input: unknown): ToolCall => ({ id: "t1", name, input, agentId: "sub-abc123" });
   const bashSub = (command: string): ToolCall => subCall("Bash", { command });
 
@@ -285,7 +285,7 @@ describe("policy: multi-agent tools (M3.5 Tier B)", () => {
     expect(evaluate(call("Task", {}), { ...ctx(), subagentsEnabled: true }).action).toBe("allow");
   });
 
-  test("the MAIN agent's workflow LAUNCH is always gated (architect approves each launch, M3.6 Tier 2)", () => {
+  test("the MAIN agent's workflow LAUNCH is always gated (architect approves each launch)", () => {
     const wf = call("Workflow", { script: "export const meta = { name: 'audit', description: 'x' }" });
     // Gated whether or not workflows are enabled (when off the tool is also absent
     // from context; this is the deny-heavy backstop). The concern surfaces the fan-out.
@@ -299,7 +299,7 @@ describe("policy: multi-agent tools (M3.5 Tier B)", () => {
   });
 });
 
-describe("parseWorkflowMeta / describeCall for a Workflow launch (M3.6 Tier 2)", () => {
+describe("parseWorkflowMeta / describeCall for a Workflow launch", () => {
   const script = `export const meta = {\n  name: 'auth-audit',\n  description: 'Audit auth across the codebase',\n  phases: [{ title: 'Scan' }],\n}\nphase('Scan')\nawait agent('look at "login"')`;
 
   test("pulls name and description from the meta block", () => {
@@ -330,7 +330,7 @@ describe("parseWorkflowMeta / describeCall for a Workflow launch (M3.6 Tier 2)",
   });
 });
 
-describe("policy: escaped (un-deferrable) calls — canUseTool backstop (M3.6)", () => {
+describe("policy: escaped (un-deferrable) calls — canUseTool backstop", () => {
   // An escaped call reached the harness's un-deferrable path (canUseTool) instead
   // of the PreToolUse hook — a batched gated call, or a workflow-agent call without
   // an agent_id. It CANNOT defer, so the policy confines it: reads pass, would-be
@@ -378,7 +378,7 @@ describe("policy: escaped (un-deferrable) calls — canUseTool backstop (M3.6)",
   });
 });
 
-describe("policy: worktree-write opt-in for confined calls (M3.6 Tier 3)", () => {
+describe("policy: worktree-write opt-in for confined calls", () => {
   // With workflowWrite on, a subagent/workflow-agent (agentId) OR escaped call may
   // WRITE and run bash CONFINED to the worktree; out-of-worktree / credential /
   // production-data stay hard-denied.
@@ -401,7 +401,7 @@ describe("policy: worktree-write opt-in for confined calls (M3.6 Tier 3)", () =>
     // The worktree-write opt-in relaxes WRITES only; shell has no path confinement
     // (evaluateBash never checks the worktree), so auto-running it un-deferred would
     // be un-confined RCE/exfil. It stays denied in every mode; shell is the main
-    // agent's job (gated). Regression guard for the M3.6 SEV-1 finding.
+    // agent's job (gated). Regression guard for the SEV-1 finding.
     for (const cmd of [
       "npm run build",
       "cat /Users/victim/secrets.txt", // out-of-tree read exfil that Read hard-denies

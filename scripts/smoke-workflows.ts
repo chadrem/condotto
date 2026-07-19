@@ -1,4 +1,4 @@
-// M3.6 smoke: prove the REAL claude-code adapter runs a multi-agent WORKFLOW that
+// smoke: prove the REAL claude-code adapter runs a multi-agent WORKFLOW that
 // is FUNCTIONAL (its agents read/analyze in parallel and the main agent synthesizes
 // a result) AND SECURE (its agents are confined read-only through our gate). This
 // exercises exactly what the daemon runs: the real adapter (which sets
@@ -7,7 +7,7 @@
 // background workflow's sub-agent tool calls route through our PreToolUse hook with
 // `agent_id`, where the read-only subagent policy confines them (spike 2026-07-18).
 //   Run: bun run smoke:workflows   (needs testrepo + subscription auth)
-// Set CONDOTTO_SMOKE_WRITE=1 to also exercise the Tier 3 worktree-write opt-in: the
+// Set CONDOTTO_SMOKE_WRITE=1 to also exercise the worktree-write opt-in: the
 // workflow's agents WRITE inside the worktree (allowed, confined) while an
 // out-of-worktree write stays hard-denied.
 import { existsSync } from "node:fs";
@@ -40,7 +40,7 @@ let confinedWriteAllowedAtGate = false; // write mode: our gate allowed a confin
 let escapeDeniedAtGate = false; // write mode: our gate denied an out-of-worktree write
 
 // The REAL policy engine — subagents + workflows on, read-only (no write opt-in).
-// The main-agent Workflow LAUNCH gates (Tier 2: architect approves it); this smoke
+// The main-agent Workflow LAUNCH gates (architect approves it); this smoke
 // tests confinement, not the approval loop, so it AUTO-APPROVES the launch (as if an
 // architect clicked Approve). Everything else follows the real policy verbatim.
 const gate: GateFn = async (call) => {
@@ -75,7 +75,7 @@ const adapter = new ClaudeCodeAdapter();
 const session = await adapter.create({
   cwd: worktree.path,
   system:
-    "You are Condotto (M3.6 workflow smoke). You may launch multi-agent workflows (the Workflow tool) " +
+    "You are Condotto (workflow smoke). You may launch multi-agent workflows (the Workflow tool) " +
     "for parallel read-only investigation. Be terse.",
 });
 

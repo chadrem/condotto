@@ -1,5 +1,5 @@
 // Smoke test, phase 1: exercise the REAL claude-code harness adapter against
-// the throwaway test repo. Mirrors the M1 demo minus Slack: create a session,
+// the throwaway test repo. Mirrors the demo minus Slack: create a session,
 // run a repo-aware turn, persist the opaque handle for phase 2 (which resumes
 // from a separate OS process — `bun run smoke:resume`).
 import { homedir } from "node:os";
@@ -17,7 +17,7 @@ const gate: GateFn = async (call) => {
   console.log(`[gate] ${call.name} -> ${allowed ? "allow" : "deny"}`);
   return allowed
     ? { decision: "allow" }
-    : { decision: "deny", reason: "M1 is read-only." };
+    : { decision: "deny", reason: "This session is read-only." };
 };
 
 const config = loadConfig();
@@ -35,7 +35,7 @@ const adapter = new ClaudeCodeAdapter();
 const session = await adapter.create({
   cwd: worktree.path,
   system:
-    "You are Condotto (M1 smoke test). You are read-only. Be terse: answer in at most two sentences.",
+    "You are Condotto (smoke test). You are read-only. Be terse: answer in at most two sentences.",
 });
 
 for await (const ev of session.turn(
