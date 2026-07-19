@@ -201,6 +201,52 @@ suppressKnownSdkWarnings();
 
 /** Abort a turn if the SDK produces nothing at all for this long. */
 const TURN_INACTIVITY_MS = 10 * 60_000;
+/** After we ask for an interrupt, wait only this long to drain the final result's
+ *  cost before giving up (the SDK settles the aborted turn fast — spike b, ~567ms). */
+const DRAIN_AFTER_ABORT_MS = 30_000;
+
+/**
+ * M4 §5 rider (a): env-scrub the agent shell. The SDK's `options.env` REPLACES the
+ * subprocess environment entirely (sdk.d.ts:1411), so this is a DENYLIST over a
+ * spread of `process.env`: drop the daemon's own secret namespaces (`SLACK_*`,
+ * `CONDUIT_*`) so an in-worktree Bash command can never read the daemon's Slack
+ * tokens or config from its own environ, while PRESERVING everything the toolchain
+ * and the Claude Code CLI need — `PATH`/`HOME`, the repo's build env, and the Claude
+ * auth token (which never matches these prefixes, so keychain OAuth AND a headless
+ * `CLAUDE_CODE_OAUTH_TOKEN` both survive). Belt-and-braces over the §4 policy floor
+ * (credential/secret hard-deny stays); spike-proven under keychain OAuth
+ * (spikes/m4/env-scrub.ts, 2026-07-19). Distinct from CommandRunner's scrub, which
+ * drops a fixed NAME list incl. the Claude auth token because a deploy command,
+ * unlike the agent, does not need it.
+ */
+const DAEMON_SECRET_ENV_PREFIXES = ["SLACK_", "CONDUIT_"];
+export function scrubDaemonEnv(base: NodeJS.ProcessEnv): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const [k, v] of Object.entries(base)) {
+    if (v === undefined) continue;
+    if (DAEMON_SECRET_ENV_PREFIXES.some((p) => k.startsWith(p))) continue;
+    out[k] = v;
+  }
+  return out;
+}
+
+/** M4 §5 rider (b): the reason a turn's query was interrupted, for the notice. */
+type AbortReason = "timeout" | "cancel" | "budget";
+function abortNotice(reason: AbortReason, sawWorkflow: boolean, costUsd: number | undefined): string {
+  const what = sawWorkflow ? "the running workflow" : "the running turn";
+  const spent = costUsd !== undefined ? ` ($${costUsd.toFixed(2)} spent this turn)` : "";
+  switch (reason) {
+    case "timeout":
+      return `I stopped ${what} after 10 minutes with no activity${spent}.`;
+    case "cancel":
+      return `Cancelled — I stopped ${what}${spent}.`;
+    case "budget":
+      return (
+        `I hit this thread's cost budget and stopped ${what}${spent}. ` +
+        `An architect can raise it with \`@Conduit budget <usd>\` to continue.`
+      );
+  }
+}
 
 function asHandle(handle: SessionHandle): ClaudeCodeHandle {
   const h = handle as Partial<ClaudeCodeHandle> | null;
@@ -275,13 +321,25 @@ class ClaudeCodeSession implements HarnessSession {
     private system: string,
     /** The SDK query function (injectable for tests). */
     private queryFn: QueryFn,
+    /** Inactivity watchdog window; overridable so tests can exercise the timeout→
+     *  interrupt→drain path without waiting 10 minutes. Defaults to the constant. */
+    private turnInactivityMs: number = TURN_INACTIVITY_MS,
   ) {}
+
+  /** The in-flight query, so an out-of-band interrupt() can reach it (M4 §5).
+   *  Null when no turn is running. */
+  private activeQuery: ReturnType<QueryFn> | null = null;
+  /** Set when interrupt() actually fired on the active query — the turn loop then
+   *  drains the aborted result's cost and reports a cancellation instead of an error. */
+  private cancelRequested = false;
 
   get handle(): SessionHandle {
     return this._handle;
   }
 
   async *turn(input: TurnInput, gate: GateFn): AsyncIterable<TurnEvent> {
+    // Fresh per turn — a stale flag from a prior cancel must not taint this turn.
+    this.cancelRequested = false;
     yield* this.runQuery(input, gate, /* allowFreshRetry */ true);
   }
 
@@ -376,6 +434,12 @@ class ClaudeCodeSession implements HarnessSession {
       options: {
         cwd: this.cwd,
         resume: this._handle.sessionId ?? undefined,
+        // M4 §5 rider (a): scrub the daemon's own SLACK_*/CONDUIT_* secrets from the
+        // environment the agent's Bash inherits (belt-and-braces over the §4 policy
+        // floor). options.env REPLACES the subprocess env, so this is a denylist
+        // spread of process.env that keeps PATH/HOME + the toolchain + the Claude
+        // auth token the SDK needs (spike-proven under keychain OAuth).
+        env: scrubDaemonEnv(process.env),
         // Point the SDK at the native `claude` CLI when running as a compiled
         // binary (M4 §2); omitted under `bun run`, where the SDK finds it itself.
         ...(claudeCliPath() ? { pathToClaudeCodeExecutable: claudeCliPath()! } : {}),
@@ -413,6 +477,9 @@ class ClaudeCodeSession implements HarnessSession {
       },
     });
 
+    // Expose the running query so an out-of-band interrupt() (architect `@Conduit
+    // cancel`, M4 §5) can reach it. Cleared in the finally.
+    this.activeQuery = q;
     let sawResult = false;
     // A workflow turn produces MULTIPLE `result` messages: an intermediate
     // "workflow launched; waiting…" success, then the FINAL synthesized success
@@ -424,24 +491,59 @@ class ClaudeCodeSession implements HarnessSession {
     // line and tag the final reply for the summary footer.
     let sawWorkflow = false;
     let lastWorkflowDesc = "";
+    // M4 §5 rider (b): when a turn is interrupted — inactivity timeout, an architect
+    // `@Conduit cancel`, or a budget breach that hit a RUNNING workflow — we stop the
+    // (possibly detached) background task and DRAIN the aborted result's cost into the
+    // ledger, then post one notice. `q.interrupt()` is the only lever that actually
+    // halts a detached workflow (maxBudgetUsd does NOT — spike b), and the aborted
+    // result still carries total_cost_usd, so the runaway cap stays accurate.
+    let abortReason: AbortReason | null = null;
+    let drainedCost: number | undefined;
     try {
       const iterator = q[Symbol.asyncIterator]();
+      // A SINGLE in-flight pull, re-raced against the timeout across abort re-arms. It
+      // must be reused (not re-created) on a timeout: Promise.race leaves the losing
+      // iterator.next() pending, and a fresh next() would be queued BEHIND it — so the
+      // stale pull would swallow the interrupt's aborted result (and its cost) and the
+      // new one would get `done`. Advance `pending` only after actually consuming a step.
+      let pending = iterator.next();
       while (true) {
-        // Inactivity watchdog: a wedged SDK query must not hang the session's
-        // turn queue forever.
+        // Inactivity watchdog: a wedged SDK query must not hang the session's turn
+        // queue forever. Once we're draining after an abort, wait only briefly for
+        // the aborted result's cost before giving up (the SDK settles fast).
         let timer: ReturnType<typeof setTimeout> | undefined;
+        // Once ANY interrupt is in flight (an in-loop abort OR an out-of-band cancel),
+        // wait only briefly for the aborted result's cost, not the full inactivity window.
+        const aborting = abortReason !== null || this.cancelRequested;
+        const waitMs = aborting ? DRAIN_AFTER_ABORT_MS : this.turnInactivityMs;
         const timeout = new Promise<"timeout">((resolveTimeout) => {
-          timer = setTimeout(() => resolveTimeout("timeout"), TURN_INACTIVITY_MS);
+          timer = setTimeout(() => resolveTimeout("timeout"), waitMs);
         });
-        const step = await Promise.race([iterator.next(), timeout]).finally(() =>
-          clearTimeout(timer),
-        );
+        let step: IteratorResult<Record<string, any>> | "timeout";
+        try {
+          step = await Promise.race([pending, timeout]).finally(() => clearTimeout(timer));
+        } catch (pullErr) {
+          // After an interrupt/abort the SDK can THROW on the pull that FOLLOWS the
+          // terminal result (observed: [ede_diagnostic] … stop_reason=tool_use — spike
+          // b). The result + cost already arrived, so if an abort is in flight this is
+          // the expected clean end. Otherwise it's a real failure — rethrow.
+          if (aborting) break;
+          throw pullErr;
+        }
         if (step === "timeout") {
+          // Already interrupting and the aborted result didn't arrive in time — give up
+          // on the cost rather than waiting/re-interrupting forever.
+          if (aborting) break;
+          // No SDK activity for 10 minutes. Interrupt to halt any detached background
+          // workflow (which would otherwise keep spending after the turn parks), then
+          // re-race the SAME `pending` so the interrupt's aborted result is drained.
+          abortReason = "timeout";
           await q.interrupt().catch(() => {});
-          yield { kind: "error", message: "session turn timed out (no activity for 10 minutes)" };
-          return;
+          continue;
         }
         if (step.done) break;
+        // Consumed a real message — prefetch the next one on a fresh pull.
+        pending = iterator.next();
 
         const m = step.value as Record<string, any>;
         if (m.type === "system" && m.subtype === "init") {
@@ -480,6 +582,15 @@ class ClaudeCodeSession implements HarnessSession {
           // error (incl. error_max_budget_usd) — so the core's cost ledger and
           // runaway cap count all of them (verified against SDKResult* types).
           const cost = typeof m.total_cost_usd === "number" ? m.total_cost_usd : undefined;
+          // An architect `@Conduit cancel` interrupted this turn out-of-band: the SDK
+          // now emits an aborted result. Capture its cost and report the cancellation.
+          if (this.cancelRequested && !abortReason) abortReason = "cancel";
+          // Already aborting (cancel/timeout, or a budget breach handled just below):
+          // just drain the cost; the single post-loop notice reports it.
+          if (abortReason) {
+            if (cost !== undefined) drainedCost = cost;
+            continue;
+          }
           const deferred = m.deferred_tool_use as
             | { id?: string; name?: string; input?: unknown }
             | undefined;
@@ -510,6 +621,16 @@ class ClaudeCodeSession implements HarnessSession {
               costUsd: cost,
             };
           } else if (m.subtype === "error_max_budget_usd" || m.terminal_reason === "budget_exhausted") {
+            if (sawWorkflow) {
+              // The budget brake fired DURING a workflow. The SDK signal alone does
+              // NOT stop the detached background task — it keeps spending past the cap
+              // (spike b). Interrupt to actually halt it (auto-cancel on breach), then
+              // drain + report once via the post-loop notice.
+              abortReason = "budget";
+              if (cost !== undefined) drainedCost = cost;
+              await q.interrupt().catch(() => {});
+              continue;
+            }
             // The turn hit its cost budget and stopped (M3). Surface it clearly
             // with the spend — the core will then pause the session (§4).
             pendingReply = null;
@@ -526,8 +647,16 @@ class ClaudeCodeSession implements HarnessSession {
           }
         }
       }
-      // Deliver the final buffered reply (the last success result of the turn).
-      if (pendingReply) {
+      // A cancel whose interrupt-throw arrived before any aborted result still counts
+      // as an abort (no cost to drain, but report it cleanly rather than as "no reply").
+      // BUT if the turn had already buffered a completed success when the cancel landed
+      // (the cancel raced a just-finished turn), deliver that reply + its cost — dropping
+      // it would lose the reply AND under-count the turn's spend against the runaway cap.
+      const abort: AbortReason | null = abortReason ?? (this.cancelRequested && !pendingReply ? "cancel" : null);
+      if (abort) {
+        yield { kind: "error", message: abortNotice(abort, sawWorkflow, drainedCost), costUsd: drainedCost };
+      } else if (pendingReply) {
+        // Deliver the final buffered reply (the last success result of the turn).
         yield { kind: "reply", text: pendingReply.text, costUsd: pendingReply.costUsd, workflow: sawWorkflow };
       }
     } catch (err) {
@@ -540,6 +669,8 @@ class ClaudeCodeSession implements HarnessSession {
       // just-approved action and wipe context (#10). Let that surface as error.
       if (
         allowFreshRetry &&
+        // Never retry an interrupted turn — the architect/timeout ended it on purpose.
+        !this.cancelRequested &&
         input.text.trim().length > 0 &&
         this._handle.sessionId &&
         /No conversation found/i.test(message)
@@ -554,14 +685,33 @@ class ClaudeCodeSession implements HarnessSession {
         return;
       }
       throw err;
+    } finally {
+      // The query is done (or being abandoned) — stop routing interrupts to it so a
+      // later `@Conduit cancel` on an idle session is a clean no-op, not a stray abort.
+      if (this.activeQuery === q) this.activeQuery = null;
     }
-    if (!sawResult) {
+    // A turn that produced no result at all (and wasn't an intentional abort) is an
+    // error. An abort (timeout/cancel/budget) already yielded its own notice above, so
+    // don't also emit "produced no result" — that would double-post a contradictory
+    // message (e.g. a wedged query that times out with nothing drainable).
+    if (!sawResult && !this.cancelRequested && !abortReason) {
       yield { kind: "error", message: "session turn produced no result" };
     }
   }
 
+  /**
+   * Interrupt the in-flight turn's query (M4 §5): halts a wedged/over-cap multi-agent
+   * workflow — `q.interrupt()` is the only lever that actually stops the DETACHED
+   * background task (spike b) — and lets the turn loop drain the aborted result's
+   * cost. A no-op when no turn is running, so an architect `@Conduit cancel` on an
+   * idle session does nothing. Only sets `cancelRequested` when a query is actually
+   * live, so it can never taint a subsequent normal turn.
+   */
   async interrupt(): Promise<void> {
-    // M1: turns are awaited to completion; interrupt support lands with M2/M3.
+    const q = this.activeQuery;
+    if (!q) return;
+    this.cancelRequested = true;
+    await q.interrupt().catch(() => {});
   }
 }
 
@@ -623,8 +773,15 @@ function describeWorkflowEvent(m: Record<string, any>): string | null {
 
 export class ClaudeCodeAdapter implements HarnessAdapter {
   readonly id = "claude-code";
-  /** Injectable query (tests pass a fake); defaults to the real SDK `query`. */
-  constructor(private queryFn: QueryFn = query as unknown as QueryFn) {}
+  /**
+   * Injectable query (tests pass a fake); defaults to the real SDK `query`.
+   * `turnInactivityMs` overrides the per-turn inactivity watchdog (tests only — lets
+   * the timeout→interrupt→drain path be exercised without a 10-minute wait).
+   */
+  constructor(
+    private queryFn: QueryFn = query as unknown as QueryFn,
+    private turnInactivityMs: number = TURN_INACTIVITY_MS,
+  ) {}
   readonly capabilities: HarnessCapabilities = {
     mechanicalGating: true, // defer-based gating (M0-verified), wired live in M2
     resumeAfterRestart: true,
@@ -636,10 +793,10 @@ export class ClaudeCodeAdapter implements HarnessAdapter {
   };
 
   async create(opts: { cwd: string; system: string }): Promise<HarnessSession> {
-    return new ClaudeCodeSession({ v: 1, sessionId: null }, opts.cwd, opts.system, this.queryFn);
+    return new ClaudeCodeSession({ v: 1, sessionId: null }, opts.cwd, opts.system, this.queryFn, this.turnInactivityMs);
   }
 
   async resume(handle: SessionHandle, cwd: string, system: string): Promise<HarnessSession> {
-    return new ClaudeCodeSession(asHandle(handle), cwd, system, this.queryFn);
+    return new ClaudeCodeSession(asHandle(handle), cwd, system, this.queryFn, this.turnInactivityMs);
   }
 }

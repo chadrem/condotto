@@ -146,6 +146,8 @@ export function parseMentionCommand(
   if (first === "take" && second === "this" && third === undefined) return { name: "assign", args: "" };
   if (first === "stop" && words.length === 1) return { name: "stop", args: "" };
   if (first === "stop" && second === "clean" && words.length === 2) return { name: "stop", args: "clean" };
+  // M4 §5: interrupt the in-flight turn (e.g. a runaway workflow); the session lives on.
+  if (first === "cancel" && words.length === 1) return { name: "cancel", args: "" };
   if (first === "status" && words.length === 1) return { name: "status", args: "" };
   if (first === "land" && words.length === 1) return { name: "land", args: "" };
   if (first === "deploy" && words.length === 1) return { name: "deploy", args: "" };
@@ -336,8 +338,8 @@ export class SlackAdapter implements SurfaceAdapter {
             "Usage: `/conduit assign [repo]` (new session in this channel), " +
             "`/conduit status` (operator dashboard — architects), " +
             "`/conduit stop` (list this channel's sessions).\n" +
-            "Inside a session thread (mention me): `@Conduit stop`, `@Conduit status`, " +
-            "`@Conduit land`/`deploy` (gated), `@Conduit budget <usd>`.\n" +
+            "Inside a session thread (mention me): `@Conduit stop`, `@Conduit cancel` (stop the running turn), " +
+            "`@Conduit status`, `@Conduit land`/`deploy` (gated), `@Conduit budget <usd>`.\n" +
             "Tune the implementer: `@Conduit model <opus|sonnet|fable>`, `@Conduit effort <low…max>`, " +
             "`@Conduit subagents on|off`, `@Conduit workflows on|off`, `@Conduit ultra on|off`.\n" +
             "Approvals & roles: `@Conduit auto-approve on|off` (skip your own Approve clicks), " +

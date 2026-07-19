@@ -49,6 +49,11 @@ export type CommandName =
   | "assign"
   | "status"
   | "stop"
+  // M4 §5 — interrupt the session's IN-FLIGHT turn (a wedged/over-cap multi-agent
+  // workflow) without ending the session, mirroring `stop`'s architect-only,
+  // thread-scoped shape. The detached background task is halted via q.interrupt()
+  // and its spend is drained into the ledger (spike 2026-07-19, DECISIONS.md).
+  | "cancel"
   | "land"
   | "deploy"
   | "budget"

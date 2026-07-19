@@ -150,7 +150,7 @@ function threadCommandHelp(): string {
     `• \`@Conduit auto-approve on|off\` — run an architect's own turns without the Approve click (on by default)`,
     `• \`@Conduit grant @user architect [everywhere]\` · \`@Conduit revoke @user\` — delegate authority (this channel, or everywhere)`,
     `• \`@Conduit land\` / \`@Conduit deploy\` — run the repo's ship path (gated)`,
-    `• \`@Conduit budget <usd>\` — raise this thread's cost budget`,
+    `• \`@Conduit budget <usd>\` — raise this thread's cost budget · \`@Conduit cancel\` — stop the running turn (e.g. a runaway workflow)`,
     `• \`@Conduit status\` — list sessions · \`@Conduit stop\` — end this session (keeps the worktree; \`stop clean\` discards it)`,
   ].join("\n");
 }
@@ -211,6 +211,10 @@ export interface SessionManagerOptions {
 
 /** Prefix marking an approval whose action the daemon runs itself (land/deploy) */
 const SHIP_TOOL_PREFIX = "conduit:";
+/** The multi-agent Workflow tool name (M4 §5). An approved Workflow LAUNCH resumes
+ *  into a background workflow that can run away, so — unlike a single approved write —
+ *  its resume turn is budget-capped so the auto-cancel-on-breach brake arms. */
+const WORKFLOW_TOOL_NAME = "Workflow";
 
 /**
  * Counting semaphore bounding how many harness turns execute concurrently across
@@ -441,6 +445,9 @@ export class SessionManager {
         break;
       case "stop":
         await this.stopSession(event.conv, event.author, event.args);
+        break;
+      case "cancel":
+        await this.cancelSession(event.conv, event.author);
         break;
       case "budget":
         await this.setBudget(event.conv, event.author, event.args);
@@ -836,6 +843,43 @@ export class SessionManager {
           `thread anytime to resume, or \`@Conduit stop clean\` to discard it.`,
       });
     }
+  }
+
+  /**
+   * `@Conduit cancel` (M4 §5) — architect-only. Interrupt the session's IN-FLIGHT
+   * turn (a wedged or over-cap multi-agent workflow) WITHOUT ending the session, so
+   * the thread continues. The harness halts the — possibly detached — background task
+   * via `q.interrupt()` (the only lever that actually stops it — spike b) and drains
+   * its spend into the ledger; the running turn then parks with a cancellation notice.
+   * A no-op when nothing is running. Mirrors `stop`'s architect-only, thread shape.
+   */
+  private async cancelSession(conv: ConversationRef, author: Principal): Promise<void> {
+    const surface = this.surfaceFor(conv);
+    const session = this.store.getSessionByConversation(conv.surfaceId, conv.conversationId);
+    if (!session) {
+      await surface.post(conv, { text: "No session in this thread to cancel." });
+      return;
+    }
+    // Cancelling is command authority (DESIGN §2) — architects only, like stop.
+    if (!this.store.isArchitect(principalKey(author), conv.channelId)) {
+      this.store.audit({ sessionId: session.id, actor: principalKey(author), event: "authz_denied", detail: { action: "cancel" } });
+      await surface.post(conv, { text: "Only architects can cancel a running turn." });
+      return;
+    }
+    // A turn is in flight only while the session is `active` (tryActivate → active;
+    // the turn's finally → parked). No active turn ⇒ nothing to interrupt. (A turn
+    // still WAITING on the concurrency semaphore is parked and hasn't spent anything.)
+    if (session.status !== "active") {
+      await surface.post(conv, { text: "Nothing is running to cancel — this session is idle." });
+      return;
+    }
+    this.store.audit({ sessionId: session.id, actor: principalKey(author), event: "turn_cancelled" });
+    await surface
+      .post(conv, { text: "⏹️ Cancelling the running turn — stopping any workflow and tallying its cost…" })
+      .catch(() => {});
+    // A no-op if the query finished between the status read and here; otherwise the
+    // in-flight turn drains the aborted result's cost and delivers its own notice.
+    await this.live.get(session.id)?.harness?.interrupt().catch(() => {});
   }
 
   /** Human label for the worktree retention window (M4 §3 stop-clean messaging). */
@@ -1647,6 +1691,9 @@ export class SessionManager {
           // member-initiated turn can't be laundered into architect auto-approval;
           // an architect-initiated turn stays consistent across the resume.
           initiator: approval.initiated_by ?? undefined,
+          // M4 §5: an approved WORKFLOW launch resumes into a runaway-capable background
+          // workflow, so cap this resume to arm the auto-cancel-on-breach brake.
+          workflowResume: approval.tool_name === WORKFLOW_TOOL_NAME,
         }),
       )
       .catch((err) => this.log(`[session ${session.id}] resume after approval failed: ${err}`));
@@ -1674,8 +1721,15 @@ export class SessionManager {
      * a member's turn into architect authority). Absent = never auto-approve.
      */
     initiator?: string;
+    /**
+     * M4 §5: this resume re-drives an approved multi-agent WORKFLOW launch. Such a
+     * resume is budget-capped (unlike an ordinary approved single action, which runs
+     * uncapped to avoid stranding it) so the SDK budget signal arms the adapter's
+     * auto-cancel-on-breach interrupt for the background workflow.
+     */
+    workflowResume?: boolean;
   }): Promise<void> {
-    const { sessionId, conv, framedText, placeholder, inbound, initiator } = params;
+    const { sessionId, conv, framedText, placeholder, inbound, initiator, workflowResume } = params;
     // Re-read the row: an earlier queued turn (or a stop) may have changed it.
     const session = this.store.getSession(sessionId);
     if (!session || session.status === "stopped") return;
@@ -1713,12 +1767,21 @@ export class SessionManager {
         .catch(() => {});
       return;
     }
-    // Per-turn cap only bounds NEW human turns. An approval-resume (no `inbound`)
-    // completes an action an architect already approved: capping it to a tiny
-    // remaining headroom could make the SDK stop it (error_max_budget_usd) and
-    // strand the approved action — so resume turns run uncapped.
+    // Per-turn cap. NEW human turns are always capped at the remaining headroom. An
+    // approval-resume (no `inbound`) normally runs UNCAPPED — capping a re-driven single
+    // approved action to a tiny remaining could strand it (error_max_budget_usd), the M3
+    // fix. EXCEPTION (M4 §5): a resume that re-drives an approved WORKFLOW LAUNCH is
+    // capped, because a background workflow ignores the cap unless the SDK budget SIGNAL
+    // fires — the adapter turns that signal into a real interrupt (auto-cancel on breach;
+    // the signal alone doesn't stop the detached task — spike b). Scoped to the workflow
+    // launch, NOT every resume in a workflow-enabled session, so ordinary approved
+    // writes/bash still resume uncapped and aren't stranded near the budget. (If a
+    // workflow session is already AT its cap, `remaining <= 0` leaves the launch uncapped
+    // rather than stranding the approved action — its full spend is still drained into the
+    // ledger, and `@Conduit cancel` + the inactivity watchdog remain the backstops.)
     const remaining = budgetLimit - spent;
-    const turnBudgetUsd = inbound && remaining > 0 ? remaining : undefined;
+    const capThisTurn = inbound || workflowResume === true;
+    const turnBudgetUsd = capThisTurn && remaining > 0 ? remaining : undefined;
 
     const repo = this.store.getRepo(session.repo_id);
     const policyCtx: PolicyContext = {

@@ -1535,3 +1535,143 @@ countArchitects), `src/adapters/slack/adapter.ts` (OperatorConsole, slashEphemer
 status/stop routing, usage text), `src/daemon.ts` (wire the operator console), `tests/session-manager.test.ts`
 (+7), `tests/adapter-slack.test.ts` (+2). **Next: M4 §5 — riders: env-scrub the agent shell +
 background-task cost accounting/cancellation.**
+
+## 2026-07-19 — M4 §5 spikes: env-scrub denylist works under keychain OAuth; interrupt (NOT maxBudgetUsd) stops a detached workflow
+
+Both riders were spiked FIRST on the real SDK (subscription/keychain OAuth, no API key, throwaway
+`testrepo`) before building — the repo's spike-first rule. Scripts in `spikes/m4/` (`env-scrub.ts`,
+`workflow-interrupt.ts`; the latter gates sub-tests on `ONLY=B1|B2` / `B2_BUDGET`).
+
+**Spike (a) — env-scrub the agent shell (`spikes/m4/env-scrub.ts`).** The SDK's `options.env`
+**REPLACES the subprocess environment entirely** (confirmed in `sdk.d.ts:1411` — "it is not merged
+with process.env"), so a wrong keep-list would break every turn. Test: plant poison secrets
+(`SLACK_BOT_TOKEN=xoxb-POISON`, `SLACK_APP_TOKEN`, `CONDUIT_POISON`) + a benign `MY_TOOLCHAIN_VAR` in
+the daemon env, build the **denylist** scrub (`{...process.env}` minus keys matching `^SLACK_` /
+`^CONDUIT_`), pass it as `options.env`, and have the agent's **Bash** echo those vars.
+- **Result: PASS.** The Claude Code CLI **ran cleanly under the scrubbed env on keychain OAuth**
+  (`subtype=success`, cost $0.186) — nothing load-bearing was dropped. The agent's shell saw
+  `slack=[]`, `conduit=[]` (secrets gone) but `tool=[toolchain-keepme]`, `home=[/Users/…]`,
+  `haspath=[yes]` (PATH/HOME/toolchain survived).
+- **Why keychain OAuth survives the scrub:** the CLI reaches macOS keychain creds via `HOME`
+  (→ `~/.claude`), which the denylist preserves; there is no `CLAUDE_CODE_OAUTH_TOKEN`/
+  `ANTHROPIC_API_KEY` in this deployment, and neither would match the `SLACK_`/`CONDUIT_` prefixes
+  anyway (a headless box's `CLAUDE_CODE_OAUTH_TOKEN` is preserved). **Denylist is safe by
+  construction** — it drops only our two namespaces and keeps everything the toolchain/CLI needs.
+- **Decision:** build the denylist exactly as specced (drop `SLACK_*`/`CONDUIT_*` by prefix). This is
+  distinct from `CommandRunner`'s scrub (a fixed *name* list that also drops the Claude auth token,
+  because a deploy command doesn't need it) — the AGENT shell MUST keep the Claude auth (the SDK needs
+  it), so a prefix denylist (which never matches the auth token) is the right shape.
+
+**Spike (b) — background-workflow cancellation + cost drain (`spikes/m4/workflow-interrupt.ts`).**
+Launched a real 6-agent parallel workflow (`permissionMode:"bypassPermissions"`, Workflow tool,
+read-only hook) and probed the two candidate levers. SDK primitives found in `sdk.d.ts`: `Query` has
+`interrupt()`, `stopTask(taskId)` (stop one bg task by id from `task_started`/`task_notification`),
+and `close()` (kills the subprocess); `task_progress` carries an **incremental** `usage.total_tokens`
+(but NO running `total_cost_usd`); both `SDKResultSuccess` and `SDKResultError` carry `total_cost_usd`.
+- **(B1) `q.interrupt()` DOES stop a DETACHED workflow AND drains cost — PASS.** Interrupting
+  mid-workflow produced `task_notification status=stopped`, then a final `result`
+  `subtype=error_during_execution terminal=aborted_streaming` carrying **`total_cost_usd=$0.53`**;
+  **0** `task_progress` events arrived after the interrupt; query settled **~567 ms** later. So
+  `interrupt()` is THE cancellation lever: it halts the background task (no further spend) and still
+  yields a drainable cost. **Caveat (load-bearing for the adapter):** the pull that FOLLOWS the
+  terminal result **throws** (`[ede_diagnostic] … stop_reason=tool_use`) — the SDK's post-abort
+  cleanup. The result+cost arrive BEFORE the throw, so the loop must catch that throw and treat it as
+  a clean end (not a turn failure).
+- **(B2) `maxBudgetUsd` does NOT stop a detached workflow — the decisive inversion.** With
+  `maxBudgetUsd=$0.35` (large enough that the workflow launched first: `task_started` seen), the SDK
+  emitted `error_max_budget_usd`/`budget_exhausted` at **$0.60** — **but `task_progress` kept flowing
+  and the workflow ran to `task_notification status=completed`, cost climbing to $0.92.** So
+  `maxBudgetUsd` brakes only the *main* query loop; the **detached background task keeps spending past
+  the cap**. (A tiny `maxBudgetUsd=$0.02` tripped the main turn BEFORE the workflow even detached, and
+  still overshot to $0.18 — the budget check is coarse, at inter-step checkpoints, not continuous.)
+- **Decision (mechanism for rider b):** cancellation = **`q.interrupt()`** (not `maxBudgetUsd`, not
+  `close()` — `close()` would forfeit the final cost drain). **Auto-cancel on cap breach** = set
+  `maxBudgetUsd = remaining thread headroom` on workflow turns so the SDK emits the budget SIGNAL, and
+  have the **adapter interrupt the detached task the moment that signal appears while a workflow is
+  running** (the signal alone is inert for a detached task; the interrupt makes it real and bounds the
+  overshoot to the checkpoint interval). Wire `HarnessSession.interrupt() → q.interrupt()` (currently a
+  no-op stub) so an architect `@Conduit cancel` and the inactivity watchdog can both halt a running
+  turn; drain the aborted result's `total_cost_usd` into the ledger on EVERY interrupt/timeout path
+  (today the 10-min timeout records ZERO cost — the M3.6 watch-list bug). The live `task_progress`
+  token signal is available but unused: it is per-task tokens, not dollars, and converting needs
+  pricing (notional on subscription auth), so the SDK's own `maxBudgetUsd` dollar accounting + interrupt
+  is the cleaner lever.
+
+## 2026-07-19 — M4 §5 done: env-scrub the agent shell + background cost/cancel
+
+**Implementation (DESIGN.md §8 M4, the two "cheap riders").** 320 tests (+15), `tsc` + `check-ports`
+clean, and BOTH riders verified end-to-end through the REAL adapter on subscription auth
+(`smoke:cancel`): the agent shell saw `slack=[] conduit=[]` (scrubbed) with `PATH`/`HOME`/toolchain
+intact, and a live multi-agent workflow was cancelled mid-run with its **$1.54** spend drained into the
+notice.
+
+**(a) Env-scrub the agent shell (`claude-code` adapter).** Every turn's `options.env` is
+`scrubDaemonEnv(process.env)` — a **denylist** spread dropping keys matching `^SLACK_`/`^CONDUIT_` while
+preserving everything else (belt-and-braces over the §4 credential/secret hard-deny floor, which STAYS).
+Distinct from `CommandRunner`'s scrub (a fixed NAME list that also drops the Claude auth token, which a
+deploy command doesn't need) — the agent MUST keep the Claude auth, and a prefix denylist never matches
+it. Spike-proven the CLI runs under keychain OAuth with the scrubbed env.
+
+**(b) Background-task cost accounting + cancellation (`claude-code` adapter + `session-manager.ts`).**
+- **`HarnessSession.interrupt() → q.interrupt()`** (was an M1 no-op stub). `q.interrupt()` is the ONLY
+  lever that actually halts a DETACHED background workflow (`maxBudgetUsd` does not — spike b); it stores
+  the in-flight `activeQuery` (cleared in a `finally`) and only sets `cancelRequested` when a query is
+  live, so a cancel on an idle session is a clean no-op that can't taint the next turn.
+- **Drain-on-abort turn loop.** On any interrupt — inactivity timeout, `@Conduit cancel`, or a
+  `maxBudgetUsd` breach that hit a RUNNING workflow — the loop stops the (possibly detached) task and
+  drains the aborted result's `total_cost_usd` into the ledger, then posts ONE notice. Tolerates the
+  SDK's post-abort pull throw (`[ede_diagnostic]`, spike b). Auto-cancel-on-breach = set `maxBudgetUsd`
+  on workflow turns so the SDK emits the budget SIGNAL, which the adapter converts into a real
+  `q.interrupt()` (the signal alone is inert for a detached task). Fixes the M3.6 watch-list bug where a
+  wedged workflow recorded ZERO cost and could keep spending after the turn parked.
+- **`@Conduit cancel`** (new `CommandName`, architect-only, thread-scoped — mirrors `stop`): interrupts
+  the in-flight turn WITHOUT ending the session (session parks, thread continues). Gated on
+  `status === "active"` (a genuinely running/spending turn; a semaphore-waiter is parked and hasn't
+  spent). Slack `parseMentionCommand` + usage text + in-thread help updated.
+- **Precise resume cap.** A resume that re-drives an approved WORKFLOW LAUNCH (`approval.tool_name ===
+  "Workflow"`) is budget-capped so the breach brake arms; ordinary approved actions (a single Write)
+  still resume UNCAPPED, even in a workflow-enabled session — the M3 "don't strand an approved action"
+  invariant is preserved. `policy.ts` untouched; the flag threads through `executeTurn`.
+
+**Ports stayed sealed.** `scrubDaemonEnv`/`AbortReason` live only in the adapter; `cancel` is an opaque
+`CommandName`; no SDK/Slack type crossed into `src/core/`. `check-ports` clean.
+
+**Adversarial review (5 dimensions — env-scrub security, cancel/interrupt races, cost accounting, ports/
+correctness, test honesty — refute-by-default, run as a multi-agent workflow). 4 distinct findings
+confirmed (1 refuted), all fixed before commit:**
+- **(medium) Duplicate error on a no-result inactivity timeout.** The M4 §5 change replaced the old
+  `return` with a `continue`+post-loop notice, but the trailing `if (!sawResult && !cancelRequested)`
+  didn't exclude `abortReason`, so a wedged-no-result timeout posted the timeout notice AND a
+  contradictory "produced no result". Fixed: `&& !abortReason`.
+- **(real) A cancel racing a just-completed BUFFERED success dropped the reply AND lost its cost.** If a
+  success was buffered (`pendingReply`) the instant before an out-of-band cancel, the post-loop treated
+  it as a cancel and discarded the reply + its cost (the runaway cap under-counted a full turn). Fixed:
+  a late cancel with a buffered reply delivers that reply + cost (the turn finished; the cancel missed).
+- **(found by the fix's own new test) Timeout-drain lost the aborted result via a dangling `next()`.**
+  `Promise.race([iterator.next(), timeout])` leaves the losing pull pending; the old code `return`ed so
+  it never mattered, but draining called `next()` AGAIN — the stale pull swallowed the interrupt's
+  aborted result and the new pull got `done`, so the timeout path drained ZERO cost. Fixed by holding a
+  SINGLE in-flight `pending` pull and re-racing it across abort re-arms (the cancel path was unaffected —
+  its interrupt resolves the very pull the race awaits, which is why the real smoke drained correctly).
+  This is exactly why the review flagged the drain path as untested; the added injectable-inactivity test
+  caught it.
+- **(medium/low) Resume cap too broad.** The first cut capped EVERY resume in a workflow session,
+  re-stranding ordinary approved near-budget actions (the M3 regression). Fixed with the workflow-launch-
+  only cap above. Residual (documented): an already-AT-cap workflow-launch resume runs uncapped rather
+  than stranding the approved launch — its full spend is still drained, with `@Conduit cancel` + the
+  inactivity watchdog as backstops.
+- **Refuted (correctly):** the out-of-band cancel test does exercise the real drain path (the aborted
+  result sets `abortReason="cancel"` and drains before the notice).
+
+**M4 §5 watch-list updates:** the M3.6/M3.8 watch-list items — "a wedged workflow records zero cost and
+`q.interrupt()` may not cancel it" — are now RESOLVED (drain-on-abort + real interrupt). The env-dump
+hard-deny floor stays as defense-in-depth; the denylist env-scrub means the daemon's Slack/cloud tokens
+are no longer even present in the agent shell's environ.
+
+**Files:** `src/adapters/claude-code/adapter.ts` (scrubDaemonEnv, interrupt wiring, drain-on-abort loop,
+single-pending pull, injectable inactivity for tests), `src/core/session-manager.ts` (cancelSession,
+`cancel` dispatch, workflow-launch-only resume cap, help text), `src/core/types.ts` (`cancel`
+CommandName), `src/adapters/slack/adapter.ts` (parse + usage), `tests/adapter-claude-code.test.ts` (+9),
+`tests/session-manager.test.ts` (+5), `tests/adapter-slack.test.ts` (+1), `tests/fakes.ts`
+(interrupt hooks), `scripts/smoke-cancel.ts` (new), `spikes/m4/{env-scrub,workflow-interrupt}.ts` (new).
+**Next: M4 §6 — README/runbook + sample service unit (the FINAL M4 section).**

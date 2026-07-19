@@ -224,7 +224,13 @@ class FakeHarnessSession implements HarnessSession {
     };
   }
 
-  async interrupt(): Promise<void> {}
+  async interrupt(): Promise<void> {
+    // M4 §5: record the cancel + let a test release a held turn (models the real
+    // adapter halting its query). The turn's own cancellation notice is covered by
+    // the adapter-level tests; here we only assert the manager wired interrupt().
+    this.parent.interruptCount++;
+    this.parent.onInterrupt?.();
+  }
 }
 
 export class FakeHarness implements HarnessAdapter {
@@ -254,6 +260,10 @@ export class FakeHarness implements HarnessAdapter {
   progressBurst = 0;
   /** If set, the next turn ends in an error carrying this cost (budget tests). */
   nextError: { message: string; costUsd?: number } | null = null;
+  /** M4 §5: how many times a live session's interrupt() was called (cancel tests). */
+  interruptCount = 0;
+  /** M4 §5: fired inside interrupt() so a test can release a held turn. */
+  onInterrupt: (() => void) | null = null;
 
   /** Queue the tool calls the agent will attempt on its next fresh turn. */
   scriptTurn(calls: ToolCall[]): void {

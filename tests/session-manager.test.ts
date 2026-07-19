@@ -844,6 +844,97 @@ describe("cost budgets & runaway cap (M3, DESIGN §4)", () => {
     expect(w.surface.posts.at(-1)?.text).toContain("Only architects can change the cost budget");
     expect(w.store.getSessionByConversation("fake", "e30.000001")!.budget_limit_usd).toBe(5);
   });
+
+  test("an approved WORKFLOW-launch resume IS capped at the remaining headroom (auto-cancel on breach, M4 §5)", async () => {
+    const w = makeWorld(undefined, { costCap: 5 });
+    const c = conv("e50.000001");
+    await w.manager.handleEvent({ kind: "command", conv: c, author: architect, name: "assign", args: "" });
+    await w.manager.handleEvent({ kind: "command", conv: c, author: architect, name: "workflows", args: "on" });
+    const sid = w.store.getSessionByConversation("fake", "e50.000001")!.id;
+    w.store.insertTurn({ sessionId: sid, direction: "out", text: "prior", costUsd: 4.9 }); // near the $5 cap
+    // A member launches a workflow (member ⇒ no auto-approve ⇒ the launch defers).
+    w.harness.scriptTurn([{ id: "tu-wf", name: "Workflow", input: { script: "export const meta={name:'a'}" } }]);
+    await w.manager.handleEvent({ kind: "message", conv: c, author: member, text: "run wf", attachments: [] });
+    const requestId = w.surface.lastApprovalRequestId()!;
+    await w.manager.handleEvent({ kind: "approval_decision", requestId, decider: architect, decision: "approved" });
+    // The resume turn (last, empty prompt) IS capped, so a background workflow that
+    // breaches it triggers the SDK budget signal the adapter turns into a real interrupt.
+    expect(w.harness.allTurns.at(-1)!.text).toBe(""); // it's the resume
+    expect(w.harness.allTurns.at(-1)!.budgetUsd).toBeCloseTo(0.1, 5); // 5 - 4.9
+  });
+
+  test("a NON-workflow approved action resumes UNCAPPED even in a workflow-enabled session (M4 §5 precision)", async () => {
+    const w = makeWorld(undefined, { costCap: 5 });
+    const c = conv("e55.000001");
+    await w.manager.handleEvent({ kind: "command", conv: c, author: architect, name: "assign", args: "" });
+    await w.manager.handleEvent({ kind: "command", conv: c, author: architect, name: "workflows", args: "on" });
+    const sid = w.store.getSessionByConversation("fake", "e55.000001")!.id;
+    w.store.insertTurn({ sessionId: sid, direction: "out", text: "prior", costUsd: 4.9 }); // near the $5 cap
+    // An ordinary gated WRITE (not a Workflow launch) defers and is approved.
+    w.harness.scriptTurn([{ id: "tu-w", name: "Write", input: { file_path: "x.txt", content: "hi" } }]);
+    await w.manager.handleEvent({ kind: "message", conv: c, author: member, text: "add x", attachments: [] });
+    const requestId = w.surface.lastApprovalRequestId()!;
+    await w.manager.handleEvent({ kind: "approval_decision", requestId, decider: architect, decision: "approved" });
+    // The approved Write ran, and its resume was UNCAPPED — a workflow session must not
+    // re-strand an ordinary near-budget approved action (only workflow LAUNCHES are capped).
+    expect(w.harness.executed.map((cc) => cc.name)).toContain("Write");
+    expect(w.harness.allTurns.at(-1)!.text).toBe(""); // it's the resume
+    expect(w.harness.allTurns.at(-1)!.budgetUsd).toBeUndefined();
+  });
+});
+
+describe("cancel a running turn (M4 §5)", () => {
+  test("an architect cancels an in-flight turn: interrupts the harness, acks, audits, session lives on", async () => {
+    const w = makeWorld();
+    const c = conv("cn1.000001");
+    await w.manager.handleEvent({ kind: "command", conv: c, author: architect, name: "assign", args: "" });
+    const sid = w.store.getSessionByConversation("fake", "cn1.000001")!.id;
+    // Hold the turn open so the session stays `active` while we cancel; interrupt()
+    // releases the hold (models the real adapter halting its query).
+    let release: () => void = () => {};
+    const held = new Promise<void>((r) => { release = r; });
+    w.harness.beforeReply = () => held;
+    w.harness.onInterrupt = () => release();
+    const turnP = w.manager.handleEvent({ kind: "message", conv: c, author: member, text: "go", attachments: [] });
+    for (let i = 0; i < 200 && w.store.getSession(sid)!.status !== "active"; i++) {
+      await new Promise((r) => setTimeout(r, 5));
+    }
+    expect(w.store.getSession(sid)!.status).toBe("active");
+
+    await w.manager.handleEvent({ kind: "command", conv: c, author: architect, name: "cancel", args: "" });
+    expect(w.harness.interruptCount).toBe(1);
+    expect(w.surface.posts.at(-1)!.text).toContain("Cancelling");
+    expect(w.store.listAudit(sid).some((a) => a.event === "turn_cancelled")).toBe(true);
+
+    await turnP; // the released turn completes and parks — the session is NOT stopped
+    expect(w.store.getSession(sid)!.status).toBe("parked");
+  });
+
+  test("a member cannot cancel", async () => {
+    const w = makeWorld();
+    const c = conv("cn2.000001");
+    await w.manager.handleEvent({ kind: "command", conv: c, author: architect, name: "assign", args: "" });
+    const sid = w.store.getSessionByConversation("fake", "cn2.000001")!.id;
+    await w.manager.handleEvent({ kind: "command", conv: c, author: member, name: "cancel", args: "" });
+    expect(w.surface.posts.at(-1)!.text).toContain("Only architects");
+    expect(w.harness.interruptCount).toBe(0);
+    expect(w.store.listAudit(sid).some((a) => a.event === "authz_denied")).toBe(true);
+  });
+
+  test("cancel on an idle (parked) session reports nothing running and interrupts nothing", async () => {
+    const w = makeWorld();
+    const c = conv("cn3.000001");
+    await w.manager.handleEvent({ kind: "command", conv: c, author: architect, name: "assign", args: "" });
+    await w.manager.handleEvent({ kind: "command", conv: c, author: architect, name: "cancel", args: "" });
+    expect(w.surface.posts.at(-1)!.text).toContain("Nothing is running");
+    expect(w.harness.interruptCount).toBe(0);
+  });
+
+  test("cancel with no session in the thread says so", async () => {
+    const w = makeWorld();
+    await w.manager.handleEvent({ kind: "command", conv: conv("cn4.000001"), author: architect, name: "cancel", args: "" });
+    expect(w.surface.posts.at(-1)!.text).toContain("No session in this thread");
+  });
 });
 
 describe("streaming progress (M3)", () => {

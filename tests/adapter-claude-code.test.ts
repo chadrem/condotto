@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { ClaudeCodeAdapter, type QueryFn } from "../src/adapters/claude-code/adapter";
+import { ClaudeCodeAdapter, scrubDaemonEnv, type QueryFn } from "../src/adapters/claude-code/adapter";
 import type { GateFn, TurnEvent } from "../src/core/types";
 
 // Drive the REAL claude-code adapter loop with a scripted SDK message stream (via
@@ -140,6 +140,196 @@ describe("claude-code adapter: gate wiring (M3.6)", () => {
     await collect(new ClaudeCodeAdapter(q), throwing);
     expect(hookOut.hookSpecificOutput.permissionDecision).toBe("deny");
     expect(canRes.behavior).toBe("deny");
+  });
+});
+
+describe("env-scrub the agent shell (M4 §5 rider a)", () => {
+  test("scrubDaemonEnv drops SLACK_*/CONDUIT_* but keeps PATH/HOME/toolchain/Claude auth", () => {
+    const base: NodeJS.ProcessEnv = {
+      PATH: "/usr/bin",
+      HOME: "/Users/x",
+      SLACK_BOT_TOKEN: "xoxb-secret",
+      SLACK_APP_TOKEN: "xapp-secret",
+      CONDUIT_CONFIG: "/etc/conduit.toml",
+      CONDUIT_CLAUDE_CLI: "/opt/claude",
+      CLAUDE_CODE_OAUTH_TOKEN: "oauth-keep",
+      ANTHROPIC_API_KEY: "sk-keep",
+      MY_TOOLCHAIN: "keep",
+      UNSET: undefined,
+    };
+    const out = scrubDaemonEnv(base);
+    expect(out.SLACK_BOT_TOKEN).toBeUndefined();
+    expect(out.SLACK_APP_TOKEN).toBeUndefined();
+    expect(out.CONDUIT_CONFIG).toBeUndefined();
+    expect(out.CONDUIT_CLAUDE_CLI).toBeUndefined();
+    expect(out.PATH).toBe("/usr/bin");
+    expect(out.HOME).toBe("/Users/x");
+    // The Claude auth token never matches the prefixes — the SDK needs it (keychain
+    // OAuth AND a headless CLAUDE_CODE_OAUTH_TOKEN both survive; spike a).
+    expect(out.CLAUDE_CODE_OAUTH_TOKEN).toBe("oauth-keep");
+    expect(out.ANTHROPIC_API_KEY).toBe("sk-keep");
+    expect(out.MY_TOOLCHAIN).toBe("keep");
+    expect("UNSET" in out).toBe(false); // undefined values are dropped
+  });
+
+  test("a turn passes the scrubbed env to the SDK query options", async () => {
+    process.env.SLACK_TEST_SECRET = "xoxb-leak";
+    process.env.CONDUIT_TEST_SECRET = "leak";
+    let captured: any;
+    const q = fakeQuery(async function* (opts) {
+      captured = opts;
+      yield { type: "result", subtype: "success", result: "ok", total_cost_usd: 0 };
+    });
+    await collect(new ClaudeCodeAdapter(q), allowGate);
+    expect(captured.env).toBeDefined();
+    expect(captured.env.SLACK_TEST_SECRET).toBeUndefined();
+    expect(captured.env.CONDUIT_TEST_SECRET).toBeUndefined();
+    expect(captured.env.PATH).toBe(process.env.PATH); // toolchain preserved
+    delete process.env.SLACK_TEST_SECRET;
+    delete process.env.CONDUIT_TEST_SECRET;
+  });
+});
+
+describe("claude-code adapter: background cost/cancel (M4 §5 rider b)", () => {
+  /** A fake query whose interrupt() runs `onInterrupt` (e.g. to increment a counter). */
+  function fakeQueryI(
+    body: (opts: Record<string, any>) => AsyncGenerator<Record<string, any>>,
+    onInterrupt: () => void,
+  ): QueryFn {
+    return ((args: { prompt: unknown; options: Record<string, any> }) => {
+      const gen = body(args.options);
+      return Object.assign(gen, { interrupt: async () => onInterrupt() });
+    }) as unknown as QueryFn;
+  }
+
+  test("a budget breach DURING a workflow interrupts the detached task and drains cost once", async () => {
+    let interrupts = 0;
+    const q = fakeQueryI(async function* () {
+      yield { type: "system", subtype: "init", session_id: "s1" };
+      yield { type: "system", subtype: "task_started", task_id: "w1", workflow_name: "audit" };
+      yield { type: "system", subtype: "task_progress", description: "agent a", usage: { total_tokens: 100 } };
+      // The SDK budget brake fires, but the detached task keeps spending (spike b)…
+      yield { type: "result", subtype: "error_max_budget_usd", terminal_reason: "budget_exhausted", total_cost_usd: 0.6 };
+      // …until our interrupt() halts it; the SDK then settles with an aborted result.
+      yield { type: "result", subtype: "error_during_execution", terminal_reason: "aborted_streaming", total_cost_usd: 0.63 };
+    }, () => { interrupts++; });
+    const events = await collect(new ClaudeCodeAdapter(q), allowGate, { workflows: true });
+    expect(interrupts).toBeGreaterThanOrEqual(1); // the detached workflow was interrupted
+    expect(events.filter((e) => e.kind === "reply").length).toBe(0);
+    const errs = events.filter((e): e is Extract<TurnEvent, { kind: "error" }> => e.kind === "error");
+    expect(errs.length).toBe(1); // one notice, not one-per-budget-result
+    expect(errs[0]!.message).toMatch(/budget/i);
+    expect(errs[0]!.message).toMatch(/workflow/i);
+    expect(errs[0]!.costUsd).toBe(0.63); // drained the final post-interrupt cost (ledger stays accurate)
+  });
+
+  test("an out-of-band interrupt() mid-workflow cancels the detached task, drains cost, and tolerates the post-abort throw", async () => {
+    let interrupts = 0;
+    let releaseHold: () => void = () => {};
+    const held = new Promise<void>((r) => { releaseHold = r; });
+    const q = fakeQueryI(async function* () {
+      yield { type: "system", subtype: "init", session_id: "s1" };
+      yield { type: "system", subtype: "task_started", task_id: "w1", workflow_name: "audit" };
+      yield { type: "system", subtype: "task_progress", description: "agent a", usage: { total_tokens: 100 } };
+      await held; // block until interrupt() releases (models a long-running workflow)
+      yield { type: "result", subtype: "error_during_execution", terminal_reason: "aborted_streaming", total_cost_usd: 0.42 };
+      throw new Error("[ede_diagnostic] result_type=user stop_reason=tool_use"); // SDK post-abort throw (spike b)
+    }, () => { interrupts++; releaseHold(); });
+
+    const session = await new ClaudeCodeAdapter(q).create({ cwd: "/wt/x", system: "s" });
+    const events: TurnEvent[] = [];
+    let fired = false;
+    for await (const ev of session.turn({ text: "run wf", harness: { workflows: true } }, allowGate)) {
+      events.push(ev);
+      if (!fired && ev.kind === "progress" && /workflow/.test((ev as any).text)) {
+        fired = true;
+        await session.interrupt(); // architect `@Conduit cancel` mid-workflow
+      }
+    }
+    expect(interrupts).toBe(1);
+    expect(events.filter((e) => e.kind === "reply").length).toBe(0);
+    const errs = events.filter((e): e is Extract<TurnEvent, { kind: "error" }> => e.kind === "error");
+    expect(errs.length).toBe(1);
+    expect(errs[0]!.message).toMatch(/Cancelled/);
+    expect(errs[0]!.message).toMatch(/workflow/);
+    expect(errs[0]!.costUsd).toBe(0.42); // aborted result's cost still drained
+  });
+
+  test("a wedged turn (no result) times out, interrupts, and emits exactly ONE notice", async () => {
+    let interrupts = 0;
+    let releaseHang: () => void = () => {};
+    const hang = new Promise<void>((r) => { releaseHang = r; });
+    const q = fakeQueryI(async function* () {
+      yield { type: "system", subtype: "init", session_id: "s1" };
+      await hang; // no result ever — the inactivity watchdog must fire
+    }, () => { interrupts++; releaseHang(); });
+    // 40ms inactivity so the timeout→interrupt→drain path runs without a 10-min wait.
+    const session = await new ClaudeCodeAdapter(q, 40).create({ cwd: "/wt/x", system: "s" });
+    const events: TurnEvent[] = [];
+    for await (const ev of session.turn({ text: "hi" }, allowGate)) events.push(ev);
+    expect(interrupts).toBeGreaterThanOrEqual(1);
+    const errs = events.filter((e) => e.kind === "error");
+    expect(errs.length).toBe(1); // the timeout notice ONLY — not a duplicate "produced no result"
+    expect((errs[0] as any).message).toMatch(/stopped the running turn/);
+  });
+
+  test("a timeout that yields a drainable aborted result drains its cost into the notice", async () => {
+    let releaseHang: () => void = () => {};
+    const hang = new Promise<void>((r) => { releaseHang = r; });
+    const q = fakeQueryI(async function* () {
+      yield { type: "system", subtype: "init", session_id: "s1" };
+      yield { type: "system", subtype: "task_progress", description: "agent a" };
+      await hang; // wedge, then on interrupt settle with an aborted result carrying cost
+      yield { type: "result", subtype: "error_during_execution", terminal_reason: "aborted_streaming", total_cost_usd: 0.71 };
+    }, () => { releaseHang(); });
+    const session = await new ClaudeCodeAdapter(q, 40).create({ cwd: "/wt/x", system: "s" });
+    const events: TurnEvent[] = [];
+    for await (const ev of session.turn({ text: "hi", harness: { workflows: true } }, allowGate)) events.push(ev);
+    const errs = events.filter((e): e is Extract<TurnEvent, { kind: "error" }> => e.kind === "error");
+    expect(errs.length).toBe(1);
+    expect(errs[0]!.message).toMatch(/10 minutes|stopped the running workflow/);
+    expect(errs[0]!.costUsd).toBe(0.71); // the wedged workflow's spend is drained into the ledger
+  });
+
+  test("a cancel that lands AFTER a success was buffered delivers the completed reply + cost (not dropped)", async () => {
+    let interrupts = 0;
+    let releaseHold: () => void = () => {};
+    const held = new Promise<void>((r) => { releaseHold = r; });
+    const q = fakeQueryI(async function* () {
+      yield { type: "system", subtype: "init", session_id: "s1" };
+      // The turn COMPLETES: this success is buffered (not yet yielded).
+      yield { type: "result", subtype: "success", result: "the answer", total_cost_usd: 0.25 };
+      // A yielded progress event AFTER the success is buffered, so the test can time a
+      // cancel that lands once the turn has already finished its work.
+      yield { type: "assistant", message: { content: [{ type: "tool_use", name: "Read", input: { file_path: "x" } }] } };
+      await held;
+    }, () => { interrupts++; releaseHold(); });
+    const session = await new ClaudeCodeAdapter(q).create({ cwd: "/wt/x", system: "s" });
+    const events: TurnEvent[] = [];
+    let fired = false;
+    for await (const ev of session.turn({ text: "hi" }, allowGate)) {
+      events.push(ev);
+      if (!fired && ev.kind === "progress") { fired = true; await session.interrupt(); }
+    }
+    // The late cancel must NOT drop the completed reply or its cost.
+    const replies = events.filter((e): e is Extract<TurnEvent, { kind: "reply" }> => e.kind === "reply");
+    expect(replies.length).toBe(1);
+    expect(replies[0]!.text).toBe("the answer");
+    expect(replies[0]!.costUsd).toBe(0.25); // spend still recorded against the runaway cap
+    expect(events.some((e) => e.kind === "error")).toBe(false); // not reported as a cancel
+  });
+
+  test("interrupt() on an idle session (no live query) is a clean no-op", async () => {
+    const q = fakeQuery(async function* () {
+      yield { type: "result", subtype: "success", result: "ok", total_cost_usd: 0 };
+    });
+    const session = await new ClaudeCodeAdapter(q).create({ cwd: "/wt/x", system: "s" });
+    // No turn running yet — interrupt must not throw and must not taint the next turn.
+    await session.interrupt();
+    const events: TurnEvent[] = [];
+    for await (const ev of session.turn({ text: "hi" }, allowGate)) events.push(ev);
+    expect(events.some((e) => e.kind === "reply" && (e as any).text === "ok")).toBe(true);
+    expect(events.some((e) => e.kind === "error")).toBe(false); // not reported as a cancel
   });
 });
 
