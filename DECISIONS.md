@@ -1675,3 +1675,69 @@ CommandName), `src/adapters/slack/adapter.ts` (parse + usage), `tests/adapter-cl
 `tests/session-manager.test.ts` (+5), `tests/adapter-slack.test.ts` (+1), `tests/fakes.ts`
 (interrupt hooks), `scripts/smoke-cancel.ts` (new), `spikes/m4/{env-scrub,workflow-interrupt}.ts` (new).
 **Next: M4 §6 — README/runbook + sample service unit (the FINAL M4 section).**
+
+## 2026-07-19 — M4 §6 done: README/runbook + sample service units — **M4 COMPLETE**
+
+**Implementation (DESIGN.md §8 M4 deliverable 2 — the last M4 section).** A docs
+section: no source changed, so the whole test/typecheck/ports surface stayed green
+(320 tests, `tsc` + `check-ports` clean). Deliverables:
+
+- **`README.md`** — the front-door runbook: what Conduit is → requirements →
+  **install** (from source with Bun, or the `bun build --compile` binary + its
+  `claude` sidecar, incl. keychain-vs-`setup-token` auth) → **create the Slack
+  app** (a self-contained scope/token/event/slash/interactivity/invite checklist,
+  pointing to Appendix C for the rationale) → **copy & fill `conduit.toml`** (with a
+  glanceable schema block + env overrides) → **run** → a first-session walkthrough
+  → a full **command reference** → the **trust model** (allow/gate/hard-deny, plus
+  how `@Conduit grant` + auto-approve let the architect empower domain experts,
+  with the M3.8 residual risk stated plainly and the "not vs. a hostile insider /
+  not multi-tenant / installer owns the boundary" scope) → an **operations** block
+  (service units, **reading the SQLite audit log locally** since the Slack audit
+  channel is deferred, upgrades/migrations, worktree GC, cost, backups,
+  troubleshooting).
+- **`deploy/conduit.service`** (systemd) and **`deploy/com.conduit.daemon.plist`**
+  (launchd LaunchAgent) — sample units with inline install steps. Design points:
+  `Type=simple` + `KillSignal=SIGTERM` (the daemon exits 0 on SIGTERM), the token
+  in an `EnvironmentFile` not the unit, the `conduit`+`claude` sidecar kept
+  together, and a deliberate note NOT to over-harden (ProtectHome/ReadOnlyPaths
+  would break the agent's toolchain + worktree writes); the launchd sample is a
+  per-user LaunchAgent so keychain OAuth works without a token.
+
+**Verified by actually running the documented commands** (the repo's "re-run the
+real primitive" rule, adapted for docs): `./conduit --help` / `--version`;
+`bun start -- --config <path>` / `-- --version` forward correctly; **all four
+audit-log SQL queries + `.backup`** run as written against the real
+`conduit.sqlite` (real `tool_call`/`approval_*`/`session_*` rows, real `detail`
+JSON, `json_extract` works); **`conduit.example.toml` fields match
+`src/core/config.ts`** — proven by `loadConfig`/`loadSlackConfig` on the example
+producing ZERO "unrecognized key" warnings; `plutil -lint` OK on the plist and the
+systemd unit is well-formed INI.
+
+**Adversarial review (multi-agent workflow, 5 lenses — commands/CLI, audit/SQLite,
+install/build/auth, trust/security, service-units — refute-by-default, each finding
+citing exact source). 5 findings confirmed, ALL fixed before commit:**
+- **(high ×2)** The command-reference tables labeled `/conduit assign` and
+  `@Conduit assign` as runnable by "anyone" — but assignment is command authority
+  (`SessionManager.assign` refuses non-architects: "Only architects can assign
+  sessions", session-manager.ts:492-495). The prose was right; the tables
+  contradicted it — ship-blocking for a member audience. Fixed both rows to
+  **architect** + a "who can do what" note (members converse; an architect
+  `@Conduit grant`s a PM to let them drive). (`@Conduit status` / `/conduit stop`
+  confirmed genuinely open — left as "anyone".)
+- **(medium)** The systemd INSTALL steps wrote `/etc/conduit/env` via `tee` but only
+  created `/opt/conduit` — `tee` can't make parent dirs, so a fresh headless box
+  fails with ENOENT. Added `sudo mkdir -p /etc/conduit`.
+- **(low ×2)** Audit-glossary imprecision: `approval_request` has TWO shapes (agent
+  tool-gate → actor `agent`, `summary`/`concern`; land/deploy → actor the ordering
+  architect's `slack:U…`, `kind`/`command`), and only `session_assigned` carries
+  `repo`/`branch`/`worktree` (`session_stopped`/`session_reactivated` are empty or
+  carry clean/cleanup fields). Both rows corrected against source.
+
+**M4 status: COMPLETE.** All six sections shipped (§1 single `conduit.toml`; §2
+binaries + ordered schema migrations; §3 worktree cleanup; §4 operator
+`/conduit status` + slash fixes; §5 env-scrub + background cost/cancel; §6
+README/runbook + service units). DESIGN.md §8 Milestone 4 marked ✅ DONE and
+CLAUDE.md updated. **The DESIGN.md §8 build plan (M0 → M4) is complete — Conduit is
+an installable open-source beta.** Later work (fleet, shared session storage, a
+second surface/harness adapter, the deferred read-only Slack audit channel +
+symlink-realpath confinement) is post-beta, per DESIGN §8 "Later".

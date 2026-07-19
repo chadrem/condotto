@@ -958,7 +958,16 @@ shape crosses the port. **Demo: an architect grants a PM architect-in-channel; t
 approves a gated action and drives their own auto-approved turns; the grant survives a
 daemon restart.**
 
-**Milestone 4 — Installable open-source beta (polish & packaging).** The scope
+**Milestone 4 — Installable open-source beta (polish & packaging). ✅ DONE
+2026-07-19** (full facts in DECISIONS.md — the six §1–§6 entries; the build plan
+is complete). Shipped, section by section: (§1) the single `conduit.toml`; (§2)
+`bun build --compile` binaries + ordered `user_version` schema migrations; (§3)
+real worktree teardown + assign-race fix + retention GC; (§4) the daemon-wide
+operator `/conduit status` + the two slash-gap fixes; (§5) agent-shell env-scrub +
+background-task cost accounting/cancellation; and (§6) the **README/runbook**
+(install → Slack app → `conduit.toml` → run, the grant + auto-approve trust model,
+and reading the SQLite audit log locally) plus **sample launchd/systemd units** in
+`deploy/`. The scope
 narrowed sharply from the original "dedicated box & hardening" once the audience
 was pinned down (2026-07-19, DECISIONS.md): Conduit ships as open source for a
 *trusted* small team whose architect self-hosts it, so the milestone is

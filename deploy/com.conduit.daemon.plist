@@ -1,0 +1,76 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Sample launchd unit for the Conduit daemon (macOS, M4 §6).
+
+  Install this as a per-user LaunchAgent (NOT a system LaunchDaemon). A
+  LaunchAgent runs inside your logged-in GUI session, so the Claude Code SDK can
+  reach the keychain OAuth credentials from your `claude` login — no API key and
+  no CLAUDE_CODE_OAUTH_TOKEN needed. (A LaunchDaemon runs before login without
+  your keychain; if you must use one, set CLAUDE_CODE_OAUTH_TOKEN in
+  EnvironmentVariables via `claude setup-token`.)
+
+  Heads-up: a laptop that sleeps kills an actively-streaming turn (parked
+  sessions survive on disk and resume). An always-on Mac — or a Linux box with
+  the systemd unit — avoids that. See DESIGN.md §3 "Deployment shapes".
+
+  INSTALL
+    1. Put the release bundle somewhere stable and fill in conduit.toml beside it
+       (chmod 600 conduit.toml — it holds your Slack tokens). A binary release is
+       TWO files kept together: `conduit` and its `claude` sidecar.
+         mkdir -p ~/conduit && cp dist/<platform>/{conduit,claude} ~/conduit/
+         cp conduit.toml ~/conduit/ && chmod 600 ~/conduit/conduit.toml
+    2. Edit the paths below (replace YOU / ~ expansions with absolute paths —
+       launchd does NOT expand ~).
+    3. Install + load:
+         cp deploy/com.conduit.daemon.plist ~/Library/LaunchAgents/
+         launchctl load  ~/Library/LaunchAgents/com.conduit.daemon.plist
+         tail -f /Users/YOU/conduit/conduit.log      # watch the boot log
+       To stop / reload after edits:
+         launchctl unload ~/Library/LaunchAgents/com.conduit.daemon.plist
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.conduit.daemon</string>
+
+    <!-- The compiled binary + its `claude` sidecar in the same directory. To run
+         from source, make this: bun, /Users/YOU/conduit/src/daemon.ts. Add a
+         "--config" + path pair to point at a non-default config. -->
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/YOU/conduit/conduit</string>
+    </array>
+
+    <!-- conduit.toml / conduit.sqlite live here; the `claude` sidecar sits beside
+         the binary. Absolute path — launchd has no notion of ~ or $HOME here. -->
+    <key>WorkingDirectory</key>
+    <string>/Users/YOU/conduit</string>
+
+    <!-- With a LaunchAgent + keychain OAuth you usually need nothing here. For a
+         headless/LaunchDaemon setup, uncomment and paste a `claude setup-token`
+         value. The daemon keeps this token for the agent runtime while scrubbing
+         its own SLACK_*/CONDUIT_* secrets out of the agent's shell. -->
+    <!--
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>CLAUDE_CODE_OAUTH_TOKEN</key>
+        <string>REPLACE_WITH_TOKEN</string>
+    </dict>
+    -->
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <!-- Restart on crash, but not on a clean operator-initiated stop. -->
+    <key>KeepAlive</key>
+    <dict>
+        <key>Crashed</key>
+        <true/>
+    </dict>
+
+    <key>StandardOutPath</key>
+    <string>/Users/YOU/conduit/conduit.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/YOU/conduit/conduit.log</string>
+</dict>
+</plist>
