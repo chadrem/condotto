@@ -90,6 +90,10 @@ daemon, and replaces the honor-system protocol with mechanical enforcement.
   role mappings. (Initially: the same person as the architect.)
 - **Architect** — Slack users (by user ID) with command authority: assign
   sessions, approve gated actions, order landings/deploys, stop sessions.
+  Configured via `CONDUIT_ARCHITECTS`/`conduit.roles.json`, or delegated at
+  runtime by another architect (M3.8: `@Conduit grant @user architect
+  [everywhere]`, channel-scoped by default; persisted across restarts, while
+  config stays authoritative for config-sourced roles).
 - **Member** — PMs/engineers who converse with sessions. Their questions get
   answered; their instructions get acknowledged but **never executed** without
   an architect's approval.
@@ -441,7 +445,11 @@ the agent cannot talk its way past.
 The mapping from tool call → {allow, gate, deny} is the **policy engine**, and
 it is per-repo and per-thread configurable. Default posture is deny/gate-heavy;
 an architect can widen it for a given thread ("auto-approve edits in this
-session") — but never for the hard-deny set.
+session") — but never for the hard-deny set. *(Implemented in M3.8: `@Conduit
+auto-approve`, on by default — a gate-tier call on an architect-initiated turn on a
+`verified` surface runs without the click; the hard-deny floor is untouched. The
+widening lives in the session-manager gate closure, not the pure policy engine, since
+it depends on the initiating principal's role, not the tool. See DECISIONS.md.)*
 
 **Layer 2 — role-verified approvals.** A gate is resolved only by an
 `approval_decision` domain event whose `Principal` is in the architect set for
@@ -893,6 +901,33 @@ reliably; grep-style search stays with the main agent); the security boundary ho
 regardless. **Demo: a PM asks for a cross-cutting audit; the architect approves
 launching a workflow; it fans out read-only across many files in parallel and posts
 a synthesized, cited summary — gated and worktree-confined throughout.**
+
+**Milestone 3.8 — In-thread role delegation + architect auto-approve. ✅ DONE
+2026-07-19** (full facts in DECISIONS.md; 248 tests, `tsc` + `check-ports` clean).
+Two usability wins for the trusted-PM/dedicated-server case, both composing through
+the existing `roleOf`/`isArchitect` read path (unchanged). **(A) Architect
+auto-approve** — the implementation of the §4:441-444 per-thread widening: a gate-tier
+tool call on a turn an architect *initiated* runs without the Approve click. The seam
+is the session-manager gate closure (`policy.ts` stays pure): when `evaluate` returns
+`gate` AND the turn's initiating principal is an architect on a `verified` surface AND
+the per-session `auto_approve` flag is on, the gate returns allow (recording an
+already-decided approval + an `auto_approved` audit attributed to the architect). Per
+the architect's explicit choice it covers **everything that would prompt** (writes,
+edits, bash, network, production-data, workflow launches); the **hard-deny floor
+stays** (out-of-worktree, credential/secret files, daemon secrets, `rm -rf` escapes) —
+it never showed a prompt and is the only thing stopping an injection-steered turn from
+exfiltrating the daemon's own credentials. Member turns still gate; a defer→resume is
+governed by the ORIGINAL initiator (never the approving decider — no authority
+laundering). On by default (`@Conduit auto-approve on|off`, per-repo/daemon default).
+**(B) In-thread grant** — `@Conduit grant @user architect [everywhere]` / `@Conduit
+revoke @user`: an architect delegates authority at runtime, channel-scoped by default
+(`everywhere` = global). Persisted with a `roles.source` column so grants survive the
+boot reseed (`clearConfigRoles` clears only config rows); config stays authoritative
+(a config architect can't be revoked at runtime, and a grant can't shadow-demote one).
+The Slack adapter resolves the `<@U…>` mention to a principal key so no surface id
+shape crosses the port. **Demo: an architect grants a PM architect-in-channel; the PM
+approves a gated action and drives their own auto-approved turns; the grant survives a
+daemon restart.**
 
 **Milestone 4 — Dedicated box & hardening.** Move to the always-on machine with
 scoped daemon credentials. Session process isolation if needed. Read-only Slack

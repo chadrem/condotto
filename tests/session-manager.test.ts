@@ -51,7 +51,10 @@ interface World {
   manager: SessionManager;
 }
 
-function makeWorld(store?: Store, opts: { costCap?: number; maxConcurrentTurns?: number } = {}): World {
+function makeWorld(
+  store?: Store,
+  opts: { costCap?: number; maxConcurrentTurns?: number; identityStrength?: "verified" | "weak" } = {},
+): World {
   const s = store ?? new Store(":memory:");
   s.upsertRepo({
     name: "testrepo",
@@ -62,7 +65,7 @@ function makeWorld(store?: Store, opts: { costCap?: number; maxConcurrentTurns?:
     deployCmd: "echo deploy-ran",
   });
   s.setRole("fake:U_ARCH", "architect"); // command authority (assign/stop/approve)
-  const surface = new FakeSurface();
+  const surface = new FakeSurface(opts.identityStrength ?? "verified");
   const harness = new FakeHarness();
   const runner = new FakeCommandRunner();
   const manager = new SessionManager(s, harness, new WorktreeManager(worktreesRoot), () => {}, {
@@ -1326,5 +1329,179 @@ describe("trust-scoped project config (M3.5 Tier C)", () => {
     trust(w, false); // admin revokes trust; the very next turn is isolated again
     await w.manager.handleEvent({ kind: "message", conv: c, author: architect, text: "two", attachments: [] });
     expect(w.harness.allTurns.at(-1)!.harness?.projectConfig).toBe(false);
+  });
+});
+
+describe("architect auto-approve (M3.8)", () => {
+  const writeCall = { id: "tu-w", name: "Write", input: { file_path: "hello.txt", content: "hi" } };
+
+  async function assignAndScript(w: World, id: string, author: Principal, calls: any[]): Promise<void> {
+    await w.manager.handleEvent({ kind: "command", conv: conv(id), author: architect, name: "assign", args: "" });
+    w.harness.scriptTurn(calls);
+    await w.manager.handleEvent({ kind: "message", conv: conv(id), author, text: "do the thing", attachments: [] });
+  }
+
+  test("an architect's own gated write auto-approves — no Approve click (default on)", async () => {
+    const w = makeWorld();
+    await assignAndScript(w, "aa00.000001", architect, [writeCall]);
+    const session = w.store.getSessionByConversation("fake", "aa00.000001")!;
+    expect(w.surface.approvalRequests.length).toBe(0);
+    expect(w.harness.executed.map((c) => c.name)).toEqual(["Write"]);
+    expect(w.store.hasPendingApproval(session.id)).toBe(false);
+    const audit = w.store.listAudit(session.id);
+    const auto = audit.find((a) => a.event === "auto_approved");
+    expect(auto?.actor).toBe("fake:U_ARCH"); // attributed to the architect, not "agent"
+    expect(audit.some((a) => a.event === "tool_call" && (a.detail as any).decision === "allow(auto-approved)")).toBe(true);
+    // Ledger completeness: an already-approved approvals row exists, no pending window.
+    expect(w.store.getApprovalByToolUse(session.id, "tu-w")?.decision).toBe("approved");
+  });
+
+  test("a member's gated write still defers even with auto-approve on (anti-laundering)", async () => {
+    const w = makeWorld();
+    await assignAndScript(w, "aa10.000001", member, [writeCall]);
+    const session = w.store.getSessionByConversation("fake", "aa10.000001")!;
+    expect(w.surface.approvalRequests.length).toBe(1);
+    expect(w.harness.executed.length).toBe(0);
+    expect(w.store.hasPendingApproval(session.id)).toBe(true);
+  });
+
+  test("auto-approve off → the architect's own write defers again", async () => {
+    const w = makeWorld();
+    const c = conv("aa20.000001");
+    await w.manager.handleEvent({ kind: "command", conv: c, author: architect, name: "assign", args: "" });
+    await w.manager.handleEvent({ kind: "command", conv: c, author: architect, name: "auto-approve", args: "off" });
+    w.harness.scriptTurn([writeCall]);
+    await w.manager.handleEvent({ kind: "message", conv: c, author: architect, text: "go", attachments: [] });
+    expect(w.surface.approvalRequests.length).toBe(1);
+    expect(w.harness.executed.length).toBe(0);
+  });
+
+  test("hard-deny still refuses under auto-approve (out-of-worktree write)", async () => {
+    const w = makeWorld();
+    await assignAndScript(w, "aa30.000001", architect, [{ id: "tu-esc", name: "Write", input: { file_path: "/etc/evil", content: "x" } }]);
+    expect(w.surface.approvalRequests.length).toBe(0); // not gated...
+    expect(w.harness.executed.length).toBe(0); // ...and not executed — denied by the floor
+    expect(w.surface.transcript().some((t) => t.includes("outside your worktree"))).toBe(true);
+  });
+
+  test("bash and production-data auto-approve for an architect (the user's 'everything')", async () => {
+    const w = makeWorld();
+    await assignAndScript(w, "aa40.000001", architect, [
+      { id: "tu-bash", name: "Bash", input: { command: "rm build" } }, // non-allowlisted, not hard-deny
+      { id: "tu-psql", name: "Bash", input: { command: "psql -c 'select count(*) from users'" } }, // production-data
+    ]);
+    expect(w.surface.approvalRequests.length).toBe(0);
+    expect(w.harness.executed.map((c) => c.id)).toEqual(["tu-bash", "tu-psql"]);
+  });
+
+  test("a weak-identity surface never auto-approves, even for an architect (§4)", async () => {
+    const w = makeWorld(undefined, { identityStrength: "weak" });
+    await assignAndScript(w, "aa45.000001", architect, [writeCall]);
+    expect(w.surface.approvalRequests.length).toBe(1); // authority only from verified surfaces
+    expect(w.harness.executed.length).toBe(0);
+  });
+
+  test("an approved member turn's follow-on call still gates — the decider isn't laundered", async () => {
+    const w = makeWorld();
+    await assignAndScript(w, "aa50.000001", member, [writeCall]);
+    const requestId = w.surface.lastApprovalRequestId()!;
+    // The agent emits a NEW gated call during the resumed (empty-prompt) turn.
+    w.harness.scriptResume([{ id: "tu-w2", name: "Write", input: { file_path: "again.txt", content: "y" } }]);
+    const before = w.surface.approvalRequests.length;
+    await w.manager.handleEvent({ kind: "approval_decision", requestId, decider: architect, decision: "approved" });
+    // The approved call ran; the follow-on must NOT auto-approve (initiator carried is
+    // the MEMBER, not the approving architect) — it defers into a fresh approval.
+    expect(w.harness.executed.map((c) => c.id)).toContain("tu-w");
+    expect(w.harness.executed.map((c) => c.id)).not.toContain("tu-w2");
+    expect(w.surface.approvalRequests.length).toBe(before + 1);
+  });
+
+  test("auto-approve toggle: an architect sets it; a member is refused", async () => {
+    const w = makeWorld();
+    const c = conv("aa60.000001");
+    await w.manager.handleEvent({ kind: "command", conv: c, author: architect, name: "assign", args: "" });
+    expect(w.store.getSessionByConversation("fake", "aa60.000001")!.auto_approve).toBe(1); // default on
+    await w.manager.handleEvent({ kind: "command", conv: c, author: architect, name: "auto-approve", args: "off" });
+    const session = w.store.getSessionByConversation("fake", "aa60.000001")!;
+    expect(session.auto_approve).toBe(0);
+    expect(w.store.listAudit(session.id).some((a) => a.event === "auto_approve_set")).toBe(true);
+    // A member cannot toggle it.
+    await w.manager.handleEvent({ kind: "command", conv: c, author: member, name: "auto-approve", args: "on" });
+    expect(w.store.getSessionByConversation("fake", "aa60.000001")!.auto_approve).toBe(0);
+    expect(w.surface.posts.at(-1)!.text).toContain("Only architects");
+    expect(w.store.listAudit(session.id).some((a) => a.event === "authz_denied")).toBe(true);
+  });
+});
+
+describe("role delegation — grant/revoke (M3.8)", () => {
+  const abby = "fake:U_ABBY";
+  const abbyP: Principal = { surface: "fake", externalId: "U_ABBY" };
+
+  test("an architect grants architect in this channel only; the grantee gains authority", async () => {
+    const w = makeWorld();
+    await w.manager.handleEvent({ kind: "command", conv: conv("g00.000001"), author: architect, name: "grant", args: `${abby} architect` });
+    expect(w.store.isArchitect(abby, "C1")).toBe(true); // this channel
+    expect(w.store.isArchitect(abby, "C_OTHER")).toBe(false); // not global
+    expect(w.surface.posts.at(-1)!.text).toContain("Granted");
+  });
+
+  test("grant everywhere → architect across channels", async () => {
+    const w = makeWorld();
+    await w.manager.handleEvent({ kind: "command", conv: conv("g10.000001"), author: architect, name: "grant", args: `${abby} architect everywhere` });
+    expect(w.store.isArchitect(abby, "C1")).toBe(true);
+    expect(w.store.isArchitect(abby, "C_ANY")).toBe(true);
+  });
+
+  test("a member cannot grant", async () => {
+    const w = makeWorld();
+    await w.manager.handleEvent({ kind: "command", conv: conv("g20.000001"), author: member, name: "grant", args: `${abby} architect` });
+    expect(w.store.isArchitect(abby, "C1")).toBe(false);
+    expect(w.surface.posts.at(-1)!.text).toContain("Only architects");
+  });
+
+  test("an unresolved target (sentinel ?) posts a friendly error and writes nothing", async () => {
+    const w = makeWorld();
+    await w.manager.handleEvent({ kind: "command", conv: conv("g30.000001"), author: architect, name: "grant", args: "? architect" });
+    expect(w.surface.posts.at(-1)!.text.toLowerCase()).toContain("couldn't find");
+    expect(w.store.roleOf("?", "C1")).toBe("member");
+  });
+
+  test("a bad role token shows usage and writes nothing", async () => {
+    const w = makeWorld();
+    await w.manager.handleEvent({ kind: "command", conv: conv("g40.000001"), author: architect, name: "grant", args: `${abby} wizard` });
+    expect(w.surface.posts.at(-1)!.text).toContain("Usage");
+    expect(w.store.isArchitect(abby, "C1")).toBe(false);
+  });
+
+  test("revoke removes a grant; a config architect cannot be revoked at runtime", async () => {
+    const w = makeWorld();
+    const c = conv("g50.000001");
+    await w.manager.handleEvent({ kind: "command", conv: c, author: architect, name: "grant", args: `${abby} architect` });
+    expect(w.store.isArchitect(abby, "C1")).toBe(true);
+    await w.manager.handleEvent({ kind: "command", conv: c, author: architect, name: "revoke", args: abby });
+    expect(w.store.isArchitect(abby, "C1")).toBe(false);
+    // U_ARCH's authority is config-sourced — a runtime revoke can't remove it.
+    await w.manager.handleEvent({ kind: "command", conv: c, author: architect, name: "revoke", args: "fake:U_ARCH" });
+    expect(w.surface.posts.at(-1)!.text).toContain("comes from config");
+    expect(w.store.isArchitect("fake:U_ARCH", "C1")).toBe(true);
+  });
+
+  test("grant cannot shadow-demote a config architect", async () => {
+    const w = makeWorld();
+    await w.manager.handleEvent({ kind: "command", conv: conv("g60.000001"), author: architect, name: "grant", args: "fake:U_ARCH member" });
+    expect(w.surface.posts.at(-1)!.text).toContain("config architect");
+    expect(w.store.isArchitect("fake:U_ARCH", "C1")).toBe(true); // still architect
+  });
+
+  test("a granted architect can approve a member's gated action", async () => {
+    const w = makeWorld();
+    const c = conv("g70.000001");
+    await w.manager.handleEvent({ kind: "command", conv: c, author: architect, name: "assign", args: "" });
+    await w.manager.handleEvent({ kind: "command", conv: c, author: architect, name: "grant", args: `${abby} architect` });
+    w.harness.scriptTurn([{ id: "tu-mw", name: "Write", input: { file_path: "m.txt", content: "x" } }]);
+    await w.manager.handleEvent({ kind: "message", conv: c, author: member, text: "add file", attachments: [] });
+    const requestId = w.surface.lastApprovalRequestId()!;
+    await w.manager.handleEvent({ kind: "approval_decision", requestId, decider: abbyP, decision: "approved" });
+    expect(w.harness.executed.map((x) => x.name)).toContain("Write");
   });
 });

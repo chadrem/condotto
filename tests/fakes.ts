@@ -21,13 +21,12 @@ import type {
 
 export class FakeSurface implements SurfaceAdapter {
   readonly id = "fake";
-  readonly capabilities: SurfaceCapabilities = {
-    threads: true,
-    editMessages: true,
-    buttons: true,
-    attachments: true,
-    identityStrength: "verified",
-  };
+  readonly capabilities: SurfaceCapabilities;
+
+  /** identityStrength defaults to "verified"; pass "weak" for spoofable-surface tests. */
+  constructor(identityStrength: "verified" | "weak" = "verified") {
+    this.capabilities = { threads: true, editMessages: true, buttons: true, attachments: true, identityStrength };
+  }
 
   posts: { conv: ConversationRef; text: string; messageId: string }[] = [];
   updates: { messageId: string; text: string }[] = [];
@@ -139,6 +138,24 @@ class FakeHarnessSession implements HarnessSession {
       // also carries a fresh human instruction continues into its scripted work
       // after the leftover call is resolved (models the agent moving on).
       if (input.text.trim().length === 0) {
+        // Optional: a test-queued continuation models NEW gated calls the agent
+        // emits after the approved action, within this resumed turn (M3.8 resume
+        // auto-approve semantics). Isolated queue so it never interferes with the
+        // fresh-turn script queue.
+        const cont = this.parent.nextResumeScript();
+        if (cont) {
+          for (const c of cont) {
+            this.gateCalls.push(c);
+            const dd = await gate(c);
+            if (dd.decision === "gate") {
+              this._handle = { ...this._handle, pending: c };
+              yield { kind: "handle_updated", handle: this._handle };
+              yield { kind: "deferred", call: c };
+              return;
+            }
+            if (dd.decision === "allow") this.parent.executed.push(c);
+          }
+        }
         // Model a workflow run: approving a Workflow launch "runs" the workflow,
         // so its reply is a workflow-tagged summary (M3.6 Tier 2 cost footer).
         yield { kind: "reply", text: note, costUsd: 0.01, workflow: call.name === "Workflow" };
@@ -229,6 +246,8 @@ export class FakeHarness implements HarnessAdapter {
   executed: ToolCall[] = [];
   /** Queue of scripted tool-call lists, one per upcoming fresh turn. */
   private scripts: ToolCall[][] = [];
+  /** Queue of scripted calls for an upcoming empty-prompt RESUME (M3.8 tests). */
+  private resumeScripts: ToolCall[][] = [];
   /** Test hook: awaited at the start of every turn (lets tests hold a turn open). */
   beforeReply: (() => Promise<void>) | null = null;
   /** Number of extra progress events the default turn emits (status-throttle tests). */
@@ -243,6 +262,15 @@ export class FakeHarness implements HarnessAdapter {
 
   nextScript(): ToolCall[] | null {
     return this.scripts.shift() ?? null;
+  }
+
+  /** Queue calls the agent attempts during the next empty-prompt resume (M3.8). */
+  scriptResume(calls: ToolCall[]): void {
+    this.resumeScripts.push(calls);
+  }
+
+  nextResumeScript(): ToolCall[] | null {
+    return this.resumeScripts.shift() ?? null;
   }
 
   async create(opts: { cwd: string; system: string }): Promise<HarnessSession> {

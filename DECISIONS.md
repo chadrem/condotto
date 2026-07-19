@@ -956,3 +956,101 @@ has no unit tests; the `workflows write` mention parse is verified-by-reading on
 real Workflow tool (not trusting the M3.5 write-up) is what surfaced the
 `permissionMode` inversion. When a prior "it can't be done" blocks a north-star
 capability, re-spike the primitive before accepting it.
+
+## 2026-07-19 — Milestone 3.8: in-thread role delegation + architect auto-approve
+
+Two usability wins for the trusted-PM / dedicated-server case, driven by real friction
+(the architect re-clicking Approve on their own agent's actions; no runtime way to give
+a PM authority). Both compose through the **existing** authority read path
+(`store.roleOf`/`isArchitect`) with ZERO change to it. **248 tests, `tsc` +
+`check-ports` clean.** Verified end-to-end via the fake-harness suite (the real
+SessionManager event→gate→store path), a boot-path script (grant survives reboot,
+config revocation works, auto-approve seeds on), and the migration run against a COPY
+of the live `conduit.sqlite` (existing rows adopt `source='config'` + `auto_approve=1`).
+
+**(A) Architect auto-approve — the implementation of the §4:441-444 widening.**
+- The policy engine (`policy.ts`) stays **pure and untouched**. Auto-approve depends on
+  the *initiating principal's role*, which is not a property of the tool call — so it
+  lives in the session-manager **gate closure**, not the policy engine. This is the same
+  separation §4 already draws (Layer 1 = call→{allow,gate,deny}, identity-free; Layer 2
+  = role-verified approval). Auto-approve is a Layer-2 short-circuit.
+- Mechanism: `executeTurn` gains an `initiator` (principalKey). Precomputed once/turn:
+  `autoApprove = initiator!=null && session.auto_approve==1 && surface.identityStrength=="verified" && isArchitect(initiator, channel)`. In the gate's else-branch, `pd.action==="gate" && autoApprove` → return allow, record an already-decided `approvals` row (ledger completeness, no `pending` window) + an `auto_approved` audit attributed to the architect (not `"agent"`).
+- **Scope = everything that would prompt** (writes, edits, bash, network, production-data,
+  workflow launches) — the user's explicit call ("architects have no guardrails"). The
+  planning recommendation was writes-only (bash has no worktree confinement — "the human
+  at the gate is the real net", the same reason `evaluateConfined` refuses to relax bash
+  under the worktree-write opt-in); the user overrode it. **The one thing kept is the
+  mechanical hard-deny floor** (`bashHardDeny` + out-of-worktree confinement): it never
+  showed an Approve button, never impedes worktree-confined work, and is the only thing
+  stopping an injection-steered architect turn from exfiltrating the daemon's own
+  credentials or destroying the host. `pd.action==="deny"` never reaches the auto-approve
+  branch, so the floor is structurally intact. **Residual risk (accepted, documented):**
+  an injected member message + an innocuous architect turn can run arbitrary IN-WORKTREE
+  code without a click — bounded by the disposable worktree, framing rules, verified-
+  surface gating, initiator carry-forward, and full audit. Removing the floor too is a
+  separate, riskier decision the user can still make.
+- **Resume safety (anti-laundering):** a defer→resume is governed by the ORIGINAL
+  initiator, carried on the approval (`approvals.initiated_by`), NEVER the approving
+  decider. Since resume is only reached after an architect passes the decider check,
+  adopting the decider would launder a member's whole (possibly injection-laced) turn
+  into architect auto-approval on one click. Member turns still gate every call across
+  resumes.
+- **Verified-surface guard (§4):** auto-approve exercises architect authority off a
+  *message* event, so it requires `identityStrength==="verified"` — a forged sender on a
+  future spoofable surface (email/SMS) can never auto-approve. Always true on Slack v1.
+- **Default ON** (`sessions.auto_approve` DEFAULT 1; daemon `defaultAutoApprove`=true,
+  `CONDUIT_AUTO_APPROVE=off` to flip; per-repo `default_auto_approve`). The user's stated
+  posture overrides the "every other toggle defaults off" convention. Existing sessions
+  adopt ON at migration — a deliberate, surfaced posture change (the settings banner
+  shows it). Dial off per thread (`@Conduit auto-approve off`).
+- System prompt is **unchanged**: an auto-approved action still runs, so the agent's
+  "propose gated actions normally; don't claim done until it runs" rules stay correct;
+  keeping the agent gate-agnostic avoids it reasoning about its own authority. Posture is
+  a human banner (`settingsBlock`/`capabilitySummary`) concern.
+
+**(B) In-thread role delegation — `@Conduit grant`/`revoke`.**
+- **Persistence (the load-bearing decision): a `roles.source` column** (`'config'` |
+  `'grant'`) + `granted_by`/`granted_at`. Boot changes `clearRoles()` →
+  `clearConfigRoles()` (deletes only `source='config'`), so runtime grants survive the
+  reseed while config stays authoritative over its own rows. Chosen over a separate
+  `grants` table (would force the hot `roleOf` authorization read to UNION two tables and
+  redefine scope precedence), config write-back (daemon mutating a human-owned gitignored
+  file; races), and ephemeral (fails the requirement). **`roleOf`/`isArchitect` ignore
+  `source` → ZERO read-path change**; a grant architect is authoritative exactly like a
+  config one, so approvals + the architect gate + auto-approve all "just work".
+- **Scope = the current channel by default** ("this project"; a channel ≈ a repo/project
+  in Conduit), `everywhere`/`global` = `'*'`. True per-thread scope is NOT modeled
+  (`isArchitect` is always called with `channelId`) — channel is the finest practical
+  grain; a project spanning multiple channels means running the grant in each (stated in
+  help). User confirmed channel-only default.
+- **Integrity guards (kept — they protect roles-table integrity, distinct from the
+  "architects have no guardrails" auto-approve choice):** revoke removes only
+  `source='grant'` rows (a config architect can't be revoked at runtime); grant refuses
+  to *demote* (member/observer) a broader-scope config architect (a channel `member`
+  grant would shadow a `'*'` config architect and survive reboot — a backdoor demote).
+- **Ports:** the Slack adapter resolves `<@U…>` → principal key via the core's
+  `principalKey()` (no format drift), emitting a sentinel `?` when unlinkified so the core
+  posts a precise error. No Slack id shape crosses the port; the mention parser was
+  extracted to a **pure module-level `parseMentionCommand`/`resolveUserMention`** — which
+  also gave the Slack adapter its **first unit tests** (a gap flagged since M3.6). Target
+  ids are read from the ORIGINAL-case `words[]` (Slack ids are uppercase; the parser
+  lowercases only for keyword/role matching).
+- Grant/revoke are channel-level and need **no active session** (unlike model/effort/etc.),
+  and audit without a `sessionId` (like `assign`'s pre-session `authz_denied`).
+
+**Files:** `src/core/store.ts` (migrations; `auto_approve`/`source`/`initiated_by`/
+`default_auto_approve` columns; `setSessionAutoApprove`, `recordAutoApproval`,
+`setRole(source)`, `clearConfigRoles`, `deleteRole`, `getRoleRow`), `session-manager.ts`
+(gate closure + `initiator` threading; `setAutoApprove`/`grantRole`/`revokeRole`;
+seeding; banners; help), `types.ts` (`CommandName`, `RepoConfig.autoApprove`),
+`adapters/slack/adapter.ts` (pure parser + resolver), `config.ts`/`daemon.ts`
+(`defaultAutoApprove`, `clearConfigRoles`). `policy.ts` deliberately untouched.
+
+**M4 watch-list additions:** (a) auto-approve trades the human checkpoint for audit on
+architect turns — the read-only Slack audit channel (already M4) becomes more important
+as the primary after-the-fact review surface. (b) The residual injection→in-worktree-RCE
+window is the strongest argument for M4 session/process isolation + scoped daemon
+credentials (so even a floor-respecting compromise has minimal blast radius). (c) Revisit
+whether the hard-deny floor should stay non-overridable for architects (the user may want
+it removed; keep it until isolation lands).

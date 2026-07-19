@@ -27,9 +27,10 @@ async function main(): Promise<void> {
 
   const store = new Store(config.dbPath);
   for (const repo of config.repos) store.upsertRepo(repo);
-  // Config is the source of truth for roles: clear and re-seed so removing a
-  // principal from config actually revokes their authority.
-  store.clearRoles();
+  // Config is the source of truth for CONFIG roles: clear and re-seed so removing a
+  // principal from config actually revokes their authority. Runtime `@Conduit grant`
+  // delegations (source='grant') are preserved across the reseed (M3.8).
+  store.clearConfigRoles();
   for (const r of config.roles) store.setRole(r.principal, r.role, r.scope);
   const architects = config.roles.filter((r) => r.role === "architect").length;
   if (architects === 0) {
@@ -50,6 +51,7 @@ async function main(): Promise<void> {
     maxConcurrentTurns: config.maxConcurrentTurns,
     defaultModel: config.defaultModel,
     defaultEffort: config.defaultEffort,
+    defaultAutoApprove: config.defaultAutoApprove,
   });
   // Warn loudly if the configured default model/effort isn't one the harness
   // accepts — better a boot-time warning than a silent per-turn fallback (M3.5).
@@ -62,7 +64,8 @@ async function main(): Promise<void> {
   log(
     `[daemon] cost cap $${config.defaultCostCapUsd}/thread (default), ` +
       `max ${config.maxConcurrentTurns} concurrent turns, ` +
-      `default model ${config.defaultModel} @ ${config.defaultEffort} effort`,
+      `default model ${config.defaultModel} @ ${config.defaultEffort} effort, ` +
+      `architect auto-approve ${config.defaultAutoApprove ? "ON" : "off"} by default`,
   );
 
   // Surface credentials belong to the adapter, not core config — the

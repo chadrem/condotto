@@ -35,6 +35,13 @@ export interface SessionRow {
   workflows: number;
   /** M3.6 Tier 3: the informed worktree-write opt-in for workflow/escaped calls. */
   workflow_write: number;
+  /**
+   * M3.8 architect self-approve: when 1, a gated tool call on a turn initiated by
+   * an architect runs without the Approve click (the hard-deny floor still
+   * applies). Default 1 (on) — an architect toggles it per thread with
+   * `@Conduit auto-approve on|off`.
+   */
+  auto_approve: number;
   created_at: string;
   last_active_at: string;
 }
@@ -57,6 +64,11 @@ export interface RepoRow {
   default_effort: string | null;
   /** Trust flag (M3.5 Tier C): 1 loads project config/skills/MCP; 0 stays isolated. */
   trusted: number;
+  /**
+   * M3.8 per-repo default for architect self-approve, seeded onto each new
+   * session. 1 = on, 0 = off, null = fall back to the daemon-wide default.
+   */
+  default_auto_approve: number | null;
 }
 
 interface RawRepoRow extends Omit<RepoRow, "safe_bash_allowlist"> {
@@ -88,6 +100,14 @@ function parseJsonArray(json: string | null): string[] {
 
 export type ApprovalDecision = "pending" | "approved" | "denied" | "expired";
 
+/**
+ * Where a role mapping came from (M3.8). `config` rows are wiped + reseeded from
+ * `CONDUIT_ARCHITECTS`/`conduit.roles.json` on every boot (config stays
+ * authoritative); `grant` rows are runtime `@Conduit grant` delegations that
+ * survive restart.
+ */
+export type RoleSource = "config" | "grant";
+
 export interface ApprovalRow {
   id: string; // == requestId, carried in the surface's approval control
   session_id: string;
@@ -98,6 +118,13 @@ export interface ApprovalRow {
   decided_by: string | null;
   decision: ApprovalDecision;
   decided_at: string | null;
+  /**
+   * M3.8: the principalKey of the human whose turn caused this gated call. Carried
+   * so a defer→resume continuation is governed by the ORIGINAL initiator (never the
+   * approving decider), which prevents laundering a member's turn into architect
+   * auto-approval. Null on pre-M3.8 rows and on daemon-run ship approvals.
+   */
+  initiated_by: string | null;
 }
 
 interface RawApprovalRow extends Omit<ApprovalRow, "tool_input"> {
@@ -240,6 +267,20 @@ export class Store {
     this.ensureColumn("repos", "default_model", "TEXT");
     this.ensureColumn("repos", "default_effort", "TEXT");
     this.ensureColumn("repos", "trusted", "INTEGER NOT NULL DEFAULT 0");
+
+    // M3.8: architect self-approve (per-session flag, DEFAULT 1 so it is ON by
+    // default and existing sessions adopt it on upgrade — the deliberate posture
+    // choice, 2026-07-19) + per-repo default. Runtime role grants that survive the
+    // boot reseed (`source` separates config-seeded rows, wiped+reseeded each boot,
+    // from runtime grants, kept; granted_by/granted_at are grant provenance). And
+    // the initiating principal on an approval, so a defer→resume is governed by the
+    // original initiator, not the approving decider.
+    this.ensureColumn("sessions", "auto_approve", "INTEGER NOT NULL DEFAULT 1");
+    this.ensureColumn("repos", "default_auto_approve", "INTEGER");
+    this.ensureColumn("roles", "source", "TEXT NOT NULL DEFAULT 'config'");
+    this.ensureColumn("roles", "granted_by", "TEXT");
+    this.ensureColumn("roles", "granted_at", "TEXT");
+    this.ensureColumn("approvals", "initiated_by", "TEXT");
   }
 
   private ensureColumn(table: string, column: string, ddl: string): void {
@@ -269,19 +310,21 @@ export class Store {
     defaultModel?: string;
     defaultEffort?: string;
     trusted?: boolean;
+    autoApprove?: boolean;
   }): void {
     this.db
       .query(
         `INSERT INTO repos
            (id, name, path, default_branch, safe_bash_allowlist,
             test_cmd, land_cmd, deploy_cmd, cost_cap_usd,
-            default_model, default_effort, trusted)
+            default_model, default_effort, trusted, default_auto_approve)
          VALUES ($id, $name, $path, $branch, $allow, $test, $land, $deploy, $cap,
-                 $model, $effort, $trusted)
+                 $model, $effort, $trusted, $autoApprove)
          ON CONFLICT(name) DO UPDATE SET
            path = $path, default_branch = $branch, safe_bash_allowlist = $allow,
            test_cmd = $test, land_cmd = $land, deploy_cmd = $deploy, cost_cap_usd = $cap,
-           default_model = $model, default_effort = $effort, trusted = $trusted`,
+           default_model = $model, default_effort = $effort, trusted = $trusted,
+           default_auto_approve = $autoApprove`,
       )
       .run({
         id: repo.name,
@@ -296,6 +339,8 @@ export class Store {
         model: repo.defaultModel ?? null,
         effort: repo.defaultEffort ?? null,
         trusted: repo.trusted ? 1 : 0,
+        // undefined = leave to the daemon default; only an explicit bool pins it.
+        autoApprove: repo.autoApprove === undefined ? null : repo.autoApprove ? 1 : 0,
       });
   }
 
@@ -304,7 +349,7 @@ export class Store {
       .query<RawRepoRow, { name: string }>(
         `SELECT id, name, path, default_branch, safe_bash_allowlist,
                 test_cmd, land_cmd, deploy_cmd, cost_cap_usd,
-                default_model, default_effort, trusted
+                default_model, default_effort, trusted, default_auto_approve
          FROM repos WHERE name = $name`,
       )
       .get({ name });
@@ -322,6 +367,7 @@ export class Store {
       default_model: row.default_model,
       default_effort: row.default_effort,
       trusted: row.trusted,
+      default_auto_approve: row.default_auto_approve,
     };
   }
 
@@ -338,13 +384,14 @@ export class Store {
   createSession(
     s: Omit<
       SessionRow,
-      "created_at" | "last_active_at" | "budget_limit_usd" | "model" | "effort" | "subagents" | "workflows" | "workflow_write"
+      "created_at" | "last_active_at" | "budget_limit_usd" | "model" | "effort" | "subagents" | "workflows" | "workflow_write" | "auto_approve"
     > & {
       budget_limit_usd?: number | null;
       model?: string | null;
       effort?: string | null;
       subagents?: number;
       workflows?: number;
+      auto_approve?: number;
     },
   ): SessionRow {
     const now = new Date().toISOString();
@@ -353,16 +400,19 @@ export class Store {
     const effort = s.effort ?? null;
     const subagents = s.subagents ?? 0;
     const workflows = s.workflows ?? 0;
+    // M3.8: on by default (matches the column DEFAULT and the shipped posture);
+    // assign passes the repo/daemon-resolved value explicitly.
+    const autoApprove = s.auto_approve ?? 1;
     try {
       this.db
         .query(
           `INSERT INTO sessions
              (id, surface_id, conversation_id, channel_id, repo_id, worktree_path,
               harness_id, harness_session_handle, branch, status, budget_limit_usd,
-              model, effort, subagents, workflows, created_at, last_active_at)
+              model, effort, subagents, workflows, auto_approve, created_at, last_active_at)
            VALUES ($id, $surface_id, $conversation_id, $channel_id, $repo_id, $worktree_path,
                    $harness_id, $handle, $branch, $status, $budget,
-                   $model, $effort, $subagents, $workflows, $now, $now)`,
+                   $model, $effort, $subagents, $workflows, $autoApprove, $now, $now)`,
         )
         .run({
           id: s.id,
@@ -380,6 +430,7 @@ export class Store {
           effort,
           subagents,
           workflows,
+          autoApprove,
           now,
         });
     } catch (err) {
@@ -398,6 +449,7 @@ export class Store {
       subagents,
       workflows,
       workflow_write: 0,
+      auto_approve: autoApprove,
       created_at: now,
       last_active_at: now,
     };
@@ -492,6 +544,11 @@ export class Store {
   /** Toggle a session's subagent tools (M3.5 Tier B, `@Conduit subagents`). */
   setSessionSubagents(id: string, on: boolean): void {
     this.db.query(`UPDATE sessions SET subagents = $v WHERE id = $id`).run({ id, v: on ? 1 : 0 });
+  }
+
+  /** Toggle a session's architect self-approve (M3.8, `@Conduit auto-approve`). */
+  setSessionAutoApprove(id: string, on: boolean): void {
+    this.db.query(`UPDATE sessions SET auto_approve = $v WHERE id = $id`).run({ id, v: on ? 1 : 0 });
   }
 
   /**
@@ -599,14 +656,43 @@ export class Store {
 
   // -- roles ----------------------------------------------------------------
 
-  /** Upsert a role mapping. scope is a channel_id or '*' (all channels). */
-  setRole(principal: string, role: Role, scope = "*"): void {
+  /**
+   * Upsert a role mapping. scope is a channel_id or '*' (all channels). `source`
+   * (M3.8) separates config-seeded rows — wiped + reseeded every boot by
+   * `clearConfigRoles` — from runtime grants (`'grant'`), which survive restart.
+   * Default `'config'` keeps every pre-M3.8 caller (boot reseed, assign, tests)
+   * unchanged. `roleOf`/`isArchitect` ignore `source`, so a grant is authoritative
+   * exactly like a config row.
+   */
+  setRole(
+    principal: string,
+    role: Role,
+    scope = "*",
+    source: RoleSource = "config",
+    grantedBy: string | null = null,
+  ): void {
     this.db
       .query(
-        `INSERT INTO roles (principal, scope, role) VALUES ($p, $s, $r)
-         ON CONFLICT(principal, scope) DO UPDATE SET role = $r`,
+        `INSERT INTO roles (principal, scope, role, source, granted_by, granted_at)
+         VALUES ($p, $s, $r, $src, $by, $at)
+         ON CONFLICT(principal, scope) DO UPDATE SET
+           role = $r, source = $src, granted_by = $by, granted_at = $at`,
       )
-      .run({ p: principal, s: scope, r: role });
+      .run({ p: principal, s: scope, r: role, src: source, by: grantedBy, at: grantedBy ? new Date().toISOString() : null });
+  }
+
+  /**
+   * Remove a role mapping. When `source` is given, only a row of that source is
+   * removed — `deleteRole(p, scope, "grant")` can never touch a config-seeded row,
+   * so a runtime `revoke` cannot override the admin's config. Returns the number of
+   * rows removed (0 = nothing matched).
+   */
+  deleteRole(principal: string, scope = "*", source?: RoleSource): number {
+    const sql = source
+      ? `DELETE FROM roles WHERE principal = $p AND scope = $s AND source = $src`
+      : `DELETE FROM roles WHERE principal = $p AND scope = $s`;
+    const params = source ? { p: principal, s: scope, src: source } : { p: principal, s: scope };
+    return this.db.query(sql).run(params as Record<string, string>).changes;
   }
 
   /**
@@ -631,12 +717,36 @@ export class Store {
   }
 
   /**
+   * The exact role row for a (principal, scope) pair, with its source (M3.8) — used
+   * by `grant`/`revoke` to reason about provenance (e.g. refuse to shadow-demote a
+   * config architect). Null when no row exists at that exact scope. NOTE: this is an
+   * EXACT-scope lookup, not the effective-role precedence of `roleOf`.
+   */
+  getRoleRow(principal: string, scope: string): { role: Role; source: RoleSource } | null {
+    return this.db
+      .query<{ role: Role; source: RoleSource }, { p: string; s: string }>(
+        `SELECT role, source FROM roles WHERE principal = $p AND scope = $s`,
+      )
+      .get({ p: principal, s: scope });
+  }
+
+  /**
    * Remove all role mappings. Config is the source of truth for roles in M2, so
    * the daemon clears and re-seeds at boot — removing a principal from config
    * must actually revoke their authority, not leave a stale row behind.
    */
   clearRoles(): void {
     this.db.run(`DELETE FROM roles`);
+  }
+
+  /**
+   * Boot reconcile (M3.8): remove only config-seeded rows so runtime `@Conduit
+   * grant` delegations (source='grant') survive the restart, then the daemon
+   * reseeds config rows. Removing a principal from config still revokes their
+   * config authority; grants are a separate, additive namespace.
+   */
+  clearConfigRoles(): void {
+    this.db.run(`DELETE FROM roles WHERE source = 'config'`);
   }
 
   // -- approvals ------------------------------------------------------------
@@ -647,11 +757,13 @@ export class Store {
     toolUseId: string | null;
     toolName: string;
     toolInput: unknown;
+    /** M3.8: principalKey of the human whose turn caused this call (see ApprovalRow). */
+    initiatedBy?: string | null;
   }): void {
     this.db
       .query(
-        `INSERT INTO approvals (id, session_id, tool_use_id, tool_name, tool_input, requested_at, decision)
-         VALUES ($id, $sid, $tuid, $name, $input, $now, 'pending')`,
+        `INSERT INTO approvals (id, session_id, tool_use_id, tool_name, tool_input, requested_at, decision, initiated_by)
+         VALUES ($id, $sid, $tuid, $name, $input, $now, 'pending', $initBy)`,
       )
       .run({
         id: a.id,
@@ -660,6 +772,38 @@ export class Store {
         name: a.toolName,
         input: JSON.stringify(a.toolInput ?? {}),
         now: new Date().toISOString(),
+        initBy: a.initiatedBy ?? null,
+      });
+  }
+
+  /**
+   * Record an M3.8 architect auto-approval as an already-decided `approved` row —
+   * so the `approvals` ledger stays complete (every consequential action is
+   * attributable) with no transient `pending` window that `hasPendingApproval`
+   * would trip. `decided_by` = the architect whose standing authority stood in.
+   */
+  recordAutoApproval(a: {
+    sessionId: string;
+    toolUseId: string | null;
+    toolName: string;
+    toolInput: unknown;
+    initiator: string;
+  }): void {
+    const now = new Date().toISOString();
+    this.db
+      .query(
+        `INSERT INTO approvals
+           (id, session_id, tool_use_id, tool_name, tool_input, requested_at, decision, decided_by, decided_at, initiated_by)
+         VALUES ($id, $sid, $tuid, $name, $input, $now, 'approved', $by, $now, $by)`,
+      )
+      .run({
+        id: crypto.randomUUID(),
+        sid: a.sessionId,
+        tuid: a.toolUseId,
+        name: a.toolName,
+        input: JSON.stringify(a.toolInput ?? {}),
+        now,
+        by: a.initiator,
       });
   }
 

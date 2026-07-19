@@ -3,6 +3,7 @@ import type {
   ApprovalPrompt,
   Attachment,
   ChoicePrompt,
+  CommandName,
   ConversationRef,
   InboundEvent,
   OutboundMessage,
@@ -11,6 +12,7 @@ import type {
   SurfaceAdapter,
   SurfaceCapabilities,
 } from "../../core/types";
+import { principalKey } from "../../core/types";
 import {
   APPROVE_ACTION,
   CHOICE_ACTION,
@@ -68,6 +70,69 @@ function threadTsOf(conv: ConversationRef): string | undefined {
   if (!conv.conversationId) return undefined;
   const idx = conv.conversationId.indexOf(":");
   return idx === -1 ? conv.conversationId : conv.conversationId.slice(idx + 1);
+}
+
+/**
+ * Resolve a linkified Slack user mention ("<@U0ABBY>" or "<@U0ABBY|abby>") to a
+ * domain principal key ("slack:U0ABBY"). Returns null for plain text, a malformed
+ * token, or a mention of the bot itself — so no raw Slack id shape ever crosses the
+ * port, and a `grant` can never target Conduit. Built via `principalKey` so the key
+ * format stays in lockstep with the core (M3.8). Pure (no `this`) for unit testing.
+ */
+export function resolveUserMention(token: string, botUserId: string | null): string | null {
+  const m = token.match(/^<@([A-Z0-9]+)(?:\|[^>]*)?>$/);
+  if (!m) return null;
+  if (botUserId && m[1] === botUserId) return null;
+  return principalKey({ surface: SURFACE_ID, externalId: m[1]! });
+}
+
+/**
+ * Parse an `@Conduit …` mention into a command (or null = conversation/help).
+ * Pure and module-level (no `this`) so it is unit-testable without a live Bolt App.
+ * Deliberately strict, arity-checked word forms so ordinary prose ("@Conduit take a
+ * look at x.ts") is treated as conversation, not a command. The target of a
+ * grant/revoke is a Slack `<@U…>` mention — read from the ORIGINAL-case `words`
+ * (Slack ids are uppercase; `first/second/third` are lowercased) and resolved to a
+ * principal key here, emitting the sentinel "?" when unresolved so the core can post
+ * a precise error.
+ */
+export function parseMentionCommand(
+  text: string,
+  botUserId: string | null,
+): { name: CommandName; args: string } | null {
+  if (!botUserId) return null;
+  const m = text.match(new RegExp(`^\\s*<@${botUserId}(?:\\|[^>]*)?>\\s*(.*)$`, "s"));
+  if (!m) return null;
+  const words = m[1]!.trim().split(/\s+/).filter(Boolean);
+  const [first = "", second = "", third] = words.map((w) => w.toLowerCase());
+  if (first === "assign" && words.length <= 2) return { name: "assign", args: words.length === 2 ? words[1]! : "" };
+  if (first === "take" && second === "this" && third === undefined) return { name: "assign", args: "" };
+  if (first === "stop" && words.length === 1) return { name: "stop", args: "" };
+  if (first === "status" && words.length === 1) return { name: "status", args: "" };
+  if (first === "land" && words.length === 1) return { name: "land", args: "" };
+  if (first === "deploy" && words.length === 1) return { name: "deploy", args: "" };
+  if (first === "budget" && words.length === 2) return { name: "budget", args: words[1]! };
+  if (first === "model" && words.length === 2) return { name: "model", args: words[1]! };
+  if (first === "effort" && words.length === 2) return { name: "effort", args: words[1]! };
+  if (first === "subagents" && words.length === 2) return { name: "subagents", args: words[1]! };
+  if (first === "ultra" && words.length === 2) return { name: "ultra", args: words[1]! };
+  // M3.8: single whitespace-free token, so `split(/\s+/)` keeps it intact.
+  if (first === "auto-approve" && words.length === 2) return { name: "auto-approve", args: words[1]! };
+  if (first === "workflows" && words.length === 2) return { name: "workflows", args: words[1]! };
+  if (first === "workflows" && second === "write" && words.length === 3) {
+    return { name: "workflows", args: `write ${words[2]!}` };
+  }
+  // M3.8 role delegation. args carry the resolved principal key (or "?") + the
+  // lowercased remainder: grant -> "<key|?> <role> [everywhere]", revoke -> "<key|?> [everywhere]".
+  if (first === "grant" && words.length >= 2 && words.length <= 4) {
+    const target = resolveUserMention(words[1]!, botUserId) ?? "?";
+    return { name: "grant", args: `${target} ${words.slice(2).map((w) => w.toLowerCase()).join(" ")}`.trim() };
+  }
+  if (first === "revoke" && words.length >= 2 && words.length <= 3) {
+    const target = resolveUserMention(words[1]!, botUserId) ?? "?";
+    return { name: "revoke", args: `${target} ${words.slice(2).map((w) => w.toLowerCase()).join(" ")}`.trim() };
+  }
+  return null;
 }
 
 /**
@@ -242,6 +307,8 @@ export class SlackAdapter implements SurfaceAdapter {
             "`@Conduit land`/`deploy` (gated), `@Conduit budget <usd>`.\n" +
             "Tune the implementer: `@Conduit model <opus|sonnet|fable>`, `@Conduit effort <low…max>`, " +
             "`@Conduit subagents on|off`, `@Conduit workflows on|off`, `@Conduit ultra on|off`.\n" +
+            "Approvals & roles: `@Conduit auto-approve on|off` (skip your own Approve clicks), " +
+            "`@Conduit grant @user architect [everywhere]`, `@Conduit revoke @user`.\n" +
             "To assign an existing thread: `@Conduit assign` in that thread.",
         });
       }
@@ -253,44 +320,10 @@ export class SlackAdapter implements SurfaceAdapter {
    * command ("@Conduit take a look at src/x.ts" must reach the session, not
    * trigger an assign).
    */
-  private mentionCommand(
-    text: string,
-  ): {
-    name: "assign" | "stop" | "status" | "land" | "deploy" | "budget" | "model" | "effort" | "subagents" | "workflows" | "ultra";
-    args: string;
-  } | null {
-    if (!this.botUserId) return null;
-    const m = text.match(new RegExp(`^\\s*<@${this.botUserId}(?:\\|[^>]*)?>\\s*(.*)$`, "s"));
-    if (!m) return null;
-    const words = m[1]!.trim().split(/\s+/).filter(Boolean);
-    const [first = "", second = "", third] = words.map((w) => w.toLowerCase());
-    if (first === "assign" && words.length <= 2) {
-      return { name: "assign", args: words.length === 2 ? words[1]! : "" };
-    }
-    if (first === "take" && second === "this" && third === undefined) {
-      return { name: "assign", args: "" };
-    }
-    if (first === "stop" && words.length === 1) return { name: "stop", args: "" };
-    if (first === "status" && words.length === 1) return { name: "status", args: "" };
-    if (first === "land" && words.length === 1) return { name: "land", args: "" };
-    if (first === "deploy" && words.length === 1) return { name: "deploy", args: "" };
-    // `@Conduit budget 20` — the amount is the one argument.
-    if (first === "budget" && words.length === 2) return { name: "budget", args: words[1]! };
-    // M3.5 harness controls, each with exactly one argument. The token is
-    // validated in the core against the harness capabilities / on-off, so the
-    // adapter just forwards it: `@Conduit model opus`, `@Conduit effort xhigh`,
-    // `@Conduit subagents on`, `@Conduit ultra on`.
-    if (first === "model" && words.length === 2) return { name: "model", args: words[1]! };
-    if (first === "effort" && words.length === 2) return { name: "effort", args: words[1]! };
-    if (first === "subagents" && words.length === 2) return { name: "subagents", args: words[1]! };
-    if (first === "ultra" && words.length === 2) return { name: "ultra", args: words[1]! };
-    // M3.6: `@Conduit workflows on|off`, and `@Conduit workflows write on|off`
-    // (the worktree-write opt-in). The core validates the argument.
-    if (first === "workflows" && words.length === 2) return { name: "workflows", args: words[1]! };
-    if (first === "workflows" && second === "write" && words.length === 3) {
-      return { name: "workflows", args: `write ${words[2]!}` };
-    }
-    return null;
+  private mentionCommand(text: string): { name: CommandName; args: string } | null {
+    // Parsing is a pure module-level function (unit-tested without a live App);
+    // the mention forms, incl. M3.5/M3.6/M3.8 controls, live there.
+    return parseMentionCommand(text, this.botUserId);
   }
 
   /**

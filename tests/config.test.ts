@@ -104,6 +104,17 @@ describe("loadConfig repos", () => {
     expect(() => loadConfig({ CONDUIT_MAX_CONCURRENT_TURNS: "0", ...NO_ROLES })).toThrow(/positive integer/);
   });
 
+  test("daemon-wide auto-approve defaults ON, disableable by env (M3.8)", () => {
+    const def = loadConfig({ CONDUIT_REPOS_FILE: "/nonexistent/repos.json", ...NO_ROLES });
+    expect(def.defaultAutoApprove).toBe(true);
+    for (const off of ["off", "false", "0", "no", "OFF"]) {
+      const cfg = loadConfig({ CONDUIT_REPOS_FILE: "/nonexistent/repos.json", CONDUIT_AUTO_APPROVE: off, ...NO_ROLES });
+      expect(cfg.defaultAutoApprove).toBe(false);
+    }
+    // Any other value keeps it on.
+    expect(loadConfig({ CONDUIT_REPOS_FILE: "/nonexistent/repos.json", CONDUIT_AUTO_APPROVE: "on", ...NO_ROLES }).defaultAutoApprove).toBe(true);
+  });
+
   test("per-repo default model/effort and the trust flag parse (M3.5)", () => {
     const file = reposFile([
       { name: "webapp", path: "/srv/webapp", defaultModel: "sonnet", defaultEffort: "xhigh", trusted: true },

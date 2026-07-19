@@ -1,4 +1,7 @@
 import { describe, expect, test } from "bun:test";
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { Store, ConflictError } from "../src/core/store";
 
 function memoryStore(): Store {
@@ -113,6 +116,20 @@ describe("store sessions", () => {
     expect(row.model).toBeNull();
   });
 
+  test("auto_approve defaults ON and the setter round-trips (M3.8)", () => {
+    const store = memoryStore();
+    store.createSession({ ...baseSession, id: "s1", conversation_id: "1.1" });
+    // On by default (matches the column DEFAULT 1 and the shipped posture).
+    expect(store.getSession("s1")!.auto_approve).toBe(1);
+    store.setSessionAutoApprove("s1", false);
+    expect(store.getSession("s1")!.auto_approve).toBe(0);
+    store.setSessionAutoApprove("s1", true);
+    expect(store.getSession("s1")!.auto_approve).toBe(1);
+    // An explicit seed value at creation wins over the default.
+    store.createSession({ ...baseSession, id: "s2", conversation_id: "2.2", auto_approve: 0 });
+    expect(store.getSession("s2")!.auto_approve).toBe(0);
+  });
+
   test("workflow_write defaults off and turning workflows off clears it (M3.6 invariant)", () => {
     const store = memoryStore();
     store.createSession({ ...baseSession, id: "s1", conversation_id: "1.1" });
@@ -140,6 +157,17 @@ describe("store sessions", () => {
     expect(r2.default_model).toBeNull();
     expect(r2.default_effort).toBeNull();
     expect(r2.trusted).toBe(0);
+  });
+
+  test("repo default_auto_approve round-trips; undefined = null (M3.8)", () => {
+    const store = memoryStore();
+    store.upsertRepo({ name: "r", path: "/tmp/r", defaultBranch: "main", autoApprove: false });
+    expect(store.getRepo("r")!.default_auto_approve).toBe(0);
+    store.upsertRepo({ name: "r", path: "/tmp/r", defaultBranch: "main", autoApprove: true });
+    expect(store.getRepo("r")!.default_auto_approve).toBe(1);
+    // Omitting it = fall back to the daemon default (null, not a pinned 0).
+    store.upsertRepo({ name: "r", path: "/tmp/r", defaultBranch: "main" });
+    expect(store.getRepo("r")!.default_auto_approve).toBeNull();
   });
 
   test("repo test/land/deploy commands and cost cap round-trip (M3)", () => {
@@ -239,6 +267,25 @@ describe("store approvals", () => {
     expect(store.getApprovalByToolUse("s1", "nope")).toBeNull();
   });
 
+  test("createApproval persists initiated_by; default is null (M3.8)", () => {
+    const store = withSession();
+    store.createApproval({ id: "req-i", sessionId: "s1", toolUseId: "tu-1", toolName: "Write", toolInput: {}, initiatedBy: "slack:U_MEMBER" });
+    expect(store.getApproval("req-i")?.initiated_by).toBe("slack:U_MEMBER");
+    store.createApproval({ id: "req-n", sessionId: "s1", toolUseId: "tu-2", toolName: "Write", toolInput: {} });
+    expect(store.getApproval("req-n")?.initiated_by).toBeNull();
+  });
+
+  test("recordAutoApproval inserts an already-approved row without a pending window (M3.8)", () => {
+    const store = withSession();
+    store.recordAutoApproval({ sessionId: "s1", toolUseId: "tu-auto", toolName: "Write", toolInput: { file_path: "x.ts" }, initiator: "slack:U_ARCH" });
+    // No transient 'pending' row — hasPendingApproval must stay false.
+    expect(store.hasPendingApproval("s1")).toBe(false);
+    const row = store.getApprovalByToolUse("s1", "tu-auto")!;
+    expect(row.decision).toBe("approved");
+    expect(row.decided_by).toBe("slack:U_ARCH");
+    expect(row.initiated_by).toBe("slack:U_ARCH");
+  });
+
   test("decideApproval transitions once; a second decision is a no-op", () => {
     const store = withSession();
     store.createApproval({ id: "req-1", sessionId: "s1", toolUseId: "tu-1", toolName: "Write", toolInput: {} });
@@ -295,5 +342,68 @@ describe("store roles (revocation)", () => {
     store.clearRoles();
     expect(store.isArchitect("slack:U1", "C1")).toBe(false);
     expect(store.roleOf("slack:U1", "C1")).toBe("member");
+  });
+});
+
+describe("store roles — runtime grants (M3.8)", () => {
+  test("setRole defaults to source='config'; a grant carries provenance", () => {
+    const store = memoryStore();
+    store.setRole("slack:U1", "architect"); // default source
+    expect(store.getRoleRow("slack:U1", "*")).toEqual({ role: "architect", source: "config" });
+    store.setRole("slack:U2", "architect", "C1", "grant", "slack:U_BY");
+    const row = store.getRoleRow("slack:U2", "C1")!;
+    expect(row.role).toBe("architect");
+    expect(row.source).toBe("grant");
+  });
+
+  test("clearConfigRoles preserves grants and reseeding keeps both (boot reconcile)", () => {
+    const store = memoryStore();
+    store.setRole("slack:U_CFG", "architect"); // config-seeded
+    store.setRole("slack:U_GRANT", "architect", "C1", "grant", "slack:U_CFG"); // runtime grant
+    // Simulate a daemon restart: clear only config rows, then reseed config.
+    store.clearConfigRoles();
+    expect(store.getRoleRow("slack:U_CFG", "*")).toBeNull(); // config row wiped
+    expect(store.isArchitect("slack:U_GRANT", "C1")).toBe(true); // grant survived
+    store.setRole("slack:U_CFG", "architect"); // reseed from config
+    expect(store.isArchitect("slack:U_CFG", "C1")).toBe(true);
+    expect(store.isArchitect("slack:U_GRANT", "C1")).toBe(true);
+  });
+
+  test("roleOf/isArchitect are source-agnostic; a channel grant beats a '*' config row", () => {
+    const store = memoryStore();
+    store.setRole("slack:U1", "member"); // global config member
+    store.setRole("slack:U1", "architect", "C1", "grant", "slack:U_BY"); // channel grant
+    expect(store.isArchitect("slack:U1", "C1")).toBe(true); // grant wins in C1
+    expect(store.isArchitect("slack:U1", "C2")).toBe(false); // falls back to '*' member
+  });
+
+  test("deleteRole returns the count and only removes rows of the given source", () => {
+    const store = memoryStore();
+    store.setRole("slack:U1", "architect", "C1"); // a config row at channel scope
+    expect(store.deleteRole("slack:U1", "C1", "grant")).toBe(0); // never touches config
+    expect(store.isArchitect("slack:U1", "C1")).toBe(true);
+    store.setRole("slack:U2", "architect", "C1", "grant", "slack:U_BY");
+    expect(store.deleteRole("slack:U2", "C1", "grant")).toBe(1);
+    expect(store.isArchitect("slack:U2", "C1")).toBe(false);
+  });
+
+  test("a config reseed over an existing grant key flips the row to config", () => {
+    const store = memoryStore();
+    store.setRole("slack:U1", "architect", "C1", "grant", "slack:U_BY");
+    expect(store.getRoleRow("slack:U1", "C1")!.source).toBe("grant");
+    store.setRole("slack:U1", "architect", "C1"); // config wins the (principal, scope) key
+    expect(store.getRoleRow("slack:U1", "C1")!.source).toBe("config");
+  });
+
+  test("the source column and grants survive a re-open of the same DB file (migration idempotent)", () => {
+    const dir = mkdtempSync(join(tmpdir(), "conduit-roles-"));
+    const path = join(dir, "roles.sqlite");
+    let store = new Store(path);
+    store.setRole("slack:U_GRANT", "architect", "C1", "grant", "slack:U_BY");
+    store.close();
+    store = new Store(path); // re-run migrate() on an existing DB
+    expect(store.isArchitect("slack:U_GRANT", "C1")).toBe(true);
+    expect(store.getRoleRow("slack:U_GRANT", "C1")!.source).toBe("grant");
+    store.close();
   });
 });

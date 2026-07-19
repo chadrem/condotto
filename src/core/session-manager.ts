@@ -8,6 +8,7 @@ import type {
   HarnessTurnOptions,
   InboundEvent,
   Principal,
+  Role,
   SurfaceAdapter,
 } from "./types";
 import { principalKey } from "./types";
@@ -17,6 +18,13 @@ import { WorktreeManager } from "./worktrees";
 import { CommandRunner, type CommandRunnerLike } from "./command-runner";
 import { frameMessage } from "./framing";
 import { evaluate, describeCall, type PolicyContext, type PolicyConcern } from "./policy";
+
+/**
+ * A surface-qualified principal key, e.g. "slack:U0123ABC" (M3.8 grant/revoke).
+ * Same shape config validates (config.ts) — the adapter resolves a Slack mention to
+ * this before it reaches the core, or emits a sentinel that fails this test.
+ */
+const VALID_PRINCIPAL = /^[a-z0-9_]+:.+$/i;
 
 /** Human-facing warning text for a policy concern surfaced on an approval. */
 const CONCERN_TEXT: Record<PolicyConcern, string> = {
@@ -139,6 +147,8 @@ function threadCommandHelp(): string {
     `Architect commands — mention me in this thread:`,
     `• \`@Conduit model <opus|sonnet|fable>\` / \`@Conduit effort <low…max>\` — tune the implementer`,
     `• \`@Conduit subagents on|off\` · \`@Conduit workflows on|off\` · \`@Conduit ultra on|off\` — multi-agent power (opt-in, gated)`,
+    `• \`@Conduit auto-approve on|off\` — run an architect's own turns without the Approve click (on by default)`,
+    `• \`@Conduit grant @user architect [everywhere]\` · \`@Conduit revoke @user\` — delegate authority (this channel, or everywhere)`,
     `• \`@Conduit land\` / \`@Conduit deploy\` — run the repo's ship path (gated)`,
     `• \`@Conduit budget <usd>\` — raise this thread's cost budget`,
     `• \`@Conduit status\` — list sessions · \`@Conduit stop\` — end this session`,
@@ -171,6 +181,11 @@ export interface SessionManagerOptions {
    */
   defaultModel?: string;
   defaultEffort?: string;
+  /**
+   * Daemon-wide default for architect self-approve (M3.8), used when a session's
+   * repo sets no `default_auto_approve`. On by default (DESIGN §4:441-444).
+   */
+  defaultAutoApprove?: boolean;
 }
 
 /** Prefix marking an approval whose action the daemon runs itself (land/deploy) */
@@ -211,6 +226,7 @@ export class SessionManager {
   private readonly defaultCostCapUsd: number;
   private readonly defaultModel: string;
   private readonly defaultEffort: string;
+  private readonly defaultAutoApprove: boolean;
   private readonly turnSlots: Semaphore;
   private readonly commandRunner: CommandRunnerLike;
 
@@ -224,6 +240,7 @@ export class SessionManager {
     this.defaultCostCapUsd = opts.defaultCostCapUsd ?? 10;
     this.defaultModel = opts.defaultModel ?? "opus";
     this.defaultEffort = opts.defaultEffort ?? "high";
+    this.defaultAutoApprove = opts.defaultAutoApprove ?? true;
     this.turnSlots = new Semaphore(Math.max(1, opts.maxConcurrentTurns ?? 6));
     this.commandRunner = opts.commandRunner ?? new CommandRunner();
   }
@@ -269,6 +286,7 @@ export class SessionManager {
       if (session.workflows === 1) parts.push(session.workflow_write === 1 ? "*workflows on* (worktree-write)" : "*workflows on*");
     }
     if (this.isUltra(session) && session.workflow_write === 1) parts.push("worktree-write");
+    parts.push(session.auto_approve === 1 ? "*auto-approve on*" : "auto-approve off");
     return parts.join(", ");
   }
 
@@ -292,6 +310,11 @@ export class SessionManager {
     if (workflows && session.workflow_write === 1) {
       lines.push("• ⚠️ *workflow worktree-write ON* — workflow agents write in this worktree without per-write approval");
     }
+    lines.push(
+      session.auto_approve === 1
+        ? "• ⚡ auto-approve ON — an architect's own turns skip the Approve click (credential/host-escape actions still refused; other people still gated)"
+        : "• auto-approve off — every gated action waits for an Approve click",
+    );
     if (repo?.trusted === 1) lines.push("• 🔐 trusted repo — loading its `CLAUDE.md`, skills, and `.claude/` config");
     if (repo?.test_cmd) lines.push(`• tests \`${repo.test_cmd}\` (auto-run, no approval)`);
     return lines.join("\n");
@@ -392,6 +415,15 @@ export class SessionManager {
       case "ultra":
         await this.setUltra(event.conv, event.author, event.args);
         break;
+      case "auto-approve":
+        await this.setAutoApprove(event.conv, event.author, event.args);
+        break;
+      case "grant":
+        await this.grantRole(event.conv, event.author, event.args);
+        break;
+      case "revoke":
+        await this.revokeRole(event.conv, event.author, event.args);
+        break;
       case "help":
         await this.guide(event.conv);
         break;
@@ -468,6 +500,8 @@ export class SessionManager {
     if (repo.default_effort && !this.supportsEffort(repo.default_effort)) {
       this.log(`[assign] repo ${repo.name} default_effort "${repo.default_effort}" is unsupported — using daemon default`);
     }
+    // Seed architect self-approve (M3.8): repo override (0/1), else daemon default.
+    const seedAutoApprove = repo.default_auto_approve ?? (this.defaultAutoApprove ? 1 : 0);
 
     let session: SessionRow;
     try {
@@ -487,6 +521,8 @@ export class SessionManager {
         // Seed model/effort (M3.5); null = fall back to the daemon default at turn time.
         model: seedModel,
         effort: seedEffort,
+        // Seed architect self-approve (M3.8).
+        auto_approve: seedAutoApprove,
       });
     } catch (err) {
       if (err instanceof ConflictError) {
@@ -905,6 +941,145 @@ export class SessionManager {
   }
 
   /**
+   * `@Conduit auto-approve on|off` (M3.8). When on, a gated tool call on a turn an
+   * architect initiated runs WITHOUT the Approve click — the architect is already
+   * the trusted human driving (DESIGN §4:441-444 sanctions this per-thread
+   * widening). The hard-deny floor (out-of-worktree, credential/secret files,
+   * daemon secrets, `rm -rf` escapes) still refuses regardless; members' turns
+   * still gate; and it applies only on verified-identity surfaces. Architect-only.
+   */
+  private async setAutoApprove(conv: ConversationRef, author: Principal, args: string): Promise<void> {
+    const surface = this.surfaceFor(conv);
+    const session = this.store.getSessionByConversation(conv.surfaceId, conv.conversationId);
+    if (!session || session.status === "stopped") {
+      await surface.post(conv, { text: "No active session in this thread." });
+      return;
+    }
+    if (!this.store.isArchitect(principalKey(author), conv.channelId)) {
+      this.store.audit({ sessionId: session.id, actor: principalKey(author), event: "authz_denied", detail: { action: "auto-approve" } });
+      await surface.post(conv, { text: "Only architects can change auto-approve." });
+      return;
+    }
+    const on = this.parseOnOff(args);
+    if (on === null) {
+      await surface.post(conv, {
+        text: `Usage: \`@Conduit auto-approve on|off\`. Currently ${session.auto_approve === 1 ? "on" : "off"}.`,
+      });
+      return;
+    }
+    this.store.setSessionAutoApprove(session.id, on);
+    this.store.audit({ sessionId: session.id, actor: principalKey(author), event: "auto_approve_set", detail: { on } });
+    const fresh = this.store.getSession(session.id)!;
+    await surface.post(conv, {
+      text:
+        (on
+          ? "Auto-approve on — your (architect) turns run without the Approve click. I still refuse credential/host-escape actions, and nothing changes for anyone else's messages. "
+          : "Auto-approve off — your turns are gated like everyone's again. ") +
+        `(${this.capabilitySummary(fresh)}) Takes effect on your next message.`,
+    });
+  }
+
+  /**
+   * `@Conduit grant @user <architect|member|observer> [everywhere]` (M3.8). An
+   * architect delegates authority to another surface-verified user. Channel-scoped
+   * by default ("this project"); `everywhere`/`global` = all channels. Persisted as
+   * a `source='grant'` row that survives the boot reseed (config rows don't). The
+   * adapter has already resolved the Slack `@mention` to a principal key in `args`
+   * (or the sentinel `?` if it couldn't), so no surface id shape reaches here.
+   * Architect-only; operates at the channel level, so it needs no active session.
+   */
+  private async grantRole(conv: ConversationRef, author: Principal, args: string): Promise<void> {
+    const surface = this.surfaceFor(conv);
+    if (!this.store.isArchitect(principalKey(author), conv.channelId)) {
+      this.store.audit({ actor: principalKey(author), event: "authz_denied", detail: { action: "grant", channel: conv.channelId } });
+      await surface.post(conv, { text: "Only architects can grant roles." });
+      return;
+    }
+    const [target = "", roleTok = "", modifier] = args.trim().split(/\s+/);
+    const usage = "Usage: `@Conduit grant @user <architect|member|observer> [everywhere]`.";
+    if (!VALID_PRINCIPAL.test(target)) {
+      await surface.post(conv, { text: `Couldn't find that user — @-mention them with Slack's autocomplete so it links to their account, e.g. \`@Conduit grant @abby architect\`. ${usage}` });
+      return;
+    }
+    if (roleTok !== "architect" && roleTok !== "member" && roleTok !== "observer") {
+      await surface.post(conv, { text: usage });
+      return;
+    }
+    const role: Role = roleTok;
+    const scope = this.scopeFromModifier(modifier, conv.channelId);
+    if (scope === null) {
+      await surface.post(conv, { text: `Unknown option \`${modifier}\`. ${usage}` });
+      return;
+    }
+    // Integrity guard: a runtime grant must not shadow-demote a config architect
+    // (config is authoritative). A channel `member` row would otherwise override a
+    // '*' config architect and survive reboot — a backdoor demotion.
+    if (role !== "architect") {
+      const exact = this.store.getRoleRow(target, scope);
+      const global = scope === "*" ? exact : this.store.getRoleRow(target, "*");
+      if ((exact?.source === "config" && exact.role === "architect") || (global?.source === "config" && global.role === "architect")) {
+        await surface.post(conv, { text: `\`${target}\` is a config architect — change that in \`conduit.roles.json\` / \`CONDUIT_ARCHITECTS\`, not with a runtime grant.` });
+        return;
+      }
+    }
+    this.store.setRole(target, role, scope, "grant", principalKey(author));
+    this.store.audit({ actor: principalKey(author), event: "role_granted", detail: { target, role, scope, by: principalKey(author) } });
+    const where = scope === "*" ? "across all channels" : "in this channel";
+    const extra =
+      role === "architect"
+        ? ` They can now approve gated actions and run architect commands ${where}.` +
+          (scope === "*" ? "" : " For another channel, run this in that channel; add `everywhere` for all channels.")
+        : "";
+    await surface.post(conv, { text: `Granted \`${role}\` to \`${target}\` ${where}.${extra}` });
+  }
+
+  /**
+   * `@Conduit revoke @user [everywhere]` (M3.8). Removes a runtime `grant` role;
+   * the user falls back to `member` (or whatever config says). Only `source='grant'`
+   * rows are removed — a config architect can't be revoked at runtime (change config
+   * instead). Architect-only; channel-level, no session needed.
+   */
+  private async revokeRole(conv: ConversationRef, author: Principal, args: string): Promise<void> {
+    const surface = this.surfaceFor(conv);
+    if (!this.store.isArchitect(principalKey(author), conv.channelId)) {
+      this.store.audit({ actor: principalKey(author), event: "authz_denied", detail: { action: "revoke", channel: conv.channelId } });
+      await surface.post(conv, { text: "Only architects can revoke roles." });
+      return;
+    }
+    const [target = "", modifier] = args.trim().split(/\s+/);
+    const usage = "Usage: `@Conduit revoke @user [everywhere]`.";
+    if (!VALID_PRINCIPAL.test(target)) {
+      await surface.post(conv, { text: `Couldn't find that user — @-mention them with Slack's autocomplete so it links. ${usage}` });
+      return;
+    }
+    const scope = this.scopeFromModifier(modifier, conv.channelId);
+    if (scope === null) {
+      await surface.post(conv, { text: `Unknown option \`${modifier}\`. ${usage}` });
+      return;
+    }
+    const removed = this.store.deleteRole(target, scope, "grant");
+    const where = scope === "*" ? "across all channels" : "in this channel";
+    if (removed > 0) {
+      this.store.audit({ actor: principalKey(author), event: "role_revoked", detail: { target, scope, by: principalKey(author) } });
+      await surface.post(conv, { text: `Revoked \`${target}\`'s granted role ${where} — back to member unless config says otherwise.` });
+      return;
+    }
+    if (this.store.isArchitect(target, scope === "*" ? conv.channelId : scope)) {
+      await surface.post(conv, { text: `\`${target}\`'s role comes from config, not a runtime grant — change it in \`conduit.roles.json\` / \`CONDUIT_ARCHITECTS\` and restart.` });
+      return;
+    }
+    await surface.post(conv, { text: `No runtime grant to revoke for \`${target}\` ${where}.` });
+  }
+
+  /** Resolve a grant/revoke scope modifier: none = this channel, everywhere/global = '*'. */
+  private scopeFromModifier(modifier: string | undefined, channelId: string): string | null {
+    if (modifier === undefined) return channelId;
+    const m = modifier.toLowerCase();
+    if (m === "everywhere" || m === "global") return "*";
+    return null;
+  }
+
+  /**
    * `@Conduit land` / `@Conduit deploy` (M3, DESIGN §2 journey 4). Architect-
    * ordered, and still gated behind an explicit Approve/Deny click (§4: the
    * deploy path is a gated action). Records a `conduit:land`/`conduit:deploy`
@@ -1069,6 +1244,8 @@ export class SessionManager {
           framedText: framed,
           placeholder: "…thinking",
           inbound: { principal: principalKey(event.author), text: event.text },
+          // M3.8: the turn's initiator governs architect auto-approve.
+          initiator: principalKey(event.author),
         }),
       )
       .catch((err) => this.log(`[session ${session.id}] turn failed: ${err}`));
@@ -1164,6 +1341,10 @@ export class SessionManager {
           conv,
           framedText: "",
           placeholder: outcome === "approved" ? "…applying the approved action" : "…noting your decision",
+          // M3.8: carry the ORIGINAL initiator (never the approving decider) so a
+          // member-initiated turn can't be laundered into architect auto-approval;
+          // an architect-initiated turn stays consistent across the resume.
+          initiator: approval.initiated_by ?? undefined,
         }),
       )
       .catch((err) => this.log(`[session ${session.id}] resume after approval failed: ${err}`));
@@ -1183,8 +1364,16 @@ export class SessionManager {
     framedText: string;
     placeholder: string;
     inbound?: { principal: string; text: string };
+    /**
+     * M3.8: the principalKey of the human whose turn this is — the identity that
+     * governs architect auto-approve. For a fresh human turn it equals
+     * `inbound.principal`; for an approval-resume it is the ORIGINAL initiator
+     * carried from the approval (never the approving decider — that would launder
+     * a member's turn into architect authority). Absent = never auto-approve.
+     */
+    initiator?: string;
   }): Promise<void> {
-    const { sessionId, conv, framedText, placeholder, inbound } = params;
+    const { sessionId, conv, framedText, placeholder, inbound, initiator } = params;
     // Re-read the row: an earlier queued turn (or a stop) may have changed it.
     const session = this.store.getSession(sessionId);
     if (!session || session.status === "stopped") return;
@@ -1256,6 +1445,19 @@ export class SessionManager {
       this.store.audit({ sessionId, actor: inbound.principal, event: "message_in" });
     }
 
+    // M3.8 architect self-approve: an architect driving their own turn has already
+    // exercised their authority, so a gate-tier action runs without a redundant
+    // Approve click (DESIGN §4:441-444 sanctions this per-thread widening). Resolved
+    // ONCE per turn (snapshots authority for the turn; a mid-turn revoke takes effect
+    // next turn). Requires a verified-identity surface (§4: architect authority only
+    // from `verified` surfaces — never a spoofable sender). The hard-deny FLOOR is
+    // unaffected: `evaluate` returns `deny` for it, which never reaches this branch.
+    const autoApprove =
+      initiator != null &&
+      session.auto_approve === 1 &&
+      surface.capabilities.identityStrength === "verified" &&
+      this.store.isArchitect(initiator, session.channel_id);
+
     // The gate is THE security boundary (DESIGN.md §3, §4). It audits every
     // call and answers from the recorded approval (on a re-drive) or the policy
     // engine. A `gate` result maps to defer in the harness adapter.
@@ -1277,14 +1479,30 @@ export class SessionManager {
         auditDecision = "deny(expired)";
       } else {
         const pd = evaluate(call, policyCtx);
-        auditDecision = pd.action;
-        if (pd.action === "gate" && pd.concern && call.id) gateConcerns.set(call.id, pd.concern);
-        decision =
-          pd.action === "allow"
-            ? { decision: "allow" }
-            : pd.action === "deny"
-              ? { decision: "deny", reason: pd.reason }
-              : { decision: "gate" };
+        if (pd.action === "gate" && autoApprove) {
+          // Architect-initiated gate → allow, no click. Record an already-decided
+          // approval (ledger stays complete) + audit, both attributed to the
+          // architect whose standing authority stood in — NOT "agent". `deny`
+          // (hard-deny) never enters this branch, so the floor is untouched.
+          this.store.recordAutoApproval({ sessionId, toolUseId: call.id, toolName: call.name, toolInput: call.input, initiator: initiator! });
+          this.store.audit({
+            sessionId,
+            actor: initiator!,
+            event: "auto_approved",
+            detail: { tool: call.name, toolUseId: call.id || undefined, summary: describeCall(call), ...(pd.concern ? { concern: pd.concern } : {}) },
+          });
+          decision = { decision: "allow" };
+          auditDecision = "allow(auto-approved)";
+        } else {
+          auditDecision = pd.action;
+          if (pd.action === "gate" && pd.concern && call.id) gateConcerns.set(call.id, pd.concern);
+          decision =
+            pd.action === "allow"
+              ? { decision: "allow" }
+              : pd.action === "deny"
+                ? { decision: "deny", reason: pd.reason }
+                : { decision: "gate" };
+        }
       }
       this.store.audit({
         sessionId,
@@ -1437,6 +1655,7 @@ export class SessionManager {
               ev.call,
               deliverFinal,
               ev.call.id ? gateConcerns.get(ev.call.id) : undefined,
+              initiator,
             );
             break;
           case "error":
@@ -1484,6 +1703,8 @@ export class SessionManager {
     call: { id: string; name: string; input: unknown },
     deliverFinal: (text: string) => Promise<void>,
     concern?: PolicyConcern,
+    /** M3.8: the turn's initiator, persisted so a resume is governed by it. */
+    initiatedBy?: string,
   ): Promise<void> {
     const requestId = crypto.randomUUID();
     const summary = describeCall(call);
@@ -1494,6 +1715,7 @@ export class SessionManager {
       toolUseId: call.id,
       toolName: call.name,
       toolInput: call.input,
+      initiatedBy,
     });
     this.store.audit({
       sessionId,

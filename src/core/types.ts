@@ -61,7 +61,16 @@ export type CommandName =
   // M3.6 — the multi-agent Workflow tool (opt-in, gated + confined). Args are
   // "on"|"off" or "write on"|"write off" (the worktree-write opt-in, Tier 3).
   | "workflows"
-  | "ultra";
+  | "ultra"
+  // M3.8 — architect self-approve toggle ("on"|"off"): an architect-initiated
+  // turn's gated actions run without the Approve click (hard-deny floor stays).
+  | "auto-approve"
+  // M3.8 — in-thread role delegation (architect-only). `grant` args carry the
+  // resolved target principal key + role (+ optional "everywhere"); `revoke`
+  // carries the target (+ optional "everywhere"). The adapter resolves the Slack
+  // <@U…> mention to a principal key so no surface id shape crosses the port.
+  | "grant"
+  | "revoke";
 
 export type InboundEvent =
   | {
@@ -374,4 +383,11 @@ export interface RepoConfig {
    * throwaway `testrepo` stays untrusted.
    */
   trusted?: boolean;
+  /**
+   * Per-repo default for the M3.8 architect self-approve setting. Seeded onto
+   * each new session (the architect can then toggle it per thread with
+   * `@Conduit auto-approve on|off`). `undefined` = fall back to the daemon-wide
+   * default (`SessionManagerOptions.defaultAutoApprove`, on by default).
+   */
+  autoApprove?: boolean;
 }
