@@ -117,19 +117,24 @@ Two paths. Pick one.
 
 ### Option A — from source (Bun)
 
-Condotto is TypeScript run directly by Bun — no build step.
+Condotto is TypeScript run directly by Bun. There is no build step. Run these
+four commands.
 
 ```sh
-# 1. Install Bun (https://bun.sh)
-curl -fsSL https://bun.sh/install | bash
-
-# 2. Get the code and its dependencies
+curl -fsSL https://bun.sh/install | bash            # install Bun (https://bun.sh)
 git clone https://github.com/chadrem/condotto.git
 cd condotto
-bun install
+bun install --frozen-lockfile                       # always use the lockfile
 ```
 
-You'll run it with `bun start` (see [Run](#run)).
+**Always install with `--frozen-lockfile`.** It gives you the exact dependency
+versions Condotto is tested against. Slack Bolt is pinned to v4 on purpose,
+because Bolt 5 cannot run on Bun. Never run `bun add @slack/bolt`, which
+upgrades you to v5 and produces a daemon that connects and then fails its
+heartbeat forever. If that already happened to you, see
+[Troubleshooting](#troubleshooting).
+
+Next: [create the Slack app](#create-the-slack-app).
 
 ### Option B — prebuilt binary + `claude` sidecar
 
@@ -574,6 +579,7 @@ first). Worktrees are disposable; their branches live in your real repos.
 | Binary: "found no `claude` CLI beside it" | Ship `claude` next to the `condotto` binary, or set `CONDOTTO_CLAUDE_CLI` to an installed `claude`. |
 | Boot: `default model "x" not in harness models` | Use `opus`, `sonnet`, or `fable` for `[defaults].model`. |
 | Approve button does nothing | The clicker isn't an architect. Check `architects` / `@Condotto grant`. |
+| Repeating `Failed to send ping to Slack (… undici_1.ping is not a function)` | You have Bolt 5 / `@slack/socket-mode@3`, which Bun can't run. `rm -rf node_modules && bun install --frozen-lockfile`, then confirm with `bun pm ls \| grep -E 'bolt\|socket-mode'`. |
 
 ---
 

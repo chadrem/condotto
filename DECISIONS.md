@@ -1906,3 +1906,66 @@ the worktrees root, and a `statePath()` for phase-1→phase-2 handoff:
 
 README gains a **Development** section — `bun test`, `check:ports`, and the
 smokes — which the project had never documented despite being open source.
+
+## 2026-07-20 — Bolt is pinned to v4: `@slack/socket-mode@3` cannot run on Bun
+
+**Symptom.** A Linux VM running the daemon connected to Socket Mode and then
+logged, every 5 seconds:
+
+```
+[ERROR] bolt-app Failed to send ping to Slack (error: TypeError:
+(0, undici_1.ping) is not a function. (In '(0, undici_1.ping)(this.websocket,
+Buffer.from(pingMessage))', '(0, undici_1.ping)' is undefined))
+```
+
+**Cause (verified).** `@slack/socket-mode` v3.0.0 rewrote its WebSocket layer
+from the `ws` library onto undici — `new undici.WebSocket(...)` for the socket,
+`undici.ping()` for the client keepalive, and the `undici:websocket:ping` /
+`:pong` diagnostics channels for frame observation. Bun ships its **own**
+built-in `undici` shim that shadows `node_modules/undici`, and that shim has no
+`ping` export:
+
+```
+bun  -e 'console.log(typeof require("undici").ping)'  → undefined
+node -e 'console.log(typeof require("undici").ping)'  → function   (undici 7.28.0)
+```
+
+`require.resolve("undici")` under Bun returns the bare string `"undici"` — i.e.
+the builtin, not the real package on disk. Installing undici explicitly does not
+help; the shim wins.
+
+**Why one machine and not the other.** The repo pins `"@slack/bolt": "^4"` and
+commits `bun.lock` (Bolt 4.7.3 → socket-mode **2.0.7**, `ws`-based, no undici).
+Every published Bolt 4.x depends on `@slack/socket-mode: ^2.x` — checked 4.4.0
+through 4.7.3 — so no in-range install can reach socket-mode 3. Only Bolt
+**5.0.0** declares `^3.0.0`. The VM therefore had `node_modules` that did not
+come from this repo's manifest, almost certainly a bare `bun add @slack/bolt`
+(which writes `^5`) — the exact command CLAUDE.md's toolchain section used to
+give. That instruction is now pinned to `'@slack/bolt@^4'` with the reason.
+
+**Blast radius, traced.** The throw is caught and logged, and it does *not*
+escalate the way the code appears to: `pingAttemptCount += 1` sits after the
+`ping()` call inside the same `try`, so it never increments, and
+`lastPongReceivedTimestamp` stays undefined because the client never
+successfully pings. Both paths to `isInvalid` are therefore dead — the client
+never tears the connection down. The real cost is silent: **half-open
+connection detection is gone**, and the daemon would sit on a dead socket
+believing it is connected.
+
+**Not verified:** whether Bun's undici `WebSocket` publishes the
+`undici:websocket:ping` diagnostics channel. If it doesn't, the *server* ping
+monitor also never resets and `serverPingTimeoutMS` (30s) would drive a
+reconnect loop on top of the above. Untested — it needs a live socket. It does
+not change the remedy.
+
+**Decision.** Stay on Bolt v4 until socket-mode 3 works on Bun. This is not a
+patchable bug on our side: it's Bun's undici shim missing a surface the library
+builds on, so the fix has to come from Bun (export `ping`, publish the
+diagnostics channels) or from Slack (drop the undici dependency). Revisit when
+Bun's undici coverage moves; re-run the two one-liners above as the check.
+
+**Consequences.** CLAUDE.md toolchain deps pinned to `'@slack/bolt@^4'` with the
+"never bare `bun add`" rule. README's from-source install now uses `bun install
+--frozen-lockfile`, explains the pin, and gives `bun pm ls | grep -E
+'bolt|socket-mode'` as the verification (want bolt@4.x, socket-mode@2.x); the
+troubleshooting table gains a row keyed on the `undici_1.ping` error text.

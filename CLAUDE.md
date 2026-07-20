@@ -22,7 +22,7 @@ Runtime is **Bun 1.2+** — TypeScript run directly, no build step, no transpile
 
 - Run: `bun run <file>` — daemon and scripts run directly from source
 - Test: `bun test` (built-in runner); single file: `bun test <path>`
-- Deps: `bun add @anthropic-ai/claude-agent-sdk`, `bun add @slack/bolt`. SQLite is built in via `bun:sqlite` — no package.
+- Deps: `bun add @anthropic-ai/claude-agent-sdk`, `bun add '@slack/bolt@^4'`. SQLite is built in via `bun:sqlite` — no package. **Bolt is pinned to v4 and must stay there** — Bolt 5 pulls `@slack/socket-mode@^3`, which Bun cannot run (see DECISIONS.md 2026-07-20). On an existing clone always `bun install --frozen-lockfile`, never a bare `bun add @slack/bolt`.
 - Auth: the machine's Claude subscription login (keychain OAuth; verified headless 2026-07-16) — no `ANTHROPIC_API_KEY` in this deployment. Headless box alternative: `claude setup-token` → `CLAUDE_CODE_OAUTH_TOKEN`
 - Distribution target: `bun build --compile` → single binary
 
