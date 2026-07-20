@@ -2051,12 +2051,51 @@ The Slack mention grammar now accepts a 3-word `assign` — previously
 `assign repo sub` matched no rule and was **silently swallowed as conversation**,
 giving the architect no error at all.
 
-**Not verified (live testing still owed, per the plan).** Whether the SDK
-discovers a root-only `CLAUDE.md`, root `.claude/settings.json`, or root-level
-skills by walking *up* from a sub-project cwd — nothing in the SDK docs states it,
-and trusted monorepos are exactly the population with a root `CLAUDE.md`.
-`additionalDirectories` is the lever if not. Also unverified: whether subagent and
-workflow agents inherit the sub-project cwd.
+**Verified live the same day** (`bun run scripts/smoke-monorepo.ts`, a new
+self-provisioning throwaway monorepo fixture driving the REAL adapter through the
+REAL policy engine, with a `gate` treated as an approved architect click). All
+five open questions came back yes:
+
+| | Question | Result |
+|---|---|---|
+| Q1 | Root `CLAUDE.md` discovered from a sub-project cwd | **yes** — the SDK walks up |
+| Q1b | Sub-project `CLAUDE.md` discovered | **yes** — both load |
+| Q2 | Root-level skills discovered (`skills:"all"`) | **yes** |
+| Q3 | Sibling package above cwd readable **and** writable | **yes** (read allowed, write gated then run) |
+| Q4 | Worktree boundary still enforced from a deeper cwd | **yes** — `/etc/hosts` and `~/.ssh/config` both denied |
+| Q5 | Subagents inherit the sub-project cwd | **yes** |
+
+Q1/Q2 are answered behaviourally, not by asking the model to introspect its
+context: each `CLAUDE.md` defines a codename and the agent either produces it or
+does not. Worth keeping that shape if the smoke is ever extended.
+
+**Unexpected finding, PRE-EXISTING and unrelated to monorepos: the operator's
+user-level skills reach every session, trusted or not.** The Q2 skill list
+contained the operator's own personal skills (`update-config`, `schedule`,
+`fewer-permission-prompts`, …), not just the fixture's. A follow-up probe against
+a repo with NO skills of its own listed them in **both** postures — including
+`projectConfig: false`, the untrusted default. That contradicts the isolation the
+adapter documents ("Untrusted (default) stays isolated … `"user"` and `"local"`
+are never included").
+
+**Cause (verified in `sdk.d.ts:1889-1890`):** omitting the `skills` option is
+explicitly *not* "skills off" — "no SDK auto-configuration. **The CLI's own
+defaults still apply.**" `settingSources: []` governs settings/CLAUDE.md/MCP, not
+skill discovery. So the untrusted path, which omits `skills` entirely, inherits
+the CLI default and loads `~/.claude` skills.
+
+**Blast radius, traced.** Not a gate bypass: a skill is instructions, and every
+tool call it makes still flows through the §4 hook. Skill *files* are also
+unreadable — `sdk.d.ts:1895-1898` warns they stay on disk and reachable via
+Read/Bash, but `~/.claude` is outside the worktree, so confinement already covers
+that. The real exposure is that an agent driven by Slack members carries the
+operator's personal instruction set, some of which (`update-config`, `schedule`,
+`fewer-permission-prompts`) exists to widen permissions — gated, but a plausible
+thing for an architect on auto-approve to wave through. Logged rather than fixed
+in this commit: the untrusted half has an obvious lever (`skills: []`, an empty
+allowlist, which the SDK treats as "enable only these"), but the trusted half is a
+design question — `"all"` is discovery-wide, and restricting it to a repo's OWN
+skills means enumerating them from the worktree.
 
 **Tests:** `tests/policy.test.ts` pins the invariant table (relative sibling
 allowed; `/etc/passwd`, `~/.aws/credentials`, deep `../`, and the `/wt-evil`

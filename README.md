@@ -643,6 +643,7 @@ never touch a repo you care about.
 bun run smoke:gate      # gate a Write -> defer; then smoke:approve resumes and approves it
 bun run smoke:create    # a real session + turn; then smoke:resume proves park & resume
 bun run smoke:workflows # multi-agent Workflow, gated and confined
+bun run smoke:monorepo  # sub-project cwd: project config, cross-package edits, boundary
 bun run smoke:reset     # delete the scratch dir; the next run rebuilds it
 ```
 
