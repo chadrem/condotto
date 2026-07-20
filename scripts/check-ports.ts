@@ -12,7 +12,10 @@ const SRC = join(ROOT, "src");
 const ADAPTERS_PREFIX = join("src", "adapters") + sep;
 
 const FORBIDDEN_IMPORTS = ["@slack/", "@anthropic-ai/claude-agent-sdk"];
-const FORBIDDEN_CORE_TOKENS = ["thread_ts", "block_actions", "xoxb-", "xapp-"];
+// `<@` is Slack's mention markup. The core refers to people with `mentionToken`
+// and lets the adapter render it natively; minting surface markup in the core is
+// the port erosion that produced the raw-id leak (DECISIONS 2026-07-20).
+const FORBIDDEN_CORE_TOKENS = ["thread_ts", "block_actions", "xoxb-", "xapp-", "<@"];
 /** The composition root is the one non-adapter file allowed to import adapters. */
 const COMPOSITION_ROOTS = new Set([join("src", "daemon.ts")]);
 

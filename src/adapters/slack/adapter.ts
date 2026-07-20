@@ -24,6 +24,7 @@ import {
   resolveApprovalMessage,
   resolveChoiceMessage,
 } from "./render";
+import { DisplayNameCache, slackUserSource } from "./users";
 
 /**
  * Authority the adapter consults for the ephemeral "architects only" response
@@ -214,25 +215,45 @@ export class SlackAdapter implements SurfaceAdapter {
   private botUserId: string | null = null;
   private emit: Emit = () => {};
   private dedup = new DedupWindow();
+  private names: DisplayNameCache | null = null;
+  /**
+   * Per-conversation tail of the name-resolution chain. Resolving a name is
+   * async, so without serializing, two quick messages could emit out of order and
+   * land in the session transcript reversed.
+   */
+  private nameTail = new Map<string, Promise<void>>();
 
   constructor(
     tokens: { botToken: string; appToken: string },
     private authority: SurfaceAuthority,
     private operator: OperatorConsole,
     private log: (msg: string) => void = console.log,
+    /** Test seam: inject a name cache so `handleMessage` runs without a live client. */
+    names?: DisplayNameCache,
   ) {
+    this.names = names ?? null;
     this.app = new App({
       token: tokens.botToken,
       appToken: tokens.appToken,
       socketMode: true,
+      // Without this, Bolt verifies the token from the CONSTRUCTOR, unawaited: a
+      // bad token becomes an unhandled rejection nobody can catch or report.
+      // Deferring moves it into `start()`, where a failure is ours to surface.
+      deferInitialization: true,
     });
   }
 
   async start(emit: Emit): Promise<void> {
     this.emit = emit;
 
+    // Deferred from the constructor so a bad token throws HERE, awaited.
+    await this.app.init();
+
     const auth = await this.app.client.auth.test();
     this.botUserId = (auth.user_id as string) ?? null;
+    // Needs the `users:read` scope. If it is missing, every lookup fails soft and
+    // messages simply arrive without a display name.
+    if (!this.names) this.names = new DisplayNameCache(slackUserSource(this.app.client as any));
 
     this.app.command("/condotto", async ({ command, ack, respond }) => {
       await ack();
@@ -438,18 +459,35 @@ export class SlackAdapter implements SurfaceAdapter {
         }))
       : [];
 
-    this.emit({
-      kind: "message",
-      conv: {
-        surfaceId: SURFACE_ID,
-        channelId: String(event.channel),
-        conversationId: encodeConversationId(String(event.channel), String(event.thread_ts)),
-      },
-      author: { surface: SURFACE_ID, externalId: String(event.user) },
-      text,
-      mentioned: this.mentioned(text),
-      attachments,
-    });
+    const conv = {
+      surfaceId: SURFACE_ID,
+      channelId: String(event.channel),
+      conversationId: encodeConversationId(String(event.channel), String(event.thread_ts)),
+    };
+    const author = { surface: SURFACE_ID, externalId: String(event.user) };
+    const mentioned = this.mentioned(text);
+
+    // Every sync guard above has already run, so nothing below can change whether
+    // this message counts. Resolving the author's display name is best-effort:
+    // the emit happens either way, and only the `authorDisplayName` decoration is
+    // lost on failure. Chained per conversation so arrival order is preserved.
+    const userId = String(event.user);
+    const prev = this.nameTail.get(conv.conversationId) ?? Promise.resolve();
+    // `tail` must reference ITSELF in the cleanup: the map holds the post-cleanup
+    // promise, so comparing against the pre-cleanup one would never match and the
+    // entry would leak for the daemon's lifetime (one per thread, forever).
+    const tail: Promise<void> = prev
+      .then(() => this.names?.get(userId))
+      .catch(() => undefined)
+      .then((authorDisplayName) => {
+        this.emit({ kind: "message", conv, author, text, mentioned, attachments, authorDisplayName });
+      })
+      .then(() => {
+        // Only the LAST message in a conversation clears the tail; an earlier one
+        // finding a newer tail in place leaves it alone.
+        if (this.nameTail.get(conv.conversationId) === tail) this.nameTail.delete(conv.conversationId);
+      });
+    this.nameTail.set(conv.conversationId, tail);
   }
 
   // -- outbound -------------------------------------------------------------

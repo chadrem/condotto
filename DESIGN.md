@@ -224,6 +224,15 @@ platform imports outside `adapters/` fail review.
 SMS: Twilio webhooks; web app: `Bun.serve` + WebSocket), translates platform
 events into domain events, and renders domain output natively:
 
+**Identity crosses the port in both directions, and never as surface markup.**
+Inbound, the adapter resolves the platform's mention form to a `Principal`.
+Outbound, the core refers to a person with `mentionToken(key)` — `@[[slack:U0ABBY]]`
+— and each adapter renders that natively (Slack: a real mention; SMS: a bare
+name). The core never learns what a mention looks like, and a surface that cannot
+notify anyone degrades it to text with nothing to special-case. `check-ports`
+fails the build if `<@` appears anywhere outside `adapters/`. The token is
+display only: authority is always a `Principal`, never rendered text.
+
 ```typescript
 interface SurfaceAdapter {
   readonly id: string;                       // "slack" | "teams" | "email" | …
@@ -1030,6 +1039,15 @@ bypass around app permissions.
   message text for Slack, escape **before** you substitute mention markup or
   you'll destroy the `<`/`>`. Resolve names→IDs from `users.list`; fail loudly
   on ambiguous matches rather than pinging the wrong person.
+  `render.ts:linkifyMentions` is the **one** place that mints a mention from
+  message *text*. (The resolved approval/choice footers also emit `<@…>`, but
+  from the verified click payload — an id the platform gave us, never content.)
+  It runs after `escapeSlack` and while code spans are held in
+  placeholders, so a quoted token stays literal, and it accepts only the core's
+  `mentionToken` — a raw `<@U…>` in model output stays escaped, which is what
+  keeps the agent from minting a ping out of untrusted thread content. Having
+  written this rule down but never built the substitution step is exactly how
+  the raw-id leak happened (DECISIONS 2026-07-20).
 - **File attachments:** upload via the current `files_upload_v2`-style flow
   (getUploadURLExternal → PUT bytes → completeUploadExternal). Downloading a
   file's `url_private` requires the `Authorization: Bearer` header; a plain GET
@@ -1222,8 +1240,10 @@ placeholders under Socket Mode.
 §9.4); commands and approvals → `commands` + Interactivity (`block_actions`
 arrive over the socket); the mention path → `app_mentions:read`; thread reads
 → `channels:history`/`groups:history` (add `im:history`/`mpim:history` only if
-DMs are supported); attachments → `files:read`/`files:write`; principal
-resolution → `users:read`. Add `reactions:read` plus the `reaction_added`
+DMs are supported); attachments → `files:read`/`files:write`; author
+display names → `users:read` (decoration for the agent's prose, never authority
+— see §4; the `grant`/`revoke` path needs no lookup, it reads the id straight
+out of the message's mention markup). Add `reactions:read` plus the `reaction_added`
 event only if the emoji-reaction assignment trigger (§9.3) is ever built.
 
 **Custom slash commands cannot be invoked inside message threads** (verified

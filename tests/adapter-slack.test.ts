@@ -1,7 +1,8 @@
 import { describe, expect, test } from "bun:test";
-import { parseMentionCommand, resolveUserMention, slashEphemeralText } from "../src/adapters/slack/adapter";
-import type { OperatorConsole } from "../src/adapters/slack/adapter";
-import type { Principal } from "../src/core/types";
+import { SlackAdapter, parseMentionCommand, resolveUserMention, slashEphemeralText } from "../src/adapters/slack/adapter";
+import type { OperatorConsole, SurfaceAuthority } from "../src/adapters/slack/adapter";
+import { DisplayNameCache } from "../src/adapters/slack/users";
+import type { InboundEvent, Principal } from "../src/core/types";
 
 // The Slack mention parser is a pure module-level function, so it can be unit
 // tested without a live Bolt App. `BOT` stands in for the bot's own user id.
@@ -114,5 +115,186 @@ describe("parseMentionCommand — existing forms still parse (regression)", () =
     expect(parse("take a look at src/x.ts please")).toBeNull();
     expect(parseMentionCommand("grant <@U0ABBY> architect", null)).toBeNull(); // no bot id yet
     expect(parseMentionCommand("hello world", BOT)).toBeNull(); // not a mention of the bot
+  });
+});
+
+// -- the async name-resolution chain in handleMessage -------------------------
+//
+// `handleMessage` runs its sync guards, then hops through the display-name cache
+// before emitting. These tests drive the private method directly with raw Slack
+// event shapes, using the constructor's `names` test seam.
+//
+// No Slack transport is touched: the adapter passes `deferInitialization` to Bolt,
+// so constructing one performs no network call and needs no stubbing.
+
+const TOKENS = { botToken: "xoxb-test", appToken: "xapp-test" };
+const AUTHORITY: SurfaceAuthority = { isArchitect: () => true };
+const OPERATOR: OperatorConsole = { operatorStatus: () => "", channelStopGuidance: () => "" };
+
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+/** A Slack message event that passes every sync guard, overridable per test. */
+function messageEvent(over: Record<string, any> = {}): Record<string, any> {
+  return { user: "U0ABBY", channel: "C1", ts: "1700000001.000100", thread_ts: "1700000000.000100", text: "hi", ...over };
+}
+
+/** An adapter wired for `handleMessage` without a live client: `start()` normally
+ *  sets `botUserId` and `emit`, so we set them here. */
+function testAdapter(names?: DisplayNameCache) {
+  const emitted: InboundEvent[] = [];
+  const adapter = new SlackAdapter(TOKENS, AUTHORITY, OPERATOR, () => {}, names);
+  (adapter as any).botUserId = BOT;
+  (adapter as any).emit = (e: InboundEvent) => emitted.push(e);
+  const deliver = (event: Record<string, any>) => (adapter as any).handleMessage(event);
+  const tails = () => (adapter as any).nameTail as Map<string, Promise<void>>;
+  /** Wait for every in-flight name chain to settle (the chain self-clears). */
+  const settle = async (budgetMs = 2000) => {
+    const deadline = Date.now() + budgetMs;
+    while (tails().size > 0 && Date.now() < deadline) await sleep(5);
+    await sleep(5);
+  };
+  return { adapter, emitted, deliver, tails, settle };
+}
+
+describe("SlackAdapter.handleMessage — name resolution", () => {
+  test("the resolved display name reaches the emitted event as authorDisplayName", async () => {
+    const names = new DisplayNameCache(async () => "Abby");
+    const { emitted, deliver, settle } = testAdapter(names);
+    deliver(messageEvent());
+    await settle();
+    expect(emitted).toHaveLength(1);
+    expect(emitted[0]).toMatchObject({ kind: "message", text: "hi", authorDisplayName: "Abby" });
+  });
+
+  test("two messages in one conversation emit in ARRIVAL order even when the first name is slow", async () => {
+    const names = new DisplayNameCache(async (id) => {
+      if (id === "USLOW") await sleep(50);
+      return id === "USLOW" ? "Slow Sam" : "Quick Quinn";
+    });
+    const { emitted, deliver, settle } = testAdapter(names);
+    deliver(messageEvent({ user: "USLOW", ts: "1700000001.000100", text: "first" }));
+    deliver(messageEvent({ user: "UFAST", ts: "1700000002.000100", text: "second" }));
+    await settle();
+    // Without the per-conversation chain the instant lookup would overtake the
+    // slow one and the transcript would read backwards.
+    expect(emitted.map((e: any) => e.text)).toEqual(["first", "second"]);
+    expect(emitted.map((e: any) => e.authorDisplayName)).toEqual(["Slow Sam", "Quick Quinn"]);
+  });
+
+  test("ordering is PER-CONVERSATION — a slow lookup in one thread does not delay another", async () => {
+    const names = new DisplayNameCache(async (id) => {
+      if (id === "USLOW") await sleep(50);
+      return id;
+    });
+    const { emitted, deliver, settle } = testAdapter(names);
+    deliver(messageEvent({ user: "USLOW", thread_ts: "1700000000.000100", ts: "1700000001.000100", text: "thread A" }));
+    deliver(messageEvent({ user: "UFAST", thread_ts: "1700000009.000100", ts: "1700000002.000100", text: "thread B" }));
+    await settle();
+    expect(emitted.map((e: any) => e.text)).toEqual(["thread B", "thread A"]);
+  });
+
+  test("the nameTail entry is released once a conversation settles (no per-thread leak)", async () => {
+    const names = new DisplayNameCache(async (id) => id);
+    const { deliver, tails, settle } = testAdapter(names);
+    for (let i = 1; i <= 3; i++) {
+      deliver(messageEvent({ ts: `170000000${i}.000100`, thread_ts: "1700000000.000100" }));
+    }
+    deliver(messageEvent({ ts: "1700000009.000100", thread_ts: "1700000008.000100" }));
+    expect(tails().size).toBe(2); // both conversations in flight
+    await settle();
+    // The cleanup compares the map entry against the tail's OWN promise; comparing
+    // against the pre-cleanup promise never matches and leaks an entry per thread.
+    expect(tails().size).toBe(0);
+  });
+
+  test("a name source that REJECTS still emits the message, nameless", async () => {
+    const names = new DisplayNameCache(async () => {
+      throw new Error("users.info exploded");
+    });
+    const { emitted, deliver, settle } = testAdapter(names);
+    deliver(messageEvent());
+    await settle();
+    expect(emitted).toHaveLength(1);
+    expect((emitted[0] as any).authorDisplayName).toBeUndefined();
+  });
+
+  test("a name lookup that REJECTS outright still emits — the .catch is load-bearing", async () => {
+    const { emitted, deliver, settle } = testAdapter({
+      get: async () => {
+        throw new Error("cache exploded");
+      },
+    } as unknown as DisplayNameCache);
+    deliver(messageEvent());
+    await settle();
+    expect(emitted).toHaveLength(1);
+    expect((emitted[0] as any).authorDisplayName).toBeUndefined();
+  });
+
+  test("a name source that HANGS past the timeout still emits, nameless", async () => {
+    const names = new DisplayNameCache(() => new Promise<string | null>(() => {}), { timeoutMs: 25 });
+    const { emitted, deliver, settle } = testAdapter(names);
+    deliver(messageEvent());
+    expect(emitted).toHaveLength(0); // still waiting on the lookup
+    await settle();
+    expect(emitted).toHaveLength(1);
+    expect((emitted[0] as any).authorDisplayName).toBeUndefined();
+  });
+
+  test("an adapter that never started (no name cache) still emits, nameless", async () => {
+    const { adapter, emitted, deliver, settle } = testAdapter();
+    expect((adapter as any).names).toBeNull();
+    deliver(messageEvent());
+    await settle();
+    expect(emitted).toHaveLength(1);
+    expect((emitted[0] as any).authorDisplayName).toBeUndefined();
+  });
+});
+
+describe("SlackAdapter.handleMessage — sync guards run ahead of the async hop", () => {
+  test("a duplicate ts is dropped even while the first message's name lookup is in flight", async () => {
+    const names = new DisplayNameCache(async (id) => {
+      await sleep(40);
+      return id;
+    });
+    const { emitted, deliver, settle } = testAdapter(names);
+    const event = messageEvent({ ts: "1700000001.000100" });
+    deliver(event);
+    deliver({ ...event }); // Slack redelivery, arriving before the first resolves
+    await settle();
+    // Dedup is synchronous and first-seen-wins, so the await cannot defeat it.
+    expect(emitted).toHaveLength(1);
+  });
+
+  test("bot messages and thread-less chatter return before any name lookup happens", async () => {
+    let lookups = 0;
+    const names = new DisplayNameCache(async (id) => {
+      lookups++;
+      return id;
+    });
+    const { emitted, deliver, tails, settle } = testAdapter(names);
+    deliver(messageEvent({ bot_id: "B999", ts: "1700000001.000100" }));
+    deliver(messageEvent({ user: BOT, ts: "1700000002.000100" }));
+    deliver(messageEvent({ user: undefined, ts: "1700000003.000100" }));
+    deliver(messageEvent({ thread_ts: undefined, ts: "1700000004.000100" })); // top-level chatter
+    deliver(messageEvent({ subtype: "channel_join", ts: "1700000005.000100" }));
+    expect(tails().size).toBe(0); // no chain was ever started
+    await settle();
+    expect(emitted).toHaveLength(0);
+    expect(lookups).toBe(0);
+  });
+
+  test("a command mention and a bare/help mention are left to app_mention, unlooked-up", async () => {
+    let lookups = 0;
+    const names = new DisplayNameCache(async (id) => {
+      lookups++;
+      return id;
+    });
+    const { emitted, deliver, tails, settle } = testAdapter(names);
+    deliver(messageEvent({ text: `<@${BOT}> stop`, ts: "1700000001.000100" }));
+    deliver(messageEvent({ text: `<@${BOT}> help`, ts: "1700000002.000100" }));
+    expect(tails().size).toBe(0);
+    await settle();
+    expect(emitted).toHaveLength(0);
+    expect(lookups).toBe(0);
   });
 });

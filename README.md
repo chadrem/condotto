@@ -196,7 +196,8 @@ workspace you'll use it in. Then:
      private channels). Add `im:history` / `mpim:history` only if you support DMs.
    - `files:read`, `files:write` — download screenshots a human drops in, upload
      files the session produces.
-   - `users:read` — resolve user IDs ↔ names (needed for `@Condotto grant @user`).
+   - `users:read` — look up display names, so the agent refers to people by name
+     instead of by raw user ID.
 3. **Install to workspace** — this mints the **bot token** (`xoxb-…`). That's your
    `bot_token`.
 4. **Event Subscriptions** → on (no URL under Socket Mode). Subscribe to bot

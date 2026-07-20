@@ -2408,3 +2408,171 @@ cases both ways. `tests/memory.test.ts` covers `verifyMemoryTarget` against a
 planted symlink, a hard link, a subdirectory, and a directory-named-`.md`, plus the
 hardened sweep (hard links, unreadable subdirectory). 393 tests pass; `check:ports`
 and `tsc --noEmit` clean; `smoke:memory` re-run green end to end.
+
+## 2026-07-20 — Identity crosses the port as a token: the raw-id leak was three bugs
+
+**Report.** "Sometimes, instead of saying `@Some User`, it refers to the user with
+what I think is a Slack user ID like `UXXXXXX`." Intermittent, no reproduction.
+
+Three independent causes, and the intermittency was the tell that pointed at the
+right one.
+
+**1. The agent never learned anyone's name (the one actually observed).**
+`framing.ts` frames every inbound message as `user=slack:U0ABBY`, with an optional
+`display_name="…"` field. Nothing ever populated it: `authorDisplayName` was
+declared in `types.ts` and read in `session-manager.ts`, and `grep` found **zero
+writes** anywhere in `src/`. The Slack adapter simply never set it. So a raw
+principal key was the only handle the agent had on a human, and it echoed that —
+but only on turns where it named a person instead of saying "you." Hence
+"sometimes." The other two causes are 100% deterministic, which is how we ranked
+this one first.
+
+**2. No mention could be minted at all.** `escapeSlack` escapes `<` and `>`
+unconditionally, so even a perfectly-formed `<@U0ABBY>` became `&lt;@U0ABBY&gt;`.
+`render.ts` has carried the comment *"Escaping happens BEFORE link/mention markup
+is substituted (Appendix A4)"* since it was written, and DESIGN Appendix A4 spells
+out the same rule. The rule was correct and the substitution step it describes was
+never built. A written-down invariant with no code behind it reads exactly like a
+satisfied one.
+
+**3. Six `grant`/`revoke` replies leaked the key deterministically.**
+`` `Granted `architect` to `slack:U0ABBY`` ``. Real, but not what was reported.
+
+**Root cause is one thing, not three.** `resolveUserMention` deliberately strips
+`<@…>` so no Slack id shape crosses the port — correct per §3. But nothing ever
+re-wrapped it going the other way. Identity crossed inbound and never crossed back,
+so the core had no vocabulary for "a person" that a surface could render.
+
+**The fix — a mention token.** `mentionToken(key)` yields `@[[slack:U0ABBY]]`; the
+adapter's `linkifyMentions` is the ONE place in the daemon that mints a mention. It
+runs after `escapeSlack` (so it isn't escaped back) and while code spans are held in
+placeholders (so a quoted token stays literal and pings nobody). Delimiters avoid
+`<`, `>`, `&` and backticks precisely so the token survives every rendering stage.
+Identity must NOT be backticked at the call site — a code span is deliberately
+literal, which would defeat the substitution. `check-ports` now fails the build on
+`<@` anywhere outside `adapters/`.
+
+Two alternatives were declined. **Sniffing `slack:U…` in outbound text** is the
+smallest change but makes every key-shaped substring an ambient live ping, and works
+only because the core happens not to backtick keys — nothing fails when someone
+re-adds them. **A `TextSegment` union on `OutboundMessage`** gives the nicest
+structural guarantee (a mention never enters `escapeSlack` at all) but widens a
+~85-call-site port and obliges every future adapter, and it still cannot reach the
+primary leak, because the agent's reply arrives from the harness as an opaque
+string. Six call sites do not justify reshaping the port when a token serves both
+halves.
+
+**Body content is defanged.** A token is privileged — it renders as a real
+notification — so `frameMessage` defangs `@[[` in message bodies exactly as it
+already defangs `[condotto:`. Without it, a member could plant a token, have the
+model echo it, and ping anyone they named. `sanitizeDisplayName` already strips
+`@`, `[`, `]` and `:`, so decoration cannot forge one either. Both are pinned by
+tests rather than left to a reader noticing.
+
+**Accepted, with eyes open: content the agent READS can become a ping.** Only
+`frameMessage` defangs, and it only wraps inbound Slack text. A token planted in a
+repo file, bash output, or a PR title is echoed by the agent and linkified. That is
+a path for someone outside the Slack workspace to notify people inside it. We
+considered making the token core-only — the agent would use display names as plain
+text and mint nothing — which closes the vector completely and still fixes the
+reported bug, since the display-name cache is what stops the raw ids. It was
+declined deliberately: being able to say "@architect I need your approval" is worth
+more than the vector costs. Blast radius is bounded at 8 distinct users per message,
+and the worst case is an unwanted notification, never authority — approvals resolve
+against a server-verified `Principal` and the gate stays mechanical. Note the cap is
+per MESSAGE, not per turn; a turn posting many messages can exceed 8 in total.
+
+**Display names widen the social surface, and that is the real cost of the fix.**
+`users:read` was already a documented install scope, so no re-authorization is
+needed — though its stated justification (`needed for @Condotto grant @user`) was
+wrong, since grant reads the id straight out of the message's mention markup and
+makes no API call. The scope was listed and unused; now it is genuinely used.
+A member can set their display name to "<Name> (architect)" and that string reaches
+the model. The gate does not care: approvals are server-checked, hard-denies are
+mechanical, auto-approve keys off the *initiator's* verified role. What can shift is
+the agent's tone and what it proposes. DESIGN §4 already treats display names as
+decoration, so this is in-policy — but it converts a nameless system into one that
+can be socially misled about who is talking while remaining mechanically unbudgeable.
+The system prompt says so in as many words: a display_name is decoration its owner
+chose and may be a lie; authority is the `user=` id and the gate, nothing else.
+
+**A bug found in the fix, by the review that followed it.** The per-conversation
+ordering chain (`nameTail`) stored `next.then(cleanup)` but compared the map entry
+against `next` — `.then()` returns a fresh promise, so the identity check could
+never be true and the map leaked one entry per thread for the daemon's lifetime.
+Ordering still worked, so no functional test would ever have caught it. Fixed with
+the self-referencing-tail idiom and pinned by a `nameTail.size === 0` assertion.
+`resolveChoiceMessage` was also interpolating an option label into a `mrkdwn`
+element with neither escaping nor linkification — the one outbound path that did
+neither. Latent (no core call site puts a token in a label) but now rendered.
+
+**The transferable lesson.** Two of the three causes were *documented invariants
+with nothing enforcing them*: A4's escape-before-substitute rule with no
+substitution step, and an `authorDisplayName` field with a reader and no writer. A
+declared field nobody writes and a rule nobody executes both read, at review time,
+exactly like working code. The check that would have caught this is cheap and now
+exists: assert that no core-authored message text ever renders a bare principal key.
+
+**Tests.** `render.test.ts` covers substitution, punctuation adjacency, Enterprise
+`W` ids, degradation of foreign-surface and malformed keys, tokens held literal in
+code spans and fences, the forgery case (a raw `<@U0BOSS>` from the model stays
+escaped), A4 ordering as a single assertion, the 8-distinct-user cap, no `<!`
+broadcast, truncation never severing a mention, and `approvalDetail` reaching the
+architect byte-identical. `framing.test.ts` covers the defang and header
+well-formedness against adversarial display names. `session-manager.test.ts` adds
+the regression assertion — across every grant/revoke path, a principal key appears
+only inside a token, never bare. `users.test.ts` covers the cache: single-flight,
+TTL, negative caching, timeout and rejection both degrading without caching,
+eviction, and that `get` never returns the user id. `adapter-slack.test.ts` covers
+the async chain: arrival ordering under variable latency, per-conversation
+independence, tail cleanup, and that a failing lookup still emits.
+
+**Verified Bolt fact, found while making the adapter testable.** `new App({...})`
+verifies the bot token from the CONSTRUCTOR, unawaited (`tokenVerificationEnabled`
+defaults true → `initAuthorizeInConstructor`, `App.js:191`). A bad token therefore
+surfaced as an unhandled rejection that no caller could catch or report — and it
+made `SlackAdapter` impossible to construct in a test without stubbing
+`WebClient.prototype.apiCall` globally. Bolt v4 supports `deferInitialization: true`
+plus an awaited `app.init()` (`App.js:183`, `:208`); the adapter now uses it and
+calls `await this.app.init()` at the top of `start()`, so an auth failure throws
+where it can be logged. The test-only prototype patch was deleted as a result. This
+is the second time a testability obstacle turned out to be a real defect wearing a
+disguise — the first being the `nameTail` identity comparison above.
+
+**Three more defects, all found by reviewing the fix rather than writing it.**
+
+1. **Invisible characters walked straight through the defang.** A defang keyed on
+   a literal `@[[` never fires against `@[<ZWSP>[`: the sequence is invisible to a
+   human, reaches the model intact, and the model normalizes the zero-width
+   character away while echoing — minting the ping the defang exists to prevent.
+   The same substitution evades `[condotto:`. First fix stripped invisibles
+   wholesale and broke a pre-existing test: ZWJ builds emoji sequences (family,
+   flags) and ZWNJ is load-bearing in Persian and Indic scripts, so removing them
+   corrupts ordinary messages. The scoped fix is `fuzzySentinel`, which matches
+   each sentinel invisible-tolerantly and rewrites it to its defanged form —
+   invisibles are only dangerous BETWEEN sentinel characters, where nothing
+   legitimate appears. The *second* attempt then enumerated five code points and
+   was itself evaded by U+00AD, U+034F, U+180E, U+2061-2064 and U+FE0F; it now
+   uses the property class `[\p{Cf}\p{Mn}]`. Enumerating a blocklist failed twice
+   here — prefer a property class.
+2. **The notification-fallback text was linkified but never escaped.** Slack
+   parses markup in the `text` field too, and `approvalBlocks`/`choiceBlocks`
+   build it directly rather than through `renderMrkdwn`. Adding linkification
+   there without the escape left a raw `<!channel>` live — an unbounded
+   channel-wide broadcast reachable from a tool summary (`describeCall`
+   interpolates model- and repo-controlled input), strictly worse than the
+   8-distinct-user bound the accepted tradeoff describes. Worse, the cap could
+   never have caught it: `MAX_MENTIONS_PER_MESSAGE` counts only tokens
+   `linkifyMentions` rewrote, and a raw `<@U…>` passes through `String.replace`
+   untouched and uncounted. The fallback was equally unescaped BEFORE this change
+   — the diff didn't introduce the hole, it added a feature whose stated
+   invariant ("the token is the only sanctioned path to a notification") the hole
+   quietly falsified. Both paths now escape then linkify, in that order.
+3. **`nameTail` and the Bolt constructor**, recorded above.
+
+**The pattern worth keeping.** Every one of these was found by an adversarial pass
+over finished, green code — not by writing it, and not by the tests, which were
+green at 442, 468, and 475 while two of the three defects were live. A passing
+suite tells you the cases you thought of still hold. It says nothing about the
+case you did not think of, and the invisible-character evasion is exactly that
+shape: the test asserted the defang fires on `@[[`, which it did, forever.

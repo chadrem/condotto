@@ -16,6 +16,32 @@ export function principalKey(p: Principal): string {
 }
 
 /**
+ * A surface-neutral reference to a person, for DISPLAY ONLY. The core never
+ * knows how a surface linkifies a user, so it emits this token and the adapter
+ * renders it natively (Slack: a real mention; email: a display name). Carries NO
+ * authority — authority is a `Principal`, never rendered text.
+ *
+ * Delimiters are chosen to survive every stage of outbound rendering: no `<`,
+ * `>` or `&` (they would be escaped), no backtick (code spans are held out of
+ * rewriting), and nothing that collides with a surface's own mention markup.
+ *
+ * Identity must NOT be wrapped in backticks at the call site — a code span is
+ * deliberately rendered literally, which would defeat the substitution.
+ */
+export function mentionToken(p: Principal | string): string {
+  const key = typeof p === "string" ? p : principalKey(p);
+  // A key carrying a delimiter or whitespace cannot be tokenized unambiguously;
+  // degrade to the bare key rather than emit a token the adapter can't parse.
+  return /[[\]\s]/.test(key) ? key : `@[[${key}]]`;
+}
+
+/**
+ * Matches a mention token; group 1 is the principal key. Global, so use it only
+ * with `String.replace` (which resets `lastIndex`), never bare `.test()`.
+ */
+export const MENTION_TOKEN_RE = /@\[\[([a-z0-9_]+:[^\][\s]{1,64})\]\]/gi;
+
+/**
  * Command authority (DESIGN.md §2). Only `architect` may approve gated actions,
  * order landings/deploys, or stop sessions. `member` converses; `observer` is
  * read-as-context only. Anyone not explicitly mapped defaults to `member`.
@@ -72,8 +98,9 @@ export type CommandName =
   | "auto-approve"
   // in-thread role delegation (architect-only). `grant` args carry the
   // resolved target principal key + role (+ optional "everywhere"); `revoke`
-  // carries the target (+ optional "everywhere"). The adapter resolves the Slack
-  // <@U…> mention to a principal key so no surface id shape crosses the port.
+  // carries the target (+ optional "everywhere"). The adapter resolves the
+  // surface's linkified mention to a principal key so no surface id shape
+  // crosses the port; it renders back out via `mentionToken`.
   | "grant"
   | "revoke";
 

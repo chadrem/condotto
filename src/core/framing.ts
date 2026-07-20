@@ -30,7 +30,40 @@ const FENCE_PREFIX = "CONDOTTO_BODY_";
 // The literal protocol header sentinel. Defanged in body content so no message
 // text can present a line that parses as a [condotto:event ...] header — even a
 // model that mentally un-escapes a literal "\n" into a line break (red-team).
-const HEADER_SENTINEL_RE = new RegExp("\\[condotto:", "gi");
+//
+// Both sentinels below are matched INVISIBLE-TOLERANTLY. Zero-width format
+// characters (ZWSP, ZWNJ, ZWJ, word joiner, BOM) are NOT stripped wholesale —
+// These are NOT stripped wholesale — ZWJ carries emoji sequences (family, flags)
+// and ZWNJ is load-bearing in Persian and Indic scripts, so removing them would
+// corrupt legitimate messages. They are only dangerous WITHIN a sentinel, where
+// they are invisible to a human but break a literal-prefix match: a defang keyed
+// on "@[[" never fires against "@[<ZWSP>[", the sequence reaches the model intact,
+// and the model normalizes the invisible character away while echoing — minting a
+// live ping. So each sentinel is matched invisible-tolerantly and rewritten to its
+// defanged form, which drops the invisibles with it. (Found by review 2026-07-20;
+// the same trick would otherwise evade the header sentinel.)
+// A PROPERTY class, deliberately, not an enumerated list: the first version of
+// this enumerated five code points and was evaded by U+00AD, U+034F, U+180E,
+// U+2061-2064 and U+FE0F (review 2026-07-20). `Cf` (format) covers the
+// zero-widths, the word joiner, the BOM, the soft hyphen and the invisible
+// operators; `Mn` (non-spacing mark) covers the grapheme joiner and the
+// variation selectors. Over-inclusion is harmless here — these only ever match
+// BETWEEN the characters of a sentinel, where nothing legitimate appears.
+const INVIS = "[\\p{Cf}\\p{Mn}]*";
+/** A literal sentinel matcher that tolerates invisible characters between chars. */
+function fuzzySentinel(literal: string): RegExp {
+  const chars = [...literal].map((c) => c.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
+  return new RegExp(chars.join(INVIS), "giu");
+}
+
+const HEADER_SENTINEL_RE = fuzzySentinel("[condotto:");
+// The mention-token sentinel (`@[[`). A token is a privileged construct — the
+// surface renders it as a real, notifying mention — so body content is defanged
+// the same way the header sentinel is. Without this, a member could plant a token
+// in a message and get it echoed back by the model to ping anyone they named.
+// (`sanitizeDisplayName` already strips `@`, `[`, `]` and `:`, so decoration
+// cannot forge one either; both are pinned by tests.)
+const MENTION_SENTINEL_RE = fuzzySentinel("@[[");
 
 // Regexes built from ASCII escape strings (no literal control chars in source).
 // Every code point the model might render as a line break: CRLF, CR, VT, FF,
@@ -42,6 +75,13 @@ const CONTROLS_RE = new RegExp("[\\u0000-\\u0008\\u000B-\\u001F\\u007F-\\u009F]"
 // Bidirectional format chars that can visually reorder text: the directional
 // MARKS (ALM/LRM/RLM), embeddings/overrides, and isolates.
 const BIDI_RE = new RegExp("[\\u061C\\u200E\\u200F\\u202A-\\u202E\\u2066-\\u2069]", "g");
+// Zero-width / invisible format characters: ZWSP, ZWNJ, ZWJ, word joiner, BOM.
+// Stripped BEFORE the sentinel defangs below, and that order is the whole point:
+// they are invisible to a human but they break a literal-prefix match, so
+// "@[<ZWSP>[slack:U0BOSS]]" would sail past the mention defang intact. The model
+// then normalizes the invisible character away while echoing and mints a live
+// ping — the exact attack the defang exists to stop. Same trick would evade the
+// header sentinel. They have no legitimate place in a chat message body.
 
 /** A fresh, unguessable fence tag. Content cannot predict it to forge a fence. */
 function freshFence(): string {
@@ -79,7 +119,8 @@ export function frameMessage(opts: {
     .replace(LINE_BREAKS_RE, "\n")
     .replace(CONTROLS_RE, "")
     .replace(BIDI_RE, "")
-    .replace(HEADER_SENTINEL_RE, "[ condotto:"); // space breaks the header prefix
+    .replace(HEADER_SENTINEL_RE, "[ condotto:") // space breaks the header prefix
+    .replace(MENTION_SENTINEL_RE, "@ [["); // space breaks the mention-token prefix
   // Defensive: an unguessable random fence can't collide, but never let a
   // literal fence marker survive inside the body region regardless.
   const safeBody = cleaned.split(fence).join("");

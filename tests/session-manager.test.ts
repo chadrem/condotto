@@ -7,6 +7,7 @@ import { SessionManager } from "../src/core/session-manager";
 import { WorktreeManager } from "../src/core/worktrees";
 import { MemoryManager } from "../src/core/memory";
 import type { ConversationRef, Principal } from "../src/core/types";
+import { MENTION_TOKEN_RE, mentionToken } from "../src/core/types";
 import { FakeHarness, FakeSurface, FakeCommandRunner } from "./fakes";
 
 let repoPath: string;
@@ -1987,6 +1988,119 @@ describe("role delegation — grant/revoke", () => {
     expect(msg).not.toContain("comes from config"); // must not misdirect to config
     expect(msg).toContain("everywhere"); // hints at the correct scope
     expect(w.store.isArchitect(abby, "C1")).toBe(true); // the grant is intact
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Mention rendering at the core seam. The core is surface-neutral, so it may
+// never emit Slack markup — but it must also never emit a RAW principal key,
+// which is what leaked before (`fake:U_ABBY` shown to humans, unclickable and
+// meaningless). The sanctioned path is `mentionToken`, which the adapter
+// linkifies. Backticking identity is equally wrong: a code span is held literal
+// by the renderer, so a backticked token would ship the key verbatim.
+
+describe("grant/revoke replies address people by mention token, never a raw key", () => {
+  const abby = "fake:U_ABBY";
+  const token = mentionToken(abby); // "@[[fake:U_ABBY]]"
+  /** A principal key anywhere in the text — the thing that must never appear bare. */
+  const KEY_RE = /[a-z0-9_]+:U[A-Z0-9_]+/i;
+  /** Text with every sanctioned token removed; whatever key survives is a leak. */
+  const outsideTokens = (text: string) => text.replace(MENTION_TOKEN_RE, "");
+
+  /** Every reply path must name the person AND must not backtick the key. */
+  function expectsMention(text: string, expected = token): void {
+    expect(text).toContain(expected);
+    expect(text).not.toContain(`\`${abby}\``);
+  }
+
+  test("grant success names the grantee with a mention token", async () => {
+    const w = makeWorld();
+    await w.manager.handleEvent({ kind: "command", conv: conv("mt00.000001"), author: architect, name: "grant", args: `${abby} architect` });
+    const text = w.surface.posts.at(-1)!.text;
+    expect(text).toContain("Granted");
+    expectsMention(text);
+  });
+
+  test("the config-protection refusal on grant names the protected user with a mention token", async () => {
+    const w = makeWorld(); // U_ARCH is a config architect at '*'
+    await w.manager.handleEvent({ kind: "command", conv: conv("mt10.000001"), author: architect, name: "grant", args: "fake:U_ARCH member" });
+    const text = w.surface.posts.at(-1)!.text;
+    expect(text).toContain("set by config");
+    expectsMention(text, mentionToken("fake:U_ARCH"));
+  });
+
+  test("revoke success names the revoked user with a mention token", async () => {
+    const w = makeWorld();
+    const c = conv("mt20.000001");
+    await w.manager.handleEvent({ kind: "command", conv: c, author: architect, name: "grant", args: `${abby} architect` });
+    await w.manager.handleEvent({ kind: "command", conv: c, author: architect, name: "revoke", args: abby });
+    const text = w.surface.posts.at(-1)!.text;
+    expect(text).toContain("Revoked");
+    expectsMention(text);
+  });
+
+  test("the config-architect refusal on revoke names the protected user with a mention token", async () => {
+    const w = makeWorld();
+    await w.manager.handleEvent({ kind: "command", conv: conv("mt30.000001"), author: architect, name: "revoke", args: "fake:U_ARCH" });
+    const text = w.surface.posts.at(-1)!.text;
+    expect(text).toContain("comes from config");
+    expectsMention(text, mentionToken("fake:U_ARCH"));
+  });
+
+  test("the wrong-scope revoke hint names the user with a mention token", async () => {
+    const w = makeWorld();
+    const c = conv("mt40.000001");
+    await w.manager.handleEvent({ kind: "command", conv: c, author: architect, name: "grant", args: `${abby} architect everywhere` });
+    await w.manager.handleEvent({ kind: "command", conv: c, author: architect, name: "revoke", args: abby }); // wrong scope
+    const text = w.surface.posts.at(-1)!.text;
+    expect(text).toContain("scoped elsewhere");
+    expectsMention(text);
+  });
+
+  test("the nothing-to-revoke reply names the user with a mention token", async () => {
+    const w = makeWorld();
+    await w.manager.handleEvent({ kind: "command", conv: conv("mt50.000001"), author: architect, name: "revoke", args: "fake:U_NOBODY" });
+    const text = w.surface.posts.at(-1)!.text;
+    expect(text).toContain("No runtime grant to revoke");
+    expectsMention(text, mentionToken("fake:U_NOBODY"));
+  });
+
+  // The regression. Asserting per-path is necessary but not sufficient: the bug
+  // was a whole CLASS of core-authored text shipping raw keys. Drive every
+  // grant/revoke path in one world, then sweep EVERY post — a key may appear
+  // only inside a token, never bare and never backticked.
+  test("core-authored messages never render a bare principal key", async () => {
+    const w = makeWorld();
+    const c = conv("mt90.000001");
+    // Every reply path that mentions a person, in one transcript.
+    await w.manager.handleEvent({ kind: "command", conv: c, author: architect, name: "grant", args: `${abby} architect` }); // success
+    await w.manager.handleEvent({ kind: "command", conv: c, author: architect, name: "grant", args: "fake:U_ARCH member" }); // config-protected
+    await w.manager.handleEvent({ kind: "command", conv: c, author: architect, name: "revoke", args: abby }); // success
+    await w.manager.handleEvent({ kind: "command", conv: c, author: architect, name: "revoke", args: "fake:U_ARCH" }); // config architect
+    await w.manager.handleEvent({ kind: "command", conv: c, author: architect, name: "grant", args: `${abby} architect everywhere` });
+    await w.manager.handleEvent({ kind: "command", conv: c, author: architect, name: "revoke", args: abby }); // wrong scope
+    await w.manager.handleEvent({ kind: "command", conv: c, author: architect, name: "revoke", args: "fake:U_NOBODY" }); // nothing to revoke
+    // A member's refusal and the malformed-target paths, for completeness.
+    await w.manager.handleEvent({ kind: "command", conv: c, author: member, name: "grant", args: `${abby} architect` });
+    await w.manager.handleEvent({ kind: "command", conv: c, author: architect, name: "grant", args: `${abby} wizard` });
+
+    expect(w.surface.posts.length).toBeGreaterThanOrEqual(9); // all paths actually ran
+    for (const post of w.surface.posts) {
+      expect(outsideTokens(post.text)).not.toMatch(KEY_RE);
+      expect(post.text).not.toContain(`\`${abby}\``); // never a code span either
+    }
+  });
+
+  test("the unresolved-target sentinel errors and emits no mention token", async () => {
+    const w = makeWorld();
+    await w.manager.handleEvent({ kind: "command", conv: conv("mt95.000001"), author: architect, name: "grant", args: "? architect" });
+    const text = w.surface.posts.at(-1)!.text;
+    expect(text.toLowerCase()).toContain("couldn't find that user");
+    expect(text).not.toContain("@[["); // nothing to link — no token is fabricated
+    await w.manager.handleEvent({ kind: "command", conv: conv("mt96.000001"), author: architect, name: "revoke", args: "?" });
+    const revokeText = w.surface.posts.at(-1)!.text;
+    expect(revokeText.toLowerCase()).toContain("couldn't find that user");
+    expect(revokeText).not.toContain("@[[");
   });
 });
 

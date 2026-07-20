@@ -3,11 +3,48 @@
 // Escaping happens BEFORE link/mention markup is substituted (Appendix A4).
 
 import type { ApprovalPrompt, ChoicePrompt } from "../../core/types";
+import { MENTION_TOKEN_RE } from "../../core/types";
 
 const MAX_MESSAGE_CHARS = 12_000; // chat-scale ceiling well under Slack's 40k hard cap
 
 function escapeSlack(text: string): string {
   return text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
+// Slack member ids: `U…` for a normal member, `W…` on Enterprise Grid. Anchored
+// to those two prefixes so the pattern matches its own documentation — a looser
+// `[A-Z]` also accepted channel (`C…`), bot (`B…`) and usergroup (`S…`) ids, none
+// of which are a person and none of which `<@…>` renders correctly.
+const SLACK_ID_RE = /^slack:([UW][A-Z0-9]{1,31})$/;
+const MAX_MENTIONS_PER_MESSAGE = 8; // bounded blast radius, counted per DISTINCT user
+
+/**
+ * The core's surface-neutral mention token -> real Slack mention markup. This is
+ * the ONE place in the daemon that mints a mention in message text.
+ *
+ * Ordering matters (Appendix A4): this runs AFTER `escapeSlack`, so the `<@…>` it
+ * emits is not escaped back into literal text, and WHILE code is still held in
+ * placeholders, so a token inside backticks or a fence stays literal — quoting a
+ * token must never ping anyone.
+ *
+ * Bounded at MAX_MENTIONS_PER_MESSAGE distinct users: model output can echo
+ * tokens, and overflow degrades to the bare key. Visibly wrong beats a mass ping.
+ * A foreign-surface or malformed key degrades to the bare key, never to broken
+ * markup. A raw `<@U…>` written by the model was already escaped above and stays
+ * escaped — the token is the only sanctioned path to a notification.
+ */
+function linkifyMentions(text: string): string {
+  const seen = new Set<string>();
+  return text.replace(MENTION_TOKEN_RE, (_whole, key: string) => {
+    const m = key.match(SLACK_ID_RE);
+    if (!m) return key;
+    const id = m[1]!;
+    if (!seen.has(id)) {
+      if (seen.size >= MAX_MENTIONS_PER_MESSAGE) return key;
+      seen.add(id);
+    }
+    return `<@${id}>`;
+  });
 }
 
 export function renderMrkdwn(markdown: string): string {
@@ -25,6 +62,7 @@ export function renderMrkdwn(markdown: string): string {
     .replace(/`[^`\n]+`/g, protect);
 
   text = escapeSlack(text);
+  text = linkifyMentions(text); // after escaping, before code is restored (A4)
   text = text.replace(/^#{1,6}\s+(.+)$/gm, "*$1*"); // headers -> bold lines
   text = text.replace(/\*\*(.+?)\*\*/g, "*$1*"); // **bold** -> *bold*
   text = text.replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g, "<$2|$1>"); // [t](url) -> <url|t>
@@ -36,7 +74,9 @@ export function renderMrkdwn(markdown: string): string {
   });
 
   if (text.length > MAX_MESSAGE_CHARS) {
-    text = `${text.slice(0, MAX_MESSAGE_CHARS)}\n… _(truncated)_`;
+    // Never leave a half-written `<@U…>` or `<url|text>` at the cut — Slack
+    // renders the remnant as literal junk.
+    text = `${text.slice(0, MAX_MESSAGE_CHARS).replace(/<[^>]*$/, "")}\n… _(truncated)_`;
   }
   return text;
 }
@@ -127,7 +167,12 @@ export function approvalBlocks(req: ApprovalPrompt): { text: string; blocks: unk
       },
     ],
   });
-  return { text: `Approval needed: ${req.summary}`, blocks };
+  // The notification-fallback text bypasses renderMrkdwn, so apply its two
+  // load-bearing steps here in the same order (A4): escape FIRST, then linkify.
+  // Escaping is not optional — Slack parses markup in the `text` field too, so a
+  // raw `<!channel>` reaching here from a tool summary is an unbounded broadcast
+  // that the mention cap never sees (review 2026-07-20).
+  return { text: linkifyMentions(escapeSlack(`Approval needed: ${req.summary}`)), blocks };
 }
 
 /**
@@ -161,7 +206,8 @@ export const CHOICE_ACTION = "condotto_choice";
 export function choiceBlocks(prompt: ChoicePrompt): { text: string; blocks: unknown[] } {
   const options = prompt.options.slice(0, 5); // Slack caps buttons per actions block
   return {
-    text: prompt.text,
+    // Notification fallback: bypasses renderMrkdwn, so escape then linkify (A4).
+    text: linkifyMentions(escapeSlack(prompt.text)),
     blocks: [
       { type: "section", text: { type: "mrkdwn", text: renderMrkdwn(prompt.text) } },
       {
@@ -196,9 +242,14 @@ export function resolveChoiceMessage(
   const kept = (Array.isArray(originalBlocks) ? originalBlocks : []).filter(
     (b) => !(b && typeof b === "object" && (b as { type?: string }).type === "actions"),
   );
+  // The label is interpolated into a mrkdwn element, so render it rather than
+  // pasting it raw — it is the one outbound path that otherwise neither escapes
+  // nor linkifies. `<@deciderUserId>` is appended AFTER, from the verified click
+  // payload, so it is never subject to escaping.
+  const label = renderMrkdwn(selectedLabel);
   kept.push({
     type: "context",
-    elements: [{ type: "mrkdwn", text: `:point_right: <@${deciderUserId}> chose *${selectedLabel}*` }],
+    elements: [{ type: "mrkdwn", text: `:point_right: <@${deciderUserId}> chose *${label}*` }],
   });
-  return { text: `Selected ${selectedLabel}`, blocks: kept };
+  return { text: `Selected ${label}`, blocks: kept };
 }
