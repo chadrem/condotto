@@ -1,6 +1,6 @@
 import { existsSync } from "node:fs";
 import { basename, join } from "node:path";
-import { loadConfig, loadSlackConfig } from "./core/config";
+import { loadConfig, loadSlackConfig, loadAuthConfig, subscriptionScaleWarning } from "./core/config";
 import { Store } from "./core/store";
 import { WorktreeManager } from "./core/worktrees";
 import { MemoryManager } from "./core/memory";
@@ -83,10 +83,12 @@ async function main(): Promise<void> {
   // actionable message — never a half-started daemon.
   let config: ReturnType<typeof loadConfig>;
   let slackCreds: ReturnType<typeof loadSlackConfig>;
+  let auth: ReturnType<typeof loadAuthConfig>;
   try {
     const configPath = parseConfigArg(process.argv);
     config = loadConfig(process.env, configPath);
     slackCreds = loadSlackConfig(process.env, configPath);
+    auth = loadAuthConfig(process.env, configPath);
   } catch (err) {
     console.error(`Configuration error: ${err instanceof Error ? err.message : err}`);
     process.exit(1);
@@ -136,7 +138,19 @@ async function main(): Promise<void> {
 
   const worktrees = new WorktreeManager(config.worktreesRoot);
   const memory = new MemoryManager(config.memoryRoot);
-  const harness = new ClaudeCodeAdapter();
+  // Which credential the agent authenticates with — the type only, never the
+  // value. An API key is rotatable and spend-cappable in Console; a personal
+  // subscription credential is neither, which is why team installs want the
+  // former (README, "Authenticate Claude").
+  log(
+    auth.mode === "api_key"
+      ? "auth: Anthropic API key (Claude Console)"
+      : "auth: Claude subscription login (single-operator path)",
+  );
+  const scaleWarning = subscriptionScaleWarning(config, auth.mode);
+  if (scaleWarning) log(`WARNING ${scaleWarning}`);
+
+  const harness = new ClaudeCodeAdapter(undefined, undefined, auth);
   const manager = new SessionManager(store, harness, worktrees, log, {
     memory,
     defaultCostCapUsd: config.defaultCostCapUsd,

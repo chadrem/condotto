@@ -2576,3 +2576,180 @@ green at 442, 468, and 475 while two of the three defects were live. A passing
 suite tells you the cases you thought of still hold. It says nothing about the
 case you did not think of, and the invisible-character evasion is exactly that
 shape: the test asserted the defang fires on `@[[`, which it did, forever.
+
+---
+
+## 2026-07-20 — Auth: API key becomes the default, subscription becomes the single-operator path
+
+**Decision.** Condotto now supports both credential types. `[auth].mode = "api_key"`
+(an Anthropic API key from Claude Console) is the documented default and the
+recommended posture for any install where more than one person drives sessions.
+`[auth].mode = "subscription"` (keychain OAuth or `CLAUDE_CODE_OAUTH_TOKEN`) stays
+fully supported and is documented as the path for **one operator driving their own
+sessions**. Nothing was removed.
+
+### Why: the primary sources, read fresh
+
+Everything below was fetched and read on 2026-07-20 rather than recalled. The
+prompting concern was that secondary sources might be quoting stale, harsher
+wording that the 2026 revisions had softened. **The opposite turned out to be
+true** — the current pages are explicit and directive, and the change was made on
+their strength, not on a cautious reading of them.
+
+*[Claude Code — Legal and compliance](https://code.claude.com/docs/en/legal-and-compliance),
+§ Authentication and credential use:*
+
+> **OAuth authentication** is intended exclusively for purchasers of Claude Free,
+> Pro, Max, Team, and Enterprise subscription plans and is designed to support
+> ordinary use of Claude Code and other native Anthropic applications.
+>
+> **Developers** building products or services that interact with Claude's
+> capabilities, including those using the Agent SDK, should use API key
+> authentication through Claude Console or a supported cloud provider. Anthropic
+> does not permit third-party developers to offer Claude.ai login or to route
+> requests through Free, Pro, or Max plan credentials on behalf of their users.
+
+Same page, § Acceptable use: *"Advertised usage limits for Pro and Max plans assume
+ordinary, individual usage of Claude Code and the Agent SDK."*
+
+*[Consumer Terms](https://www.anthropic.com/legal/consumer-terms) §2:* "You may not
+share your Account login information, Anthropic API key, or Account credentials
+with anyone else. You also may not make your Account available to anyone else."
+*§3, prohibited uses (7):* automated or non-human access is prohibited "[e]xcept
+when you are accessing our Services via an Anthropic API Key."
+
+*[Agent SDK overview](https://code.claude.com/docs/en/agent-sdk/overview):* "Set
+your API key" is step 2 of getting started. A note there: *"Unless previously
+approved, Anthropic does not allow third party developers to offer claude.ai login
+or rate limits for their products, including agents built on the Claude Agent SDK."*
+And on licensing: *"Use of the Claude Agent SDK is governed by Anthropic's
+Commercial Terms of Service"* — **Commercial, not Consumer.**
+
+**The distinction that keeps subscription mode legitimate.** The prohibition
+targets *routing other people's requests through a plan credential*. A solo
+operator running Condotto on their own machine against their own subscription is
+ordinary individual use of Claude Code — squarely what OAuth is for. A team's
+threads driving one operator's subscription is not: it is both "ordinary,
+individual usage" stretched past its stated scope and, arguably, making the account
+available to others. That line is exactly the api_key/subscription split, which is
+why subscription support is retained rather than deprecated.
+
+### The tradeoff
+
+**What it costs.** Real money per token, where a subscription was flat-rate.
+Condotto is designed to run a team's worth of agentic coding, so this is not
+marginal; a heavy install will notice. Cost budgets stop being notional and start
+being a bill.
+
+**What it buys.** The policy question disappears — no reading of "ordinary,
+individual usage" has to hold for the install to be in bounds. And two operational
+properties a personal credential cannot offer: the key is **rotatable** (a leak is
+recoverable) and **spend-cappable in Console** (a backstop that does not depend on
+Condotto's own budget code being correct). For a daemon that is by construction an
+RCE portal, the second is worth real money on its own.
+
+**Judgement.** Correct trade for an installable, publicly-distributed, explicitly
+multi-person tool. The alternative was shipping install docs that instruct third
+parties into a posture Anthropic documents against — indefensible for an
+open-source project, whatever one thinks of the enforcement risk.
+
+### Verified SDK facts (installed SDK 0.3.214)
+
+The credential mechanism is **environment passthrough, not a `query()` option** —
+checked against the installed type definitions rather than assumed. `sdk.d.ts:1414`
+on `options.env`: *"When set, this value REPLACES the subprocess environment
+entirely… Spread `process.env` yourself if the subprocess still needs inherited
+variables like `PATH`, `HOME`, or `ANTHROPIC_API_KEY`."* There is no `apiKey` field
+on the options object. `Settings.apiKeyHelper` (a script path that outputs auth
+values) exists and was **rejected**: the agent could invoke the helper itself, so
+it adds a moving part without moving the boundary.
+
+### The thing that got corrected rather than deleted
+
+`adapter.ts` carried a standing instruction: *"There is no ANTHROPIC_API_KEY in
+this deployment and this file must never read one."* It was rewritten in place, not
+removed, with the reversal and its reason stated — the sentence was true of the
+original single-operator deployment and became wrong the moment Condotto became
+something other people install. The same correction was made to DESIGN.md §6 and
+Appendix B6. A future reader should be able to see that the rule changed and why,
+rather than find no trace of it.
+
+### An acceptance criterion that could not be met as written
+
+The task specified: *"No credential value is ever logged, persisted to SQLite, or
+reachable from the agent's shell."* The first two hold. **The third is not
+achievable and was not achievable before this change either** — it was corrected in
+the docs rather than papered over in the code.
+
+The agent runtime is the process that authenticates, so the credential rides its
+environment; the `Bash` tool is a child of that process and can in principle read
+it. This was already true of `CLAUDE_CODE_OAUTH_TOKEN`. Desktop keychain OAuth is
+the one case where no env value exists to read — which means the *compliant*
+default is, on this one axis, the more exposed one. That is a real cost of the
+change and is stated as such in the README's residual-risk note.
+
+What actually guards the credential:
+
+1. **`policy.ts` hard-deny** on any command naming `ANTHROPIC_API_KEY` or
+   `CLAUDE_CODE_OAUTH_TOKEN` — no button, no auto-approve override.
+2. **`command-runner.ts` scrub** keeping both out of land/deploy commands.
+
+Both are now pinned by regression tests that name the api_key change as their
+reason, so deleting either fails loudly. A local credential-injecting proxy would
+make the original sentence literally true; it is a real architecture change, out of
+scope here, and deliberately not built.
+
+### Implementation notes
+
+- **Resolution order is config-over-env** (`[auth].api_key` → `ANTHROPIC_API_KEY`),
+  the reverse of `loadSlackConfig`. An operator who writes the key into the file
+  means it, and a stray export in a shell profile should not silently outrank it.
+  As with Slack, the key is never *required* in the TOML — the env var alone is a
+  complete configuration, and that is what the README documents.
+- **Mode is inferred when `[auth]` is absent** (api_key if a key is resolvable,
+  else subscription) so an existing subscription install keeps booting unchanged
+  after upgrade. `condotto.example.toml` ships `mode = "api_key"`, so a fresh
+  install following the README lands on the API-key path. An explicit mode always
+  wins.
+- **`scrubDaemonEnv` sets the key from the resolved config rather than inheriting
+  it**, and *deletes* `ANTHROPIC_API_KEY` under subscription mode. A stray key in
+  the daemon's environment can no longer silently bill an operator who chose
+  subscription auth. This flipped an existing test assertion, which was updated
+  deliberately.
+- **The multi-principal warning warns and continues.** It fires when subscription
+  mode is paired with more than one architect-or-member principal, names the
+  count, and points at the API-key path. It is a boot-time signal about how the
+  install is *configured* — runtime `@Condotto grant` delegations are deliberately
+  not re-checked, since this is not a live monitor. Refusing to start was
+  considered and rejected: how to run your own install against your own credential
+  is the operator's call, not the daemon's.
+- **Boot logs the credential type, never the value.**
+- Gating, approval, and audit logic were not touched.
+
+### One defect, found by reviewing the finished green change
+
+The first cut defaulted the adapter's auth parameter to `{ mode: "subscription" }`,
+reasoning that a bare `new ClaudeCodeAdapter()` should behave as it always had.
+It would not have. All eleven `scripts/smoke-*.ts` harnesses construct the adapter
+bare, so under that default `scrubDaemonEnv` would have **deleted**
+`ANTHROPIC_API_KEY` from their environment — every smoke script silently failing to
+authenticate for any operator who had just followed the new README onto api_key
+auth. The full suite was green across this; nothing exercised a bare adapter's
+interaction with an ambient key, because before this change there was no
+interaction to exercise.
+
+Fixed by making the parameter genuinely three-state rather than two:
+
+| Auth argument | Behaviour | Who |
+| --- | --- | --- |
+| absent | inherit the ambient env unchanged | tests, `scripts/smoke-*` |
+| `{mode: "api_key", apiKey}` | install the resolved key | daemon |
+| `{mode: "subscription"}` | delete `ANTHROPIC_API_KEY` | daemon |
+
+Two regression tests now pin the bare case, one on `scrubDaemonEnv` directly and
+one driving a real turn through the adapter to assert the key survives into the SDK
+options. The general lesson is the one already recorded on 2026-07-20 for the
+identity change: a green suite reports that the cases someone thought of still
+hold, and says nothing about a case that did not exist until this diff created it.
+Adding a parameter with a default is exactly that shape — the default silently
+becomes the behaviour of every existing call site.

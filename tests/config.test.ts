@@ -2,7 +2,7 @@ import { describe, expect, test, spyOn } from "bun:test";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { loadConfig, loadSlackConfig } from "../src/core/config";
+import { loadConfig, loadSlackConfig, loadAuthConfig, subscriptionScaleWarning } from "../src/core/config";
 
 // Write a throwaway condotto.toml and return its path. Tests pass an EXPLICIT
 // path + an empty env so a stray ./condotto.toml or process.env can't leak in.
@@ -356,5 +356,113 @@ describe("loadSlackConfig", () => {
   test("env tokens alone suffice even with no [slack] section", () => {
     const creds = loadSlackConfig({ SLACK_BOT_TOKEN: "B", SLACK_APP_TOKEN: "A" }, tomlFile(""));
     expect(creds).toEqual({ botToken: "B", appToken: "A" });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Harness auth (2026-07-20). API key is the documented path for multi-person
+// installs; subscription OAuth stays supported as the single-operator path.
+
+describe("loadAuthConfig — credential resolution order", () => {
+  test("explicit [auth].api_key wins over ANTHROPIC_API_KEY in the environment", () => {
+    const path = cfgFile(`${SLACK}\n[auth]\napi_key = "sk-from-file"\n`);
+    const auth = loadAuthConfig({ ANTHROPIC_API_KEY: "sk-from-env" }, path);
+    expect(auth.mode).toBe("api_key");
+    expect(auth.apiKey).toBe("sk-from-file");
+  });
+
+  test("ANTHROPIC_API_KEY is a complete configuration — the key need not sit in the TOML", () => {
+    const path = cfgFile(`${SLACK}\n[auth]\nmode = "api_key"\n`);
+    const auth = loadAuthConfig({ ANTHROPIC_API_KEY: "sk-from-env" }, path);
+    expect(auth.mode).toBe("api_key");
+    expect(auth.apiKey).toBe("sk-from-env");
+  });
+
+  test("no key anywhere falls through to subscription auth", () => {
+    const path = cfgFile(SLACK);
+    const auth = loadAuthConfig({}, path);
+    expect(auth.mode).toBe("subscription");
+    expect(auth.apiKey).toBeUndefined();
+  });
+
+  test("subscription mode carries no key even when one is resolvable", () => {
+    // A stray ANTHROPIC_API_KEY must not ride along into the agent's environment
+    // on an install the operator deliberately configured as subscription.
+    const path = cfgFile(`${SLACK}\n[auth]\nmode = "subscription"\n`);
+    const auth = loadAuthConfig({ ANTHROPIC_API_KEY: "sk-stray" }, path);
+    expect(auth.mode).toBe("subscription");
+    expect(auth.apiKey).toBeUndefined();
+  });
+
+  test("an explicit mode outranks inference in both directions", () => {
+    const withKey = cfgFile(`${SLACK}\n[auth]\nmode = "subscription"\n`);
+    expect(loadAuthConfig({ ANTHROPIC_API_KEY: "sk-x" }, withKey).mode).toBe("subscription");
+    const noMode = cfgFile(SLACK);
+    expect(loadAuthConfig({ ANTHROPIC_API_KEY: "sk-x" }, noMode).mode).toBe("api_key");
+  });
+});
+
+describe("loadAuthConfig — boot validation", () => {
+  test('mode = "api_key" with no key available is a startup error naming the fix', () => {
+    const path = cfgFile(`${SLACK}\n[auth]\nmode = "api_key"\n`);
+    expect(() => loadAuthConfig({}, path)).toThrow(/ANTHROPIC_API_KEY/);
+    expect(() => loadAuthConfig({}, path)).toThrow(/platform\.claude\.com/);
+  });
+
+  test("an unrecognized mode is rejected loudly", () => {
+    const path = cfgFile(`${SLACK}\n[auth]\nmode = "oauth"\n`);
+    expect(() => loadAuthConfig({}, path)).toThrow(/must be "api_key" or "subscription"/);
+  });
+
+  test("an empty ANTHROPIC_API_KEY counts as absent, not as a key", () => {
+    const path = cfgFile(`${SLACK}\n[auth]\nmode = "api_key"\n`);
+    expect(() => loadAuthConfig({ ANTHROPIC_API_KEY: "   " }, path)).toThrow(/no API key is available/);
+  });
+});
+
+describe("subscriptionScaleWarning — warn, never refuse", () => {
+  const cfgWithRoles = (roles: string): ReturnType<typeof loadConfig> =>
+    loadConfig({}, cfgFile(`${SLACK}\n${roles}`));
+
+  const twoDrivers = `[[roles]]\nprincipal = "slack:U1"\nrole = "architect"\n\n[[roles]]\nprincipal = "slack:U2"\nrole = "member"\n`;
+  const oneDriver = `[[roles]]\nprincipal = "slack:U1"\nrole = "architect"\n`;
+
+  test("fires when subscription auth is paired with more than one driving principal", () => {
+    const warning = subscriptionScaleWarning(cfgWithRoles(twoDrivers), "subscription");
+    expect(warning).toContain("2 principals");
+    expect(warning).toContain("api_key");
+  });
+
+  test("stays silent for a single operator on subscription auth", () => {
+    expect(subscriptionScaleWarning(cfgWithRoles(oneDriver), "subscription")).toBeNull();
+  });
+
+  test("never fires under api_key auth, however many principals", () => {
+    expect(subscriptionScaleWarning(cfgWithRoles(twoDrivers), "api_key")).toBeNull();
+  });
+
+  test("observers do not count as drivers", () => {
+    const withObserver = `[[roles]]\nprincipal = "slack:U1"\nrole = "architect"\n\n[[roles]]\nprincipal = "slack:U2"\nrole = "observer"\n`;
+    expect(subscriptionScaleWarning(cfgWithRoles(withObserver), "subscription")).toBeNull();
+  });
+});
+
+describe("no credential value is ever logged or persisted", () => {
+  test("the resolved key appears in no error message", () => {
+    // A malformed-mode throw happens after the key is resolved — the message must
+    // still not carry it.
+    const path = cfgFile(`${SLACK}\n[auth]\nmode = "nope"\napi_key = "sk-super-secret"\n`);
+    expect(() => loadAuthConfig({}, path)).toThrow();
+    try {
+      loadAuthConfig({}, path);
+    } catch (err) {
+      expect(String(err)).not.toContain("sk-super-secret");
+    }
+  });
+
+  test("the scale warning never carries credential material", () => {
+    const cfg = loadConfig({}, cfgFile(`${SLACK}\n[[roles]]\nprincipal = "slack:U1"\nrole = "architect"\n\n[[roles]]\nprincipal = "slack:U2"\nrole = "member"\n`));
+    const warning = subscriptionScaleWarning(cfg, "subscription") ?? "";
+    expect(warning).not.toMatch(/sk-ant|oauth-|xoxb-/);
   });
 });

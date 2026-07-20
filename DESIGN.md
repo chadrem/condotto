@@ -551,8 +551,14 @@ prompt.
   own cloud role — never a human's personal keychain); on a self-hosted box that
   scoping is the installer's setup, documented in the runbook, not the daemon's
   code. The agent's own shell is **env-scrubbed** so an in-worktree command
-  cannot read the daemon's Slack/cloud secrets — only the Claude auth the SDK
-  needs survives.
+  cannot read the daemon's Slack/cloud secrets — only the Claude credential the
+  SDK needs survives, because the process holding it is the one that
+  authenticates. That credential is consequently readable from the agent's shell
+  under both auth modes (desktop keychain OAuth excepted, where no env value
+  exists); the hard-deny on commands naming `ANTHROPIC_API_KEY` /
+  `CLAUDE_CODE_OAUTH_TOKEN` is what guards it, not its absence. An API key is
+  **rotatable and spend-cappable**; a personal subscription credential is neither,
+  which is a second reason team installs want api_key. See §6 "Credential reach".
 - Every worktree is disposable and isolated; the hard-deny set prevents writes
   outside it.
 - **Path confinement separates two things that look alike.** The containment
@@ -586,10 +592,14 @@ implementation turns; a hard cap that pauses a runaway session and pings the
 architect. `SDKResultMessage.subtype` includes `error_max_budget_usd` — wire it
 to a Slack notice, not a silent stall.
 
-Note (verified 2026-07-16): on subscription OAuth the SDK still reports
-`total_cost_usd` per result as notional API pricing — budgets keep working as
-runaway brakes, but the real constraint is the plan's rate limits, so treat
-them as usage governance, not spend.
+Note (verified 2026-07-16; scoped by auth mode 2026-07-20): what
+`total_cost_usd` *means* depends on `[auth].mode`. Under **api_key** it is real
+spend, billed per token against the Console account — budgets govern actual money,
+with a Console spend cap as the backstop that does not depend on Condotto being
+correct. Under **subscription** the SDK still reports it, but as notional API
+pricing: nothing is billed per token, so budgets are usage governance and the real
+constraint is the plan's rate limits. The mechanism is identical either way; only
+the interpretation changes.
 
 ---
 
@@ -670,13 +680,43 @@ adapter:** `@slack/bolt` in Socket Mode. **Harness adapter (v1):**
 `claude` CLI install needed). **Store:** SQLite via the built-in `bun:sqlite`
 (no native-module compile; same synchronous API shape as better-sqlite3).
 **Auth:** the SDK's bundled runtime reads the same credential chain as the
-Claude Code CLI, so a **Claude subscription (Pro/Max) login is sufficient** —
-no API key. v0 uses the dev machine's existing `claude` keychain login; a
-headless box uses a long-lived token minted with `claude setup-token`
-(exported as `CLAUDE_CODE_OAUTH_TOKEN`). `ANTHROPIC_API_KEY` (API billing) and
-Bedrock/Vertex/Foundry (`CLAUDE_CODE_USE_*` flags) are alternatives, not
-requirements. Verified 2026-07-16: a headless `query()` succeeds with no
-`ANTHROPIC_API_KEY` set, on keychain OAuth alone (see DECISIONS.md).
+Claude Code CLI, so both an **API key** and a **subscription login** work. The
+operator chooses with `[auth].mode` (`core/config.ts` `loadAuthConfig`), and the
+composition root hands the resolved credential to the harness adapter the same way
+it hands Slack tokens to the surface adapter — the core domain never carries it.
+
+- **`api_key` (default; required posture for multi-person installs).** An
+  Anthropic API key from Claude Console, resolved `[auth].api_key` → env
+  `ANTHROPIC_API_KEY`, and injected into the SDK subprocess env. This is the
+  documented path for developers building on the Agent SDK, and the only mode
+  whose plan limits contemplate more than one person driving sessions.
+- **`subscription` (single operator).** The machine's `claude` keychain login, or
+  `claude setup-token` → `CLAUDE_CODE_OAUTH_TOKEN` on a headless box. Anthropic
+  scopes OAuth to ordinary individual use of Claude Code and the Agent SDK.
+  Supported and not deprecated — bounded to one operator driving their own
+  sessions. With more than one driving principal configured the daemon warns at
+  boot and continues; the choice is the operator's.
+
+Assumption changed 2026-07-20: this section previously read "a Claude
+subscription login is sufficient — no API key," which was true of the original
+single-operator deployment and wrong as guidance for an installable multi-person
+daemon. See DECISIONS.md 2026-07-20. Bedrock/Vertex/Foundry
+(`CLAUDE_CODE_USE_*` flags) remain untested alternatives. Verified 2026-07-16: a
+headless `query()` succeeds with no `ANTHROPIC_API_KEY` set, on keychain OAuth
+alone (see DECISIONS.md).
+
+**Credential reach (both modes).** The credential rides the SDK subprocess
+environment — the SDK's documented mechanism (`sdk.d.ts:1414` names
+`ANTHROPIC_API_KEY` among the variables the subprocess needs inherited). The
+agent's `Bash` tool is a child of that process, so the value is in principle
+readable from the agent's own shell. The boundary is therefore **not** the
+credential's absence: it is §4's hard-deny on any command naming
+`ANTHROPIC_API_KEY` or `CLAUDE_CODE_OAUTH_TOKEN` (unoverridable by approval or
+auto-approve), plus `command-runner`'s scrub for land/deploy. Both are pinned by
+regression tests. Desktop keychain OAuth is the one case where no env value
+exists to read. `scrubDaemonEnv` sets the key from the *resolved* config rather
+than inheriting it, so subscription mode deletes any stray `ANTHROPIC_API_KEY`
+rather than silently billing it.
 
 **Why Bun.** Anthropic acquired Oven (the company behind Bun) in late 2025,
 and Claude Code itself ships as a Bun-compiled standalone binary — the
@@ -838,8 +878,9 @@ origin); the main agent does mutations via the defer→approve→resume path.
 load (daemon-configured MCP via `mcpServers`); untrusted repos stay isolated, and
 the gate still applies. An **`ultra`** preset bundles `xhigh` effort + subagents +
 workflows. Dial-down is built in (cheaper model / lower effort / capabilities off),
-because model×effort×subagents burn the plan's **rate limit** — the real
-constraint on subscription auth (cost budgets are notional, §4).
+because model×effort×subagents burn either real Console spend (api_key) or the
+plan's **rate limit** — the real constraint on subscription auth, where cost
+budgets are notional (§4, §6).
 
 **Workflows.** Claude Code's multi-agent **Workflow** tool, gated + confined
 (`@Condotto workflows on|off`, folded into `ultra`). Workflow-enabled sessions run
@@ -1211,14 +1252,39 @@ emitting `system/mirror_error` (non-fatal) if the store is down. An S3 example
 adapter ships in the SDK examples. (Storage path format — encoded cwd +
 `<session-id>.jsonl` — confirmed live 2026-07-16.)
 
-**B6. Auth.** The bundled runtime reads the CLI's credential chain, so
-subscription OAuth works headless: the machine's `claude` keychain login, or
-`claude setup-token` → `CLAUDE_CODE_OAUTH_TOKEN` on a box with no login.
-Verified 2026-07-16: `query()` succeeded with no `ANTHROPIC_API_KEY` in the
-environment, on a Max-subscription keychain login (Node 24; re-verified under
-Bun, §6). `ANTHROPIC_API_KEY` is the API-billing alternative; Bedrock/Vertex/
-Foundry via `CLAUDE_CODE_USE_BEDROCK=1` / `CLAUDE_CODE_USE_VERTEX=1` /
-`CLAUDE_CODE_USE_FOUNDRY=1` (+ that provider's standard credential chain).
+**B6. Auth.** The bundled runtime reads the CLI's credential chain, so both
+credential types work.
+
+*API key (default; verified against the installed SDK 0.3.214, 2026-07-20).* The
+documented mechanism is environment passthrough, not a `query()` option — there is
+no `apiKey` field on the options object. `sdk.d.ts:1414` on `options.env`: *"When
+set, this value REPLACES the subprocess environment entirely… Spread `process.env`
+yourself if the subprocess still needs inherited variables like `PATH`, `HOME`, or
+`ANTHROPIC_API_KEY`."* Condotto's `scrubDaemonEnv` already builds that spread, so
+the key is installed there. (`Settings.apiKeyHelper` — a path to a script that
+outputs auth values — exists as an alternative; rejected for Condotto because the
+agent could invoke the helper itself, so it adds a moving part without moving the
+boundary.)
+
+*Subscription OAuth (single operator).* Works headless: the machine's `claude`
+keychain login, or `claude setup-token` → `CLAUDE_CODE_OAUTH_TOKEN` on a box with
+no login. Verified 2026-07-16: `query()` succeeded with no `ANTHROPIC_API_KEY` in
+the environment, on a Max-subscription keychain login (Node 24; re-verified under
+Bun, §6).
+
+*Anthropic's own guidance (re-read from primary sources 2026-07-20 — quoted in
+DECISIONS.md).* OAuth is "intended exclusively for purchasers of Claude Free, Pro,
+Max, Team, and Enterprise subscription plans… for ordinary use of Claude Code and
+other native Anthropic applications"; developers building on the Agent SDK "should
+use API key authentication through Claude Console or a supported cloud provider."
+Pro/Max limits "assume ordinary, individual usage of Claude Code and the Agent
+SDK." Agent SDK use is governed by the **Commercial** Terms, not the Consumer
+Terms. Hence api_key as the default and subscription as the single-operator path.
+
+*Untested alternatives.* Bedrock/Vertex/Foundry via `CLAUDE_CODE_USE_BEDROCK=1` /
+`CLAUDE_CODE_USE_VERTEX=1` / `CLAUDE_CODE_USE_FOUNDRY=1` (+ that provider's
+standard credential chain). Not wired into `[auth].mode`; an operator can reach
+them today by exporting the flags, but Condotto neither validates nor logs them.
 
 ---
 

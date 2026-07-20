@@ -61,6 +61,29 @@ export interface SlackCredentials {
   appToken: string;
 }
 
+/**
+ * Which credential the harness authenticates to Anthropic with.
+ *
+ * `api_key`      — an Anthropic API key from Claude Console. The documented path
+ *                  for developers building on the Agent SDK, and the only one
+ *                  whose plan limits contemplate more than one person driving
+ *                  sessions. Rotatable and spend-cappable in Console.
+ * `subscription` — the machine's Claude subscription login (keychain OAuth, or a
+ *                  headless `CLAUDE_CODE_OAUTH_TOKEN`). Anthropic scopes OAuth to
+ *                  ordinary individual use of Claude Code and the Agent SDK, so
+ *                  this is the single-operator path: one architect driving their
+ *                  own sessions. Supported, not deprecated — just not for teams.
+ * See DECISIONS.md 2026-07-20 and the links in README ("Authenticate Claude").
+ */
+export type AuthMode = "api_key" | "subscription";
+
+/** Harness credentials — like SlackCredentials, owned by the composition root. */
+export interface AuthConfig {
+  mode: AuthMode;
+  /** Present iff `mode === "api_key"`. Never logged, never persisted. */
+  apiKey?: string;
+}
+
 /** Fallback per-thread cost ceiling in USD when neither repo nor config sets one. */
 export const DEFAULT_COST_CAP_USD = 10;
 /** Default cap on concurrently-executing harness turns (protects the box). */
@@ -392,7 +415,8 @@ function parseRoles(toml: Record<string, unknown>, env: Record<string, string | 
 // ---------------------------------------------------------------------------
 // Public API
 
-const TOP_LEVEL_KEYS = ["slack", "architects", "roles", "repos", "paths", "defaults"] as const;
+const TOP_LEVEL_KEYS = ["slack", "auth", "architects", "roles", "repos", "paths", "defaults"] as const;
+const AUTH_KEYS = ["mode", "api_key"] as const;
 const PATHS_KEYS = ["db", "worktrees_root", "memory_root"] as const;
 const DEFAULTS_KEYS = ["model", "effort", "auto_approve", "cost_cap_usd", "max_concurrent_turns"] as const;
 
@@ -472,4 +496,80 @@ export function loadSlackConfig(
     );
   }
   return { botToken, appToken };
+}
+
+/**
+ * Load the harness credentials the composition root hands to its adapter.
+ *
+ * Key resolution, first match wins:
+ *   1. `[auth].api_key` in condotto.toml  (explicit config)
+ *   2. `ANTHROPIC_API_KEY` in the environment
+ *   3. neither → subscription OAuth (no key material to carry)
+ *
+ * Note this is config-over-env, the reverse of `loadSlackConfig` — an operator
+ * who writes the key into the file means it, and a stray `ANTHROPIC_API_KEY`
+ * left in a shell profile should not silently outrank it. As with Slack, the key
+ * is *never required* to sit in the TOML: the env var alone is a complete
+ * configuration, which is the documented default in the README.
+ *
+ * `[auth].mode` is authoritative when set. When it is absent the mode is inferred
+ * from whether a key is available, so an existing subscription install keeps
+ * booting unchanged after upgrading; condotto.example.toml ships `mode = "api_key"`
+ * so a fresh install following the README lands on the API-key path.
+ */
+export function loadAuthConfig(
+  env: Record<string, string | undefined> = process.env,
+  configPathOverride?: string,
+): AuthConfig {
+  const { toml, path } = readParsedConfig(env, configPathOverride);
+  const auth = toml.auth === undefined ? {} : asTable(toml.auth, "[auth]");
+  warnUnknownKeys(auth, AUTH_KEYS, "[auth]");
+
+  const apiKey = optString(auth.api_key, "[auth].api_key") ?? envStr(env.ANTHROPIC_API_KEY);
+
+  const declared = optString(auth.mode, "[auth].mode");
+  if (declared !== undefined && declared !== "api_key" && declared !== "subscription") {
+    throw new Error(`[auth].mode must be "api_key" or "subscription", got "${declared}" (in ${path})`);
+  }
+  const mode: AuthMode = declared ?? (apiKey ? "api_key" : "subscription");
+
+  if (mode === "api_key" && !apiKey) {
+    throw new Error(
+      `[auth].mode = "api_key" but no API key is available. Set ANTHROPIC_API_KEY in the ` +
+        `daemon's environment (recommended — keeps the key out of ${path}), or set ` +
+        `[auth].api_key in ${path}. Create a key at https://platform.claude.com/. ` +
+        `To run against a personal Claude subscription instead — single operator only — ` +
+        `set [auth].mode = "subscription". See the README ("Authenticate Claude").`,
+    );
+  }
+
+  // Subscription mode carries no key material: drop anything we resolved so it
+  // cannot reach the agent's environment on a path the operator did not choose.
+  return mode === "api_key" ? { mode, apiKey } : { mode };
+}
+
+/**
+ * Warn — never refuse — when subscription auth is paired with a config that lets
+ * more than one person drive sessions. Anthropic scopes OAuth to ordinary
+ * individual use of Claude Code and the Agent SDK, so a team on one personal
+ * subscription is outside what that credential is for; the API-key path is the
+ * documented answer. Whether to keep going is the operator's call, not ours.
+ *
+ * Returns the warning text, or null when the pairing raises no question. Grants
+ * made at runtime (`@Condotto grant`) are deliberately not re-checked here — this
+ * is a boot-time signal about how the install is configured, not a live monitor.
+ */
+export function subscriptionScaleWarning(config: CondottoConfig, mode: AuthMode): string | null {
+  if (mode !== "subscription") return null;
+  const architects = config.roles.filter((r) => r.role === "architect").length;
+  const drivers = config.roles.filter((r) => r.role === "architect" || r.role === "member").length;
+  if (drivers <= 1) return null;
+  return (
+    `subscription auth is configured, but ${drivers} principals can drive sessions ` +
+    `(${architects} architect${architects === 1 ? "" : "s"}). Anthropic's plan limits for ` +
+    `Claude Free/Pro/Max assume ordinary, individual use of Claude Code and the Agent SDK, ` +
+    `so subscription auth is intended for a single operator driving their own sessions. ` +
+    `For team use, switch to an API key from Claude Console: set ANTHROPIC_API_KEY and ` +
+    `[auth].mode = "api_key". See the README ("Authenticate Claude"). Continuing.`
+  );
 }

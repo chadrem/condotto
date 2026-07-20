@@ -38,8 +38,8 @@ engineer with approval authority) signs off on the moves that matter.
 
 **How it's different.** Claude in Slack and Claude Code on the web run in
 Anthropic-hosted sandboxes, and the Claude Code CLI is one person at one
-terminal. Condotto is your machine, your credentials, and your deploy path,
-driven from Slack by your whole team.
+terminal. Condotto is your machine, your repo, and your deploy path, driven from
+Slack by your whole team.
 
 Software engineering and product management are evolving fast, and the line
 between them is blurring. Condotto is helping define what comes next:
@@ -100,10 +100,11 @@ platforms and coding agents can be added later without touching the core.
   turn (parked sessions survive on disk and resume). See DESIGN.md §3
   "Deployment shapes".
 - **Git**, plus whatever toolchain your repos need (Node, Bun, test runners…).
-- A **Claude subscription** (e.g. Max) logged in on the machine via the `claude`
-  CLI, **or** a `CLAUDE_CODE_OAUTH_TOKEN` for a headless box (see
-  [Authenticate Claude](#authenticate-claude)). No `ANTHROPIC_API_KEY` is
-  required for this deployment.
+- **An Anthropic API key** from [Claude Console](https://platform.claude.com/) —
+  the documented default, and what you want whenever more than one person will
+  drive sessions. A personal **Claude subscription** works instead when you are a
+  solo architect driving your own sessions. See
+  [Authenticate Claude](#authenticate-claude).
 - **[Bun](https://bun.sh) 1.2+** — required to run from source; not needed if you
   use a prebuilt binary.
 - A **Slack workspace** where you can create an app (you need admin, or an admin
@@ -161,7 +162,42 @@ bun run build:linux-x64             # or a specific target
 
 ### Authenticate Claude
 
-Condotto uses your machine's Claude login — no API key.
+Condotto has two auth modes. Pick by **how many people will drive sessions**.
+
+#### API key — the default, and the one for teams
+
+An API key from [Claude Console](https://platform.claude.com/). Use this whenever
+more than one person will drive sessions, which is what Condotto is for.
+
+```sh
+export ANTHROPIC_API_KEY=sk-ant-...   # or set it in the service unit's env file
+```
+
+```toml
+[auth]
+mode = "api_key"      # the key itself stays in the environment
+```
+
+As with the Slack tokens, the key **never has to sit in `condotto.toml`** — the
+environment variable alone is a complete configuration. You *can* put it in the
+file as `[auth].api_key` if your setup needs that; the file value wins over the
+environment. If `mode = "api_key"` and no key is available, the daemon refuses to
+start and tells you how to fix it.
+
+The key is billed per token against your Console account, which means you get the
+two things a personal credential can't give you: you can **rotate** it, and you
+can set a **spend cap** in Console.
+
+#### Subscription — a solo architect, their own sessions
+
+Your machine's Claude login. Anthropic scopes subscription OAuth to ordinary
+individual use of Claude Code and the Agent SDK, so this mode is for one operator
+driving their own work — not a team on one person's plan.
+
+```toml
+[auth]
+mode = "subscription"
+```
 
 - **Desktop / your own machine:** run `claude` once and log in. The SDK reuses
   the keychain OAuth credentials automatically. Nothing else to do.
@@ -172,8 +208,27 @@ Condotto uses your machine's Claude login — no API key.
   export CLAUDE_CODE_OAUTH_TOKEN=...   # or set it in the service unit's env file
   ```
 
+If you run this mode with more than one principal able to drive sessions, the
+daemon logs a warning at boot pointing here, and then **keeps going**. It is your
+install and your call; Condotto will not make that decision for you.
+
+For what each credential is intended for, see Anthropic's
+[Claude Code legal and compliance](https://code.claude.com/docs/en/legal-and-compliance)
+page and the [Agent SDK docs](https://code.claude.com/docs/en/agent-sdk/overview).
+
+#### Which mode is running
+
+The daemon logs the credential **type** at boot — never the value:
+
+```
+auth: Anthropic API key (Claude Console)
+auth: Claude subscription login (single-operator path)
+```
+
 The daemon scrubs its own `SLACK_*`/`CONDOTTO_*` secrets out of the agent's shell,
-but **keeps** the Claude auth the runtime needs.
+and **keeps** the Claude credential the runtime needs — see
+[Security & trust model](#security--trust-model) for what that means and what
+guards it.
 
 ---
 
@@ -233,7 +288,9 @@ $EDITOR condotto.toml
 discovers `./condotto.toml` by default; override with `--config <path>` or
 `CONDOTTO_CONFIG`. **Every value can also be set (or overridden) by an environment
 variable**, and the env var always wins — so you can keep secrets out of the file
-if you prefer.
+if you prefer. (One deliberate exception: `[auth].api_key` outranks
+`ANTHROPIC_API_KEY`, so a stray key in a shell profile can't silently displace the
+one you configured. The key is never *required* in the file either way.)
 
 The daemon **validates at boot** and fails fast with an actionable message on a
 missing file, malformed TOML, or a bad required field — never a half-started
@@ -250,6 +307,11 @@ architects = ["slack:U0123ABC"]
 [slack]
 bot_token = "xoxb-…"   # Bot User OAuth Token   (env: SLACK_BOT_TOKEN)
 app_token = "xapp-…"   # App-Level Token         (env: SLACK_APP_TOKEN)
+
+[auth]
+# "api_key" (default for team use) or "subscription" (one operator, own sessions).
+# The key itself belongs in ANTHROPIC_API_KEY, not here.
+mode = "api_key"
 
 [paths]
 db = "condotto.sqlite"                       # audit log, sessions, roles (env: CONDOTTO_DB_PATH)
@@ -477,12 +539,30 @@ Slack. Two features make that practical:
   off`, or globally with `CONDOTTO_AUTO_APPROVE=off`.
 
 > **Residual risk, stated plainly (accepted for the trusted-team model):** under
-> auto-approve, in-worktree shell on an architect's turn runs without a click, and
-> the agent's shell still inherits the Claude OAuth token the runtime needs. The
-> disposable worktree, unforgeable framing, verified-surface gating, and full
-> audit trail bound the blast radius; the hard-deny floor blocks the sharpest
-> credential-exfil and host-escape shapes. This is a deliberate trade for a team
-> that already trusts each other, not a claim of isolation.
+> auto-approve, in-worktree shell on an architect's turn runs without a click.
+>
+> **The agent's shell can reach the Claude credential.** This is true in **both**
+> auth modes and is worth understanding rather than glossing. The runtime the agent
+> runs inside is what authenticates to Anthropic, so the credential rides that
+> process's environment — the SDK's documented mechanism. The agent's `Bash` tool
+> is a child of that process, so the value is in principle readable. What guards it
+> is **not** the credential's absence: it is the hard-deny on any command naming
+> `ANTHROPIC_API_KEY` or `CLAUDE_CODE_OAUTH_TOKEN` (no button, no auto-approve
+> override), plus the separate scrub that keeps both out of land/deploy commands.
+> Both are pinned by tests. One exception: under subscription auth on a desktop,
+> the credential lives in the OS keychain rather than the environment, so there is
+> nothing there to read.
+>
+> This is where the two modes genuinely differ, and it favours the API key: **an
+> API key is rotatable and spend-cappable in Console; a personal subscription
+> credential is neither.** If a key does leak, you revoke it and the cap bounds the
+> damage in the meantime. A leaked personal OAuth credential is your Claude
+> account, with no equivalent lever.
+>
+> The disposable worktree, unforgeable framing, verified-surface gating, and full
+> audit trail bound the rest of the blast radius; the hard-deny floor blocks the
+> sharpest credential-exfil and host-escape shapes. This is a deliberate trade for
+> a team that already trusts each other, not a claim of isolation.
 
 ### What Condotto does **not** defend against
 
@@ -506,16 +586,19 @@ Sample units live in [`deploy/`](deploy/); each has step-by-step install comment
 at the top. Edit the paths/user to match your install before enabling.
 
 - **Linux (systemd):** [`deploy/condotto.service`](deploy/condotto.service). Runs as
-  a dedicated `condotto` user, restarts on failure, reads the Claude token from an
-  `EnvironmentFile`, and shuts down cleanly on `SIGTERM`.
+  a dedicated `condotto` user, restarts on failure, reads the Claude credential
+  (`ANTHROPIC_API_KEY`, or `CLAUDE_CODE_OAUTH_TOKEN` under subscription auth) from
+  an `EnvironmentFile`, and shuts down cleanly on `SIGTERM`.
   ```sh
   sudo cp deploy/condotto.service /etc/systemd/system/
   sudo systemctl daemon-reload && sudo systemctl enable --now condotto
   journalctl -u condotto -f
   ```
 - **macOS (launchd):** [`deploy/com.condotto.daemon.plist`](deploy/com.condotto.daemon.plist).
-  Install as a **per-user LaunchAgent** (`~/Library/LaunchAgents/`) so it runs in
-  your session and can reach keychain OAuth — no token needed.
+  Under API key auth, put `ANTHROPIC_API_KEY` in the unit's environment. Under
+  subscription auth, install it as a **per-user LaunchAgent**
+  (`~/Library/LaunchAgents/`) so it runs in your session and can reach keychain
+  OAuth — no token needed.
   ```sh
   cp deploy/com.condotto.daemon.plist ~/Library/LaunchAgents/
   launchctl load ~/Library/LaunchAgents/com.condotto.daemon.plist
@@ -601,9 +684,15 @@ you're done with a thread for good.
 Each thread has a cost ceiling (`cost_cap_usd`); a runaway thread pauses and pings
 the architect, who raises it with `@Condotto budget <usd>`. `@Condotto cancel`
 interrupts a wedged or over-spending turn (including a detached background
-workflow). Note: on subscription auth the reported `total_cost_usd` is *notional*
-API pricing — treat budgets as **usage governance**; the real constraint is your
-plan's rate limits.
+workflow).
+
+What `total_cost_usd` means depends on your auth mode:
+
+- **API key** — real spend, billed per token against your Console account. Budgets
+  govern actual money. Set a spend cap in Console as the backstop that does not
+  depend on Condotto being correct.
+- **Subscription** — *notional* API pricing; nothing is billed per token. Treat
+  budgets as **usage governance**; the real constraint is your plan's rate limits.
 
 ### Backups
 

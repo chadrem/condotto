@@ -28,8 +28,27 @@ export type QueryFn = (args: { prompt: unknown; options: Record<string, any> }) 
 //
 // Verified facts this code builds on (spike 2026-07-16 + live docs, see
 // DECISIONS.md and DESIGN.md Appendix B):
-//  - Auth is the machine's Claude subscription login (keychain OAuth). There is
-//    no ANTHROPIC_API_KEY in this deployment and this file must never read one.
+//  - Auth is EITHER an Anthropic API key OR the machine's Claude subscription
+//    login (keychain OAuth / headless CLAUDE_CODE_OAUTH_TOKEN). The credential is
+//    resolved by the composition root (core/config loadAuthConfig) and handed in;
+//    this file never reads it from the environment itself.
+//
+//    REVERSED 2026-07-20. This comment previously read "There is no
+//    ANTHROPIC_API_KEY in this deployment and this file must never read one" —
+//    true of the original single-operator deployment, wrong as a rule for an
+//    installable daemon. Anthropic's guidance is that developers building on the
+//    Agent SDK authenticate with a Console API key, and that Free/Pro/Max plan
+//    limits assume ordinary individual use; Condotto is explicitly multi-person.
+//    So API key is now the documented default and subscription OAuth is the
+//    explicitly single-operator path. Both are supported. See DECISIONS.md
+//    2026-07-20 and DESIGN.md Appendix B.
+//
+//    The key reaches the model by riding the SDK subprocess environment — the
+//    SDK's documented mechanism (sdk.d.ts:1414 names ANTHROPIC_API_KEY as a
+//    variable the subprocess needs inherited). That means it is readable from the
+//    agent's own shell, exactly as CLAUDE_CODE_OAUTH_TOKEN already is; what
+//    guards it is the policy hard-deny on commands naming either variable
+//    (core/policy.ts) plus CommandRunner's scrub. Do not weaken either.
 //  - `resume: <sessionId>` + same cwd resumes a session across processes;
 //    session storage is keyed by encoded cwd, so cwd must be stable.
 //  - Without the claude_code systemPrompt preset the model has no environment
@@ -220,13 +239,32 @@ const DRAIN_AFTER_ABORT_MS = 30_000;
  * unlike the agent, does not need it.
  */
 const DAEMON_SECRET_ENV_PREFIXES = ["SLACK_", "CONDOTTO_"];
-export function scrubDaemonEnv(base: NodeJS.ProcessEnv): Record<string, string> {
+
+/**
+ * The resolved harness credential, handed down by the composition root. Structurally
+ * `core/config`'s `AuthConfig`, restated locally so the adapter depends on the shape
+ * rather than importing a core type through the port.
+ */
+export type HarnessAuth = { mode: "api_key" | "subscription"; apiKey?: string };
+export function scrubDaemonEnv(base: NodeJS.ProcessEnv, auth?: HarnessAuth): Record<string, string> {
   const out: Record<string, string> = {};
   for (const [k, v] of Object.entries(base)) {
     if (v === undefined) continue;
     if (DAEMON_SECRET_ENV_PREFIXES.some((p) => k.startsWith(p))) continue;
     out[k] = v;
   }
+  // Three states, deliberately distinct. NO auth argument — tests and the
+  // scripts/smoke-* harnesses, which construct the adapter bare — means inherit
+  // whatever the environment has, exactly as before this parameter existed; a
+  // smoke run under api_key auth must still pick up the operator's key.
+  if (!auth) return out;
+  // A RESOLVED auth config, from the daemon's composition root, is authoritative:
+  // api_key installs the chosen key, and subscription deletes any ANTHROPIC_API_KEY
+  // the daemon happened to inherit, so a stray shell-profile export can't silently
+  // bill an operator who configured subscription auth. Keychain OAuth and a headless
+  // CLAUDE_CODE_OAUTH_TOKEN are untouched in every state.
+  if (auth.mode === "api_key" && auth.apiKey) out.ANTHROPIC_API_KEY = auth.apiKey;
+  else delete out.ANTHROPIC_API_KEY;
   return out;
 }
 
@@ -330,6 +368,11 @@ class ClaudeCodeSession implements HarnessSession {
      * ordinary session. See `additionalDirectories` at the query below.
      */
     private root?: string,
+    /**
+     * The resolved harness credential, or undefined to inherit the ambient
+     * environment (tests / smoke harnesses). Never read from the environment here.
+     */
+    private auth?: HarnessAuth,
   ) {}
 
   /** The in-flight query, so an out-of-band interrupt() can reach it.
@@ -465,7 +508,7 @@ class ClaudeCodeSession implements HarnessSession {
         // floor). options.env REPLACES the subprocess env, so this is a denylist
         // spread of process.env that keeps PATH/HOME + the toolchain + the Claude
         // auth token the SDK needs (spike-proven under keychain OAuth).
-        env: scrubDaemonEnv(process.env),
+        env: scrubDaemonEnv(process.env, this.auth),
         // Point the SDK at the native `claude` CLI when running as a compiled
         // binary; omitted under `bun run`, where the SDK finds it itself.
         ...(claudeCliPath() ? { pathToClaudeCodeExecutable: claudeCliPath()! } : {}),
@@ -824,11 +867,24 @@ export class ClaudeCodeAdapter implements HarnessAdapter {
   constructor(
     private queryFn: QueryFn = query as unknown as QueryFn,
     private turnInactivityMs: number = TURN_INACTIVITY_MS,
+    /**
+     * Harness credentials from the composition root (core/config loadAuthConfig).
+     * UNDEFINED when the adapter is constructed bare — every test and every
+     * scripts/smoke-* harness — in which case the agent inherits the ambient
+     * environment exactly as it did before this parameter existed. Only the daemon
+     * passes a resolved config, and only then does the credential become
+     * authoritative. See scrubDaemonEnv.
+     */
+    private auth?: HarnessAuth,
   ) {}
   readonly capabilities: HarnessCapabilities = {
     mechanicalGating: true, // defer-based gating (verified), wired live
     resumeAfterRestart: true,
-    costReporting: true, // notional API pricing on subscription auth — usage governance only
+    // Under api_key auth total_cost_usd is real spend against the Console account;
+    // under subscription auth it is notional API pricing (nothing is billed per
+    // token) and serves only as a usage-governance signal. Budgets work the same
+    // either way — only the meaning of the number changes.
+    costReporting: true,
     imageInput: true, // the runtime accepts images; the TurnInput image path arrives with attachments
     // The tokens the core validates an architect's model/effort against.
     supportedModels: SUPPORTED_MODELS, // ["opus","sonnet","fable"]
@@ -843,10 +899,19 @@ export class ClaudeCodeAdapter implements HarnessAdapter {
       this.queryFn,
       this.turnInactivityMs,
       opts.root,
+      this.auth,
     );
   }
 
   async resume(handle: SessionHandle, cwd: string, system: string, root?: string): Promise<HarnessSession> {
-    return new ClaudeCodeSession(asHandle(handle), cwd, system, this.queryFn, this.turnInactivityMs, root);
+    return new ClaudeCodeSession(
+      asHandle(handle),
+      cwd,
+      system,
+      this.queryFn,
+      this.turnInactivityMs,
+      root,
+      this.auth,
+    );
   }
 }

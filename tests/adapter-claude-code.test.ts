@@ -164,12 +164,55 @@ describe("env-scrub the agent shell (rider a)", () => {
     expect(out.CONDOTTO_CLAUDE_CLI).toBeUndefined();
     expect(out.PATH).toBe("/usr/bin");
     expect(out.HOME).toBe("/Users/x");
-    // The Claude auth token never matches the prefixes — the SDK needs it (keychain
-    // OAuth AND a headless CLAUDE_CODE_OAUTH_TOKEN both survive; spike a).
+    // The Claude subscription token never matches the prefixes — the SDK needs it
+    // (keychain OAuth AND a headless CLAUDE_CODE_OAUTH_TOKEN both survive; spike a).
     expect(out.CLAUDE_CODE_OAUTH_TOKEN).toBe("oauth-keep");
-    expect(out.ANTHROPIC_API_KEY).toBe("sk-keep");
     expect(out.MY_TOOLCHAIN).toBe("keep");
     expect("UNSET" in out).toBe(false); // undefined values are dropped
+  });
+
+  // The api_key auth path (2026-07-20). ANTHROPIC_API_KEY is no longer inherited
+  // from the daemon's own environment — it is installed from the RESOLVED auth
+  // config or not at all, so subscription mode can't silently bill a stray key
+  // left in a shell profile.
+  test("scrubDaemonEnv installs the API key under api_key auth", () => {
+    const out = scrubDaemonEnv({ PATH: "/usr/bin" }, { mode: "api_key", apiKey: "sk-ant-resolved" });
+    expect(out.ANTHROPIC_API_KEY).toBe("sk-ant-resolved");
+    expect(out.PATH).toBe("/usr/bin");
+  });
+
+  test("scrubDaemonEnv drops an inherited ANTHROPIC_API_KEY under subscription auth", () => {
+    const out = scrubDaemonEnv({ PATH: "/usr/bin", ANTHROPIC_API_KEY: "sk-stray" }, { mode: "subscription" });
+    expect("ANTHROPIC_API_KEY" in out).toBe(false);
+  });
+
+  // A bare adapter (every test above, and all eleven scripts/smoke-*.ts) passes no
+  // auth at all. That MUST mean "inherit the ambient environment", not "subscription"
+  // — otherwise a smoke run under api_key auth would have its key stripped and fail
+  // to authenticate. Caught in review of the api_key change itself.
+  test("scrubDaemonEnv inherits an ambient key when no auth config is supplied", () => {
+    const out = scrubDaemonEnv({ PATH: "/usr/bin", ANTHROPIC_API_KEY: "sk-ambient" });
+    expect(out.ANTHROPIC_API_KEY).toBe("sk-ambient");
+  });
+
+  test("a bare ClaudeCodeAdapter does not strip the ambient key from a turn's env", async () => {
+    process.env.ANTHROPIC_API_KEY = "sk-smoke";
+    try {
+      let captured: any;
+      const q = fakeQuery(async function* (opts) {
+        captured = opts;
+        yield { type: "result", subtype: "success", result: "ok", total_cost_usd: 0 };
+      });
+      await collect(new ClaudeCodeAdapter(q), allowGate);
+      expect(captured.env.ANTHROPIC_API_KEY).toBe("sk-smoke");
+    } finally {
+      delete process.env.ANTHROPIC_API_KEY;
+    }
+  });
+
+  test("scrubDaemonEnv prefers the resolved key over an inherited one", () => {
+    const out = scrubDaemonEnv({ ANTHROPIC_API_KEY: "sk-stray" }, { mode: "api_key", apiKey: "sk-ant-resolved" });
+    expect(out.ANTHROPIC_API_KEY).toBe("sk-ant-resolved");
   });
 
   test("a turn passes the scrubbed env to the SDK query options", async () => {

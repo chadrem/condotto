@@ -34,6 +34,28 @@ architects = [
 bot_token = "xoxb-your-bot-token"   # Bot User OAuth Token (starts xoxb-)
 app_token = "xapp-your-app-token"   # App-Level Token for Socket Mode (starts xapp-)
 
+# How the agent authenticates to Anthropic. Pick by how many people drive sessions.
+#
+#   "api_key"      An API key from Claude Console (https://platform.claude.com/).
+#                  The default, and what you want for a team: it is the documented
+#                  path for building on the Agent SDK, and it is rotatable and
+#                  spend-cappable. Put the key in ANTHROPIC_API_KEY — it never has
+#                  to live in this file.
+#   "subscription" Your machine's Claude login (keychain OAuth, or
+#                  CLAUDE_CODE_OAUTH_TOKEN on a headless box). Anthropic scopes
+#                  this to ordinary individual use of Claude Code and the Agent
+#                  SDK, so it is the single-operator path: one architect driving
+#                  their own sessions. Fully supported — just not for teams. With
+#                  more than one principal able to drive sessions the daemon warns
+#                  at boot and keeps going.
+#
+# Omit this section entirely and the mode is inferred: api_key when a key is
+# available, subscription otherwise. See the README ("Authenticate Claude").
+[auth]
+mode = "api_key"
+# api_key = "sk-ant-..."   # Optional and NOT recommended — prefer ANTHROPIC_API_KEY
+#                          # in the environment. If set here, it outranks the env var.
+
 # Optional richer role mappings beyond the architects above — e.g. a member
 # locked to one channel's scope, or an observer. Most setups don't need this;
 # `architects` above is the quick path. Roles delegated at runtime with

@@ -14,10 +14,20 @@
 #        sudo -u condotto mkdir -p /opt/condotto
 #        # copy dist/<platform>/{condotto,claude} into /opt/condotto/
 #        # copy your filled-in condotto.toml into /opt/condotto/ (chmod 600 — it holds secrets)
-#   3. Put the Claude auth token where the EnvironmentFile points (headless box
-#      has no keychain — mint one with `claude setup-token`):
+#   3. Put the Claude credential where the EnvironmentFile points.
+#
+#      API KEY (recommended, and required if more than one person drives
+#      sessions — see the README "Authenticate Claude"). Pair with
+#      `[auth] mode = "api_key"` in condotto.toml:
 #        sudo mkdir -p /etc/condotto
+#        printf 'ANTHROPIC_API_KEY=%s\n' "$KEY" | sudo tee /etc/condotto/env >/dev/null
+#
+#      SUBSCRIPTION (single operator only; a headless box has no keychain, so
+#      mint a token with `claude setup-token`). Pair with
+#      `[auth] mode = "subscription"`:
 #        printf 'CLAUDE_CODE_OAUTH_TOKEN=%s\n' "$TOKEN" | sudo tee /etc/condotto/env >/dev/null
+#
+#      Either way, lock the file down:
 #        sudo chmod 600 /etc/condotto/env && sudo chown condotto:condotto /etc/condotto/env
 #   4. Install + start:
 #        sudo cp deploy/condotto.service /etc/systemd/system/condotto.service

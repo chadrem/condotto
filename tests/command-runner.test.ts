@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { CommandRunner } from "../src/core/command-runner";
+import { CommandRunner, DEFAULT_SCRUB_ENV } from "../src/core/command-runner";
 
 describe("CommandRunner", () => {
   test("runs a command in the given cwd and captures output + exit code", async () => {
@@ -26,6 +26,35 @@ describe("CommandRunner", () => {
       expect(notScrubbed.output).toBe("[leaky]");
     } finally {
       delete process.env.CONDOTTO_TEST_SECRET;
+    }
+  });
+
+  // REGRESSION GUARD (2026-07-20, api_key auth). Adding API-key support put a live
+  // Anthropic credential in the daemon's environment on the DEFAULT path, where
+  // previously subscription auth usually kept it in the keychain. The daemon holds
+  // the credential; a repo's land/deploy command must never see it. Deleting a name
+  // from DEFAULT_SCRUB_ENV must fail loudly here rather than silently widen the
+  // blast radius. Paired with the policy hard-deny in tests/policy.test.ts.
+  test("DEFAULT_SCRUB_ENV covers both Anthropic credential names", () => {
+    expect(DEFAULT_SCRUB_ENV).toContain("ANTHROPIC_API_KEY");
+    expect(DEFAULT_SCRUB_ENV).toContain("CLAUDE_CODE_OAUTH_TOKEN");
+  });
+
+  test("the default scrub keeps Anthropic credentials out of a deploy command", async () => {
+    process.env.ANTHROPIC_API_KEY = "sk-ant-leak";
+    process.env.CLAUDE_CODE_OAUTH_TOKEN = "oauth-leak";
+    try {
+      // No scrubEnv override — this is the production default the daemon runs with.
+      const res = await new CommandRunner().run(
+        "echo [$ANTHROPIC_API_KEY][$CLAUDE_CODE_OAUTH_TOKEN]",
+        "/tmp",
+      );
+      expect(res.output).toBe("[][]");
+      expect(res.output).not.toContain("sk-ant-leak");
+      expect(res.output).not.toContain("oauth-leak");
+    } finally {
+      delete process.env.ANTHROPIC_API_KEY;
+      delete process.env.CLAUDE_CODE_OAUTH_TOKEN;
     }
   });
 

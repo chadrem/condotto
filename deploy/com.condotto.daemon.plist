@@ -2,12 +2,17 @@
 <!--
   Sample launchd unit for the Condotto daemon (macOS, M4 §6).
 
-  Install this as a per-user LaunchAgent (NOT a system LaunchDaemon). A
-  LaunchAgent runs inside your logged-in GUI session, so the Claude Code SDK can
-  reach the keychain OAuth credentials from your `claude` login — no API key and
-  no CLAUDE_CODE_OAUTH_TOKEN needed. (A LaunchDaemon runs before login without
-  your keychain; if you must use one, set CLAUDE_CODE_OAUTH_TOKEN in
-  EnvironmentVariables via `claude setup-token`.)
+  AUTH. Under API key auth — the default, and what you want if more than one
+  person drives sessions — set ANTHROPIC_API_KEY in EnvironmentVariables below
+  and `[auth] mode = "api_key"` in condotto.toml. Either unit type works.
+
+  Under subscription auth (single operator driving their own sessions), install
+  this as a per-user LaunchAgent (NOT a system LaunchDaemon): a LaunchAgent runs
+  inside your logged-in GUI session, so the Claude Code SDK can reach the keychain
+  OAuth credentials from your `claude` login — nothing to set below. (A
+  LaunchDaemon runs before login without your keychain; if you must use one, set
+  CLAUDE_CODE_OAUTH_TOKEN via `claude setup-token`.) See the README
+  ("Authenticate Claude").
 
   Heads-up: a laptop that sleeps kills an actively-streaming turn (parked
   sessions survive on disk and resume). An always-on Mac — or a Linux box with
@@ -46,15 +51,18 @@
     <key>WorkingDirectory</key>
     <string>/Users/YOU/condotto</string>
 
-    <!-- With a LaunchAgent + keychain OAuth you usually need nothing here. For a
-         headless/LaunchDaemon setup, uncomment and paste a `claude setup-token`
-         value. The daemon keeps this token for the agent runtime while scrubbing
-         its own SLACK_*/CONDOTTO_* secrets out of the agent's shell. -->
+    <!-- API key auth: uncomment and paste a Claude Console key (and set
+         `[auth] mode = "api_key"` in condotto.toml).
+         Subscription auth on a LaunchAgent: leave this alone — keychain OAuth
+         needs nothing here. Subscription on a headless/LaunchDaemon setup: swap
+         the key below for CLAUDE_CODE_OAUTH_TOKEN from `claude setup-token`.
+         The daemon keeps whichever credential the agent runtime needs while
+         scrubbing its own SLACK_*/CONDOTTO_* secrets out of the agent's shell. -->
     <!--
     <key>EnvironmentVariables</key>
     <dict>
-        <key>CLAUDE_CODE_OAUTH_TOKEN</key>
-        <string>REPLACE_WITH_TOKEN</string>
+        <key>ANTHROPIC_API_KEY</key>
+        <string>REPLACE_WITH_KEY</string>
     </dict>
     -->
 
