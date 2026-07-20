@@ -1969,3 +1969,103 @@ Bun's undici coverage moves; re-run the two one-liners above as the check.
 --frozen-lockfile`, explains the pin, and gives `bun pm ls | grep -E
 'bolt|socket-mode'` as the verification (want bolt@4.x, socket-mode@2.x); the
 troubleshooting table gains a row keyed on the `undici_1.ping` error text.
+
+---
+
+## 2026-07-20 — Monorepo sessions: cwd moves to the sub-project, the boundary does not
+
+**Problem.** Every session's working directory was pinned to the repo root. The
+chain `git worktree add` → `sessions.worktree_path` → harness `cwd` → policy
+confinement root was one string with no seam. In a monorepo whose top-level
+folders are each a separate app, that drops the agent at the root of everything —
+the wrong `CLAUDE.md`, the wrong test command, the wrong relative paths. A human
+`cd`s into the sub-project before opening an editor; Condotto had no way to say so.
+
+**Decided:** `@Condotto assign <repo>/<sub-project>` (and the two-token
+`assign <repo> <sub-project>`). The worktree stays repo-wide; only the cwd moves.
+Stored as `sessions.workdir`, relative and POSIX-style, `NULL` = repo root
+(migration v3, so existing sessions are byte-identical without a backfill).
+
+**The load-bearing change is in the policy engine, and it is not the obvious one.**
+`offendingPath` resolved relative inputs against the worktree, on the explicit
+assumption that "the harness cwd IS the worktree." With cwd one level down that
+assumption is false in a way that *fails closed*: from `apps/report` the agent's
+`../../packages/shared/x.ts` really means `<wt>/packages/shared/x.ts` — inside the
+worktree — but resolving it at the root lands above the root and denies. Not a
+hole, but it would deny exactly the shared-package edit the feature exists to
+enable, i.e. the feature would look implemented and be useless.
+
+So the two paths are now separate: a resolution **base** (the cwd) and a
+containment **root** (the worktree). **The invariant: containment is computed only
+from the root, never from the base.** A crafted `workdir` can therefore only
+relocate a path within the boundary, never authorize one outside it; absolute
+paths and `~` ignore the base entirely. `offendingPath`'s third parameter defaults
+to the root, so every pre-existing call site keeps its exact prior behaviour.
+
+**Two hardenings fell out of that, both found by adversarial review, not by us
+writing the happy path:**
+
+1. **`realpath`, not `existsSync`, when validating the sub-project.** Confinement
+   is lexical (`path.resolve` never follows symlinks), which was tolerable while
+   the base was a path Condotto derived itself. A `workdir` names *committed repo
+   content*. If `apps/report` is a symlink to `/etc`, the real cwd is `/etc`, every
+   lexically-inside path passes policy, and `open()` follows the link out of the
+   tree. One `realpath` + containment re-test at assign closes it without needing
+   general symlink hardening. Validation is two-stage: a pure shape check *before*
+   the worktree exists (a typo then provisions nothing), the filesystem check after.
+2. **A `..` segment in a Glob `pattern` is refused outright.** A pattern is
+   matched, not resolved: `**` counts as one segment lexically while expansion
+   walks arbitrarily deep. That mismatch gave a pattern more lexical headroom than
+   it should have, and the headroom grows with the depth of the base. Refusing `..`
+   removes the amplification and costs the agent nothing (scope with Glob's `path`).
+
+**Rejected:**
+
+- *Narrowing confinement to the sub-project.* Tighter blast radius, but it blocks
+  edits to shared packages and root config — a false denial the agent cannot work
+  around, in the case that motivates monorepo support. The boundary stays the
+  worktree.
+- *`repos.default_subdir`.* Six more edit sites, and its only effect is to change
+  what a bare `assign <repo>` means — implicit and non-obvious, against the
+  no-default-repo posture set on 2026-07-20. Deferred until asked for.
+- *Re-pointing a stopped session on reassignment.* Reactivation previously ignored
+  its arguments entirely (`assign otherrepo` silently resumed the original — a
+  latent wart a sub-project would have made dangerous). Honouring the new target is
+  impossible, not merely unwise: transcript storage is keyed by encoded cwd, so
+  resuming elsewhere loses the context the reactivation message promises to keep.
+  A mismatched repo *or* sub-project is now refused with a pointer to a new thread.
+
+**Consequences.** `land_cmd`/`deploy_cmd` and `test_cmd` now run in the
+sub-project. Nothing changes for existing installs (`workdir` NULL = the root),
+but a root-level runner in a monorepo needs `cd ../.. && …`, and a root `test_cmd`
+needs both `cd ../..` and the command in `safe_bash_allowlist` — otherwise
+`bashFullyAllowlisted` (every `&&` segment must match) drops the agent's free
+verify-before-land loop into per-run approval. Documented in README "Monorepos"
+and `condotto.example.toml` rather than papered over with new machinery.
+
+The harness port gained an optional `root` alongside `cwd`: the SDK models working
+roots at or below cwd (`register_repo_root` requires "a subdirectory of cwd"), so
+the worktree root is passed as `additionalDirectories` when it sits above the
+session. Omitted when cwd *is* the root, so ordinary sessions are unchanged.
+The Slack mention grammar now accepts a 3-word `assign` — previously
+`assign repo sub` matched no rule and was **silently swallowed as conversation**,
+giving the architect no error at all.
+
+**Not verified (live testing still owed, per the plan).** Whether the SDK
+discovers a root-only `CLAUDE.md`, root `.claude/settings.json`, or root-level
+skills by walking *up* from a sub-project cwd — nothing in the SDK docs states it,
+and trusted monorepos are exactly the population with a root `CLAUDE.md`.
+`additionalDirectories` is the lever if not. Also unverified: whether subagent and
+workflow agents inherit the sub-project cwd.
+
+**Tests:** `tests/policy.test.ts` pins the invariant table (relative sibling
+allowed; `/etc/passwd`, `~/.aws/credentials`, deep `../`, and the `/wt-evil`
+sibling-prefix all still denied; a hostile cwd cannot widen the boundary; Glob
+`..` denied). `tests/worktrees.test.ts` covers `normalizeSubdir`/`sessionCwd`/
+`verifyWorkdir`, including the symlink-out-of-tree escape. `tests/session-manager.
+test.ts` gains a real monorepo fixture (`apps/report`, `apps/web`,
+`packages/shared`) and covers both spellings, harness cwd + root, shape-typo
+refused with no worktree created, missing sub-project refused *and* torn down with
+no orphan, land in the sub-project, and refused re-pointing. `tests/store.test.ts`
+covers the v3 round-trip; the pre-runner-rewind test now drops each post-v1 column.
+353 tests pass; `check:ports` and `tsc --noEmit` clean.

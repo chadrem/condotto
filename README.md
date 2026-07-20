@@ -277,6 +277,10 @@ deploy_cmd = "make deploy"        # architect-ordered `@Condotto deploy`, same h
 **At least one `[[repos]]` entry is required.** There is no default repo: Condotto
 only works in repos you name, and it refuses to start with none configured.
 
+A monorepo is **one** `[[repos]]` entry — you pick the sub-project when you assign
+(`/condotto assign webapp/apps/report`), not here. See [Monorepos](#monorepos) for
+what that means for `test_cmd` and `land_cmd`.
+
 For your first session, point an entry at a throwaway clone and leave land/deploy
 as no-ops until you've watched the gate work:
 
@@ -338,7 +342,8 @@ you can assign):
 1. **Assign a session:** `/condotto assign <repo>` (naming one of your `[[repos]]`)
    Condotto posts an anchor message; its thread is your session. (To assign an
    *existing* thread instead, mention **`@Condotto assign`** inside it — slash
-   commands can't run in threads.)
+   commands can't run in threads.) Working in a monorepo? Name the sub-project
+   too — `/condotto assign <repo>/apps/report`. See [Monorepos](#monorepos).
 2. **Talk to it in the thread.** Ask it to explore, explain, or plan — reads run
    without approval. "What does this repo do?" "Add a `/health` endpoint that
    returns 200."
@@ -358,7 +363,7 @@ you can assign):
 
 | Command | Who | Does |
 |---|---|---|
-| `/condotto assign <repo>` | architect | Start a new session in this channel. Omit the repo and Condotto asks which one — there is no default. |
+| `/condotto assign <repo>[/<sub-project>]` | architect | Start a new session in this channel. Omit the repo and Condotto asks which one — there is no default. In a monorepo, add a sub-project to start there. |
 | `/condotto status` | architect | Daemon-wide **operator dashboard** (ephemeral): uptime, session counts, turns-in-flight vs. cap, pending approvals, config summary. |
 | `/condotto stop` | anyone | Lists this channel's sessions and points you to the in-thread stop. |
 
@@ -373,7 +378,7 @@ sessions themselves, an architect `@Condotto grant`s them architect rights (see
 
 | Mention | Who | Does |
 |---|---|---|
-| `@Condotto assign <repo>` | architect | Assign *this* thread as a session. Omit the repo and Condotto asks which one. |
+| `@Condotto assign <repo>[/<sub-project>]` | architect | Assign *this* thread as a session. Omit the repo and Condotto asks which one. See [monorepos](#monorepos). |
 | `@Condotto status` | anyone | This channel's sessions + their settings. |
 | `@Condotto stop [clean]` | architect | End the session; `clean` also discards the worktree. |
 | `@Condotto cancel` | architect | Interrupt the running turn (e.g. a runaway workflow); the session lives on. |
@@ -388,6 +393,43 @@ sessions themselves, an architect `@Condotto grant`s them architect rights (see
 | `@Condotto auto-approve on\|off` | architect | Run an architect's own turns without the Approve click (on by default). |
 | `@Condotto grant @user architect [everywhere]` | architect | Delegate authority (this channel, or `everywhere`). Persists across restarts. |
 | `@Condotto revoke @user [everywhere]` | architect | Remove a runtime grant. |
+
+---
+
+## Monorepos
+
+If a repo holds several apps or services side by side, name the one you want and
+Condotto starts there — the same `cd apps/report` you'd do before opening an editor:
+
+```
+@Condotto assign monorepo/apps/report
+@Condotto assign monorepo apps/report   # same thing, if you prefer a space
+@Condotto assign monorepo               # the repo root
+```
+
+The agent's working directory becomes that sub-project, so its `CLAUDE.md`, its
+scripts, and relative paths all resolve the way a human working there expects.
+
+**The whole worktree stays in scope.** Only the starting point moves — the agent
+can still read and edit shared packages, root configuration, and sibling
+sub-projects, because real monorepo changes rarely stay in one folder. The
+security boundary is unchanged: it is the worktree, and everything outside it is
+hard-denied exactly as before.
+
+Two things follow from the cwd being the sub-project:
+
+- **`land_cmd` / `deploy_cmd` run there**, not at the repo root. For a per-app
+  Makefile that's what you want. For a root-level runner, write the command to
+  step up: `cd ../.. && turbo run deploy`.
+- **`test_cmd` runs there too.** Set it to the sub-project's own test command.
+  If you'd rather run the root suite, add both `cd ../..` and that command to the
+  repo's `safe_bash_allowlist` — otherwise the compound command isn't fully
+  allowlisted and the agent's free verify-before-land loop starts asking for
+  approval on every run.
+
+A session's sub-project is fixed when it's assigned and can't be changed
+afterwards (the agent's conversation history is tied to its working directory).
+To work somewhere else, start a new thread.
 
 ---
 

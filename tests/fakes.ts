@@ -245,8 +245,8 @@ export class FakeHarness implements HarnessAdapter {
   };
 
   sessionSeq = 0;
-  created: { cwd: string; system: string }[] = [];
-  resumed: { handle: SessionHandle; cwd: string; system: string }[] = [];
+  created: { cwd: string; system: string; root?: string }[] = [];
+  resumed: { handle: SessionHandle; cwd: string; system: string; root?: string }[] = [];
   allTurns: { cwd: string; text: string; budgetUsd?: number; harness?: HarnessTurnOptions }[] = [];
   /** Tool calls the gate allowed to run (approved or auto-allowed). */
   executed: ToolCall[] = [];
@@ -283,13 +283,13 @@ export class FakeHarness implements HarnessAdapter {
     return this.resumeScripts.shift() ?? null;
   }
 
-  async create(opts: { cwd: string; system: string }): Promise<HarnessSession> {
+  async create(opts: { cwd: string; system: string; root?: string }): Promise<HarnessSession> {
     this.created.push(opts);
     return new FakeHarnessSession({ fake: true, sessionId: null, system: opts.system }, opts.cwd, this);
   }
 
-  async resume(handle: SessionHandle, cwd: string, system: string): Promise<HarnessSession> {
-    this.resumed.push({ handle, cwd, system });
+  async resume(handle: SessionHandle, cwd: string, system: string, root?: string): Promise<HarnessSession> {
+    this.resumed.push({ handle, cwd, system, root });
     // Reflect the freshly-supplied prompt, as the real adapter does.
     return new FakeHarnessSession({ ...(handle as FakeHandle), system }, cwd, this);
   }

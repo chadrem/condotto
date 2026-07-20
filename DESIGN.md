@@ -116,6 +116,18 @@ web UI. The journeys themselves are surface-agnostic.)
    from here on, every human message in the thread is a turn for that session,
    and every session reply is posted back into the thread.
 
+   **Monorepos.** Either path accepts a sub-project — `@Condotto assign
+   webapp/apps/report`, or the equivalent two-token `assign webapp apps/report`
+   (a repo name cannot contain `/`, so the first slash splits unambiguously). The
+   worktree is still created repo-wide; only the session's **cwd** moves, to that
+   subdirectory, mirroring the `cd` a human does before opening an editor. The
+   confinement boundary does NOT move — it stays the whole worktree, so shared
+   packages and root config remain editable, which is what monorepo work actually
+   requires. The sub-project is validated in two stages: a pure shape check before
+   the worktree is created (so a typo provisions nothing), then a `realpath`
+   containment check after (see §4). It is stored relative on the session and is
+   IMMUTABLE — see §5.
+
 2. **Converse.** Members describe the problem, drop screenshots, link to code.
    The session reads the whole thread as context, reads the repo, asks
    clarifying questions, and proposes an approach. This is free-flowing and
@@ -134,6 +146,8 @@ web UI. The journeys themselves are surface-agnostic.)
    the repo defines) in the worktree — never the agent's shell, so exactly the
    authoritative command runs — and still behind the Approve/Deny gate. The
    agent may propose that it's time to land, but cannot run the path itself.
+   The command runs in the session's **cwd**, so a sub-project session ships from
+   its own directory (a root-level runner is reached with `cd ../.. && …`).
 
 5. **Park & resume.** A thread can go quiet for hours or days. The daemon holds
    no process open; the session lives on disk, keyed by its worktree. The
@@ -506,6 +520,23 @@ prompt.
   needs survives.
 - Every worktree is disposable and isolated; the hard-deny set prevents writes
   outside it.
+- **Path confinement separates two things that look alike.** The containment
+  ROOT is always the worktree. The resolution BASE — what a *relative* tool input
+  resolves against — is the session's cwd, which for a monorepo sub-project sits
+  below the root. Both are needed: resolving relative paths at the root would
+  wrongly deny `../../packages/shared` (inside the worktree, and the whole point
+  of sub-project sessions), while deriving containment from the cwd would let a
+  deeper cwd widen the boundary. **The invariant: containment is computed only
+  from the root, never from the base.** A crafted `workdir` can therefore only
+  relocate a path within the boundary, never authorize one outside it; absolute
+  paths and `~` ignore the base entirely.
+  Two consequences follow. (a) Because `path.resolve` is lexical and never follows
+  symlinks, the base must be `realpath`-validated when the session is assigned —
+  it names committed repo content, and a subdirectory symlinked out of the tree
+  would make every lexically-inside path a real escape. (b) A `..` segment in a
+  **Glob pattern** is refused outright rather than resolved: a pattern is matched,
+  not resolved (`**` is one segment lexically but walks arbitrarily deep at
+  expansion), and that mismatch would otherwise grow with the depth of the base.
 - **Audit everything.** Every tool call (allowed, gated, denied), every
   approval and who clicked it, every deploy, mirrored to an append-only audit
   log and (not yet built) a read-only Slack log channel. The audit trail is
@@ -578,6 +609,15 @@ turns           id, session_id, direction, principal?, text, cost_usd?,
   storage is keyed by encoded cwd; if the path moves, the session is lost (see
   Appendix B §5). Never relocate a live session's worktree. Other harness
   adapters must document their own resume invariants in the same way.
+- `workdir` (the monorepo sub-project) is **relative, and immutable for the
+  session's life**. It is stored relative so `worktree_path` stays the single
+  absolute, never-rewritten path *and* the unmoved confinement boundary — the
+  sub-project is a pure offset from it. It is immutable for the same reason the
+  worktree path is: cwd is `worktree_path + workdir`, and session storage is keyed
+  by encoded cwd, so re-pointing it silently loses the conversation. Hence a
+  reassignment naming a different repo or sub-project is **refused**, not honoured
+  (start a new thread), and there is no `cd` command. `NULL` = the repo root,
+  which is what every session written before schema v3 has.
 - `harness_session_handle` is opaque JSON owned by the harness adapter. The
   core persists and returns it; it never inspects it.
 
@@ -732,9 +772,13 @@ confined and allowlisted bash, else gate); a `gate` becomes the SDK `defer` driv
 by the actual `deferred_tool_use`, with `canUseTool` as the deny-by-default
 batching backstop. Assign/stop/approvals are architect-only, verified server-side;
 roles are config-authoritative. Per-repo test/land/deploy run through the
-Approve/Deny gate via the core `CommandRunner` in the worktree (never the agent's
-shell; a no-op `echo` while a repo is being shaken out, a real land/deploy command
-once the operating team trusts it — per-repo config either way). Streaming
+Approve/Deny gate via the core `CommandRunner` in the session's cwd (never the
+agent's shell; a no-op `echo` while a repo is being shaken out, a real land/deploy
+command once the operating team trusts it — per-repo config either way).
+**Monorepo awareness:** `assign <repo>/<sub-project>` starts the session in a
+subdirectory (§2 journey 1) while the worktree, and the confinement boundary, stay
+repo-wide — the policy engine separates the resolution base (cwd) from the
+containment root (worktree), with containment computed only from the root (§4). Streaming
 progress is one throttled, trailing-flushed status message. A daemon-wide turn semaphore bounds concurrency over per-session
 FIFOs (in-process `query()` verified under load). Cost governance is two-layer:
 cumulative `total_cost_usd` pauses a runaway thread and pings the architect

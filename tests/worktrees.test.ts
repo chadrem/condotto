@@ -1,8 +1,14 @@
 import { beforeEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, existsSync, writeFileSync } from "node:fs";
+import { mkdtempSync, existsSync, mkdirSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { WorktreeManager } from "../src/core/worktrees";
+import {
+  WorktreeManager,
+  listTopLevelDirs,
+  normalizeSubdir,
+  sessionCwd,
+  verifyWorkdir,
+} from "../src/core/worktrees";
 
 // Real worktree teardown. These exercise the WorktreeManager against a
 // REAL git repo (no fakes): create makes a registered worktree + branch; remove
@@ -145,5 +151,126 @@ describe("WorktreeManager.create + remove", () => {
     }
     expect(existsSync(root)).toBe(true); // the root and its trees are intact
     expect(existsSync(wm.pathFor("sess-keepme-8"))).toBe(true);
+  });
+});
+
+// Monorepo sub-project working directories. `normalizeSubdir` is the pure shape
+// gate (runs before a worktree exists); `verifyWorkdir` is the filesystem gate
+// that must resolve symlinks, because the policy engine's containment test is
+// lexical and this path becomes the base relative paths resolve against.
+
+describe("normalizeSubdir (pure shape validation)", () => {
+  test("the repo root has several spellings, all meaning null", () => {
+    // `assign monorepo/` lands here as "" — a trailing slash means the root.
+    for (const raw of ["", "   ", ".", "./", "./."]) {
+      const r = normalizeSubdir(raw);
+      expect(r.ok && r.workdir).toBe(null);
+    }
+  });
+
+  test("a valid path is normalized to a clean relative POSIX path", () => {
+    const cases: [string, string][] = [
+      ["apps/report", "apps/report"],
+      ["apps/report/", "apps/report"],
+      ["  apps/report  ", "apps/report"],
+      ["apps//report", "apps/report"],
+      ["./apps/report", "apps/report"],
+      ["services/api/v2", "services/api/v2"],
+    ];
+    for (const [raw, expected] of cases) {
+      const r = normalizeSubdir(raw);
+      expect(r.ok && r.workdir).toBe(expected);
+    }
+  });
+
+  test("escapes and absolutes are refused with a reason, never normalized away", () => {
+    const bad = [
+      "../elsewhere",
+      "apps/../../elsewhere",
+      "/etc",
+      "/apps/report",
+      "/", // the filesystem root is absolute, not a spelling of "the repo root"
+      "~",
+      "~/secrets",
+      "apps\\report",
+      ".git",
+      ".git/hooks",
+      "a\0b",
+    ];
+    for (const raw of bad) {
+      const r = normalizeSubdir(raw);
+      expect(r.ok).toBe(false);
+      if (!r.ok) expect(r.reason.length).toBeGreaterThan(0);
+    }
+  });
+});
+
+describe("sessionCwd", () => {
+  test("null workdir is the worktree root; a workdir is joined onto it", () => {
+    expect(sessionCwd("/wt/abc", null)).toBe("/wt/abc");
+    expect(sessionCwd("/wt/abc", "apps/report")).toBe("/wt/abc/apps/report");
+  });
+});
+
+describe("verifyWorkdir (filesystem + symlink containment)", () => {
+  test("an existing directory inside the worktree passes", async () => {
+    const wm = new WorktreeManager(root);
+    const info = await wm.create({ repoPath, defaultBranch: "main", sessionId: "sess-verify-1" });
+    mkdirSync(join(info.path, "apps", "report"), { recursive: true });
+    expect((await verifyWorkdir(info.path, "apps/report")).ok).toBe(true);
+  });
+
+  test("a missing directory is refused", async () => {
+    const wm = new WorktreeManager(root);
+    const info = await wm.create({ repoPath, defaultBranch: "main", sessionId: "sess-verify-2" });
+    const r = await verifyWorkdir(info.path, "apps/nope");
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.reason).toMatch(/doesn't exist/i);
+  });
+
+  test("a file (not a directory) is refused", async () => {
+    const wm = new WorktreeManager(root);
+    const info = await wm.create({ repoPath, defaultBranch: "main", sessionId: "sess-verify-3" });
+    writeFileSync(join(info.path, "notadir"), "x");
+    const r = await verifyWorkdir(info.path, "notadir");
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.reason).toMatch(/not a directory/i);
+  });
+
+  test("a symlink pointing OUT of the worktree is refused — the escape realpath exists to catch", async () => {
+    // This is the P0 case. `apps/report` passes every lexical check, but the real
+    // cwd would be outside the tree, so every lexically-inside relative path the
+    // policy engine allows would actually resolve out of it.
+    const wm = new WorktreeManager(root);
+    const info = await wm.create({ repoPath, defaultBranch: "main", sessionId: "sess-verify-4" });
+    const outside = mkdtempSync(join(tmpdir(), "condotto-outside-"));
+    mkdirSync(join(info.path, "apps"), { recursive: true });
+    symlinkSync(outside, join(info.path, "apps", "report"));
+    const r = await verifyWorkdir(info.path, "apps/report");
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.reason).toMatch(/outside the repo/i);
+  });
+
+  test("a symlink to a directory INSIDE the worktree is fine", async () => {
+    const wm = new WorktreeManager(root);
+    const info = await wm.create({ repoPath, defaultBranch: "main", sessionId: "sess-verify-5" });
+    mkdirSync(join(info.path, "packages", "shared"), { recursive: true });
+    symlinkSync(join(info.path, "packages", "shared"), join(info.path, "linked"));
+    expect((await verifyWorkdir(info.path, "linked")).ok).toBe(true);
+  });
+});
+
+describe("listTopLevelDirs", () => {
+  test("lists directories (not files), hides .git, and sorts", async () => {
+    const wm = new WorktreeManager(root);
+    const info = await wm.create({ repoPath, defaultBranch: "main", sessionId: "sess-list-1" });
+    mkdirSync(join(info.path, "services"), { recursive: true });
+    mkdirSync(join(info.path, "apps"), { recursive: true });
+    writeFileSync(join(info.path, "justafile.txt"), "x");
+    expect(listTopLevelDirs(info.path)).toEqual(["apps", "services"]);
+  });
+
+  test("a missing path yields an empty list rather than throwing", () => {
+    expect(listTopLevelDirs(join(root, "nope"))).toEqual([]);
   });
 });

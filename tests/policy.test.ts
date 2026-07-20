@@ -48,6 +48,72 @@ describe("policy: read-only tools", () => {
   });
 });
 
+// A monorepo session's cwd is a SUBDIRECTORY of the worktree. That changes what a
+// relative path means without moving the boundary, so these pin both halves:
+// relative paths resolve against the cwd, containment is still the worktree.
+describe("policy: monorepo sub-project cwd (resolution base vs containment root)", () => {
+  const SUBDIR = `${WORKTREE}/apps/report`;
+  const sub = (allowlist: string[] = []) => ({
+    worktree: WORKTREE,
+    cwd: SUBDIR,
+    safeBashAllowlist: allowlist,
+  });
+
+  test("a relative path reaching a sibling package is ALLOWED — the whole worktree is in scope", () => {
+    // From apps/report, ../../packages/shared IS inside the worktree. Resolving it
+    // against the worktree root instead would deny it and make monorepo work
+    // impossible — this is the bug the base/root split exists to fix.
+    expect(evaluate(call("Read", { file_path: "../../packages/shared/x.ts" }), sub()).action).toBe("allow");
+    expect(evaluate(call("Write", { file_path: "../../packages/shared/x.ts", content: "y" }), sub()).action).toBe("gate");
+    // Root config, two levels up, is reachable as well.
+    expect(evaluate(call("Read", { file_path: "../../package.json" }), sub()).action).toBe("allow");
+  });
+
+  test("a relative path inside the sub-project still resolves there, not at the root", () => {
+    expect(evaluate(call("Read", { file_path: "src/index.ts" }), sub()).action).toBe("allow");
+    expect(evaluate(call("Read", { file_path: "./README.md" }), sub()).action).toBe("allow");
+  });
+
+  test("THE INVARIANT: a deeper cwd cannot widen the boundary", () => {
+    // Every one of these escapes the worktree and must deny regardless of how deep
+    // the resolution base is. Climbing past the root is the whole point of the test.
+    for (const p of ["../../../../../etc/passwd", "/etc/passwd", "~/.aws/credentials", "~", `${WORKTREE}-evil/x`]) {
+      expect(evaluate(call("Read", { file_path: p }), sub()).action).toBe("deny");
+      expect(evaluate(call("Write", { file_path: p, content: "x" }), sub()).action).toBe("deny");
+    }
+  });
+
+  test("even a cwd crafted to sit outside the worktree cannot widen it", () => {
+    // Defence in depth: assign-time validation makes this unreachable, but the
+    // containment test must not depend on that. `base` is never consulted for the
+    // boundary, so a hostile base only relocates paths — it cannot authorize them.
+    const hostile = { worktree: WORKTREE, cwd: "/etc", safeBashAllowlist: [] };
+    expect(evaluate(call("Read", { file_path: "passwd" }), hostile).action).toBe("deny");
+    expect(evaluate(call("Write", { file_path: "passwd", content: "x" }), hostile).action).toBe("deny");
+  });
+
+  test("omitting cwd behaves exactly as before (the pre-monorepo default)", () => {
+    expect(offendingPath(WORKTREE, { file_path: "../x" })).toBe("../x");
+    expect(offendingPath(WORKTREE, { file_path: "../x" }, WORKTREE)).toBe("../x");
+    // Same input, deeper base: now inside, because it genuinely is.
+    expect(offendingPath(WORKTREE, { file_path: "../x" }, SUBDIR)).toBeNull();
+  });
+
+  test("Glob patterns with `..` are refused outright, at any cwd depth", () => {
+    // A glob pattern is matched, not resolved: `**` counts as ONE segment
+    // lexically while the real expansion walks arbitrarily deep. That mismatch
+    // would hand a deeper base extra headroom, so `..` in a pattern is refused.
+    for (const pattern of ["../**/*.env", "../../packages/**/*.ts", "a/../../b/*"]) {
+      const d = evaluate(call("Glob", { pattern }), sub());
+      expect(d.action).toBe("deny");
+      expect(d.reason).toContain("..");
+    }
+    // The legitimate way to search a sibling package: scope with `path`.
+    expect(evaluate(call("Glob", { pattern: "**/*.ts", path: "../../packages/shared" }), sub()).action).toBe("allow");
+    expect(evaluate(call("Glob", { pattern: "**/*.ts" }), sub()).action).toBe("allow");
+  });
+});
+
 describe("policy: write tools", () => {
   test("in-worktree writes/edits are gated, not auto-allowed", () => {
     expect(evaluate(call("Write", { file_path: "src/new.ts", content: "x" }), ctx()).action).toBe("gate");

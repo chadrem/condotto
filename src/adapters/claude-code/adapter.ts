@@ -324,6 +324,12 @@ class ClaudeCodeSession implements HarnessSession {
     /** Inactivity watchdog window; overridable so tests can exercise the timeout→
      *  interrupt→drain path without waiting 10 minutes. Defaults to the constant. */
     private turnInactivityMs: number = TURN_INACTIVITY_MS,
+    /**
+     * The enclosing tree the agent must reach when `cwd` is a monorepo
+     * sub-project — the worktree root. Undefined (or equal to `cwd`) for an
+     * ordinary session. See `additionalDirectories` at the query below.
+     */
+    private root?: string,
   ) {}
 
   /** The in-flight query, so an out-of-band interrupt() can reach it.
@@ -433,6 +439,13 @@ class ClaudeCodeSession implements HarnessSession {
       prompt: input.text,
       options: {
         cwd: this.cwd,
+        // A monorepo sub-project session starts BELOW the worktree root, but the
+        // whole worktree stays in scope (shared packages, root config) — the
+        // confinement boundary is the worktree, enforced by our PreToolUse hook.
+        // The SDK models working roots at or below cwd, so name the root
+        // explicitly or it would sit above the session and be unreachable. Omitted
+        // when cwd already IS the root, keeping ordinary sessions byte-identical.
+        ...(this.root && this.root !== this.cwd ? { additionalDirectories: [this.root] } : {}),
         resume: this._handle.sessionId ?? undefined,
         // rider (a): scrub the daemon's own SLACK_*/CONDOTTO_* secrets from the
         // environment the agent's Bash inherits (belt-and-braces over the §4 policy
@@ -792,11 +805,18 @@ export class ClaudeCodeAdapter implements HarnessAdapter {
     supportedEfforts: SUPPORTED_EFFORTS, // ["low","medium","high","xhigh","max"]
   };
 
-  async create(opts: { cwd: string; system: string }): Promise<HarnessSession> {
-    return new ClaudeCodeSession({ v: 1, sessionId: null }, opts.cwd, opts.system, this.queryFn, this.turnInactivityMs);
+  async create(opts: { cwd: string; system: string; root?: string }): Promise<HarnessSession> {
+    return new ClaudeCodeSession(
+      { v: 1, sessionId: null },
+      opts.cwd,
+      opts.system,
+      this.queryFn,
+      this.turnInactivityMs,
+      opts.root,
+    );
   }
 
-  async resume(handle: SessionHandle, cwd: string, system: string): Promise<HarnessSession> {
-    return new ClaudeCodeSession(asHandle(handle), cwd, system, this.queryFn, this.turnInactivityMs);
+  async resume(handle: SessionHandle, cwd: string, system: string, root?: string): Promise<HarnessSession> {
+    return new ClaudeCodeSession(asHandle(handle), cwd, system, this.queryFn, this.turnInactivityMs, root);
   }
 }

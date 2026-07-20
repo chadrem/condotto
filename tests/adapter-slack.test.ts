@@ -22,6 +22,27 @@ describe("resolveUserMention", () => {
   });
 });
 
+describe("parseMentionCommand — assign", () => {
+  test("bare, repo-only, and both sub-project spellings all parse", () => {
+    expect(parse("assign")).toEqual({ name: "assign", args: "" });
+    expect(parse("take this")).toEqual({ name: "assign", args: "" });
+    expect(parse("assign monorepo")).toEqual({ name: "assign", args: "monorepo" });
+    // The slash form is one token; the space form is two. Without the 3-word rule
+    // the latter would match nothing and be silently swallowed as conversation,
+    // leaving the architect with no error at all.
+    expect(parse("assign monorepo/apps/report")).toEqual({ name: "assign", args: "monorepo/apps/report" });
+    expect(parse("assign monorepo apps/report")).toEqual({ name: "assign", args: "monorepo apps/report" });
+  });
+
+  test("case is preserved — repo names and paths are case-sensitive", () => {
+    expect(parse("assign MyRepo/apps/Report")).toEqual({ name: "assign", args: "MyRepo/apps/Report" });
+  });
+
+  test("beyond three words it is conversation, not a malformed command", () => {
+    expect(parse("assign this ticket to someone")).toBeNull();
+  });
+});
+
 describe("parseMentionCommand — grant/revoke/auto-approve", () => {
   test("grant resolves the target and lowercases the role, preserving the id case", () => {
     expect(parse("grant <@U0ABBY> architect")).toEqual({ name: "grant", args: "slack:U0ABBY architect" });

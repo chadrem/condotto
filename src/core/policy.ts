@@ -43,6 +43,15 @@ export type PolicyConcern = "production-data" | "workflow-launch";
 export interface PolicyContext {
   /** Absolute session worktree; filesystem access is confined to it. */
   worktree: string;
+  /**
+   * The session's actual working directory — the worktree root, or a
+   * SUBDIRECTORY of it for a monorepo session assigned as `<repo>/<subdir>`.
+   * Used ONLY as the base a relative path resolves against, because that is what
+   * the agent's own tools resolve against. It NEVER participates in the
+   * containment test: the boundary is always `worktree`, which sits at or above
+   * this. Omitted = the worktree root (the pre-monorepo behaviour).
+   */
+  cwd?: string;
   /** Repo-defined commands that run without approval (exact or prefix match). */
   safeBashAllowlist: string[];
   /**
@@ -117,23 +126,62 @@ const gate = (reason: string, concern?: PolicyConcern): PolicyDecision => ({ act
 const deny = (reason: string): PolicyDecision => ({ action: "deny", reason });
 
 /**
- * The first path field (if any) that resolves outside the worktree. Relative
- * inputs resolve against the worktree because the harness cwd IS the worktree.
- * Returns null when every present path is confined. (Symlink-chasing is future hardening.)
+ * The first path field (if any) that resolves outside the worktree.
+ * Returns null when every present path is confined.
+ *
+ * TWO distinct paths are involved, and conflating them is a security bug:
+ *
+ *  - `worktree` is the containment ROOT — the boundary. Always.
+ *  - `base` is what a RELATIVE input resolves against, defaulting to the root.
+ *    For a monorepo session the harness cwd is a subdirectory, and the agent's
+ *    own tools resolve relative paths against that cwd — so we must too, or we
+ *    misjudge every relative path. From cwd `<wt>/apps/report`, the agent's
+ *    `../../packages/shared/x.ts` really means `<wt>/packages/shared/x.ts`,
+ *    which is inside the worktree and must be allowed.
+ *
+ * THE INVARIANT: containment is computed only from `root`, never from `base`.
+ * A deeper base therefore cannot widen the boundary — it can only relocate a
+ * path WITHIN it. Absolute inputs and `~` ignore the base entirely, so
+ * `/etc/passwd` and `~/.aws/credentials` deny regardless of cwd.
+ *
+ * Resolution is purely lexical — `path.resolve` never follows symlinks
+ * (symlink-chasing for in-tree content is future hardening). That is why `base`
+ * must be a path Condotto has already realpath-validated at assign time: it
+ * names repo content, and a subdirectory that is a symlink out of the tree would
+ * otherwise make every lexically-inside path a real escape.
  */
-export function offendingPath(worktree: string, input: unknown): string | null {
+export function offendingPath(worktree: string, input: unknown, base?: string): string | null {
   if (typeof input !== "object" || input === null) return null;
   const root = resolve(worktree);
+  // Never derived from `base` — see THE INVARIANT above.
+  const from = base === undefined ? root : resolve(base);
   for (const field of PATH_FIELDS) {
     const value = (input as Record<string, unknown>)[field];
     if (typeof value !== "string" || value.length === 0) continue;
     // A leading `~` is never a legitimate in-worktree relative path; expand it
     // as a shell/tool would rather than let node treat it as a literal subdir.
     const expanded = value === "~" || value.startsWith("~/") ? homedir() + value.slice(1) : value;
-    const target = resolve(root, expanded);
+    const target = resolve(from, expanded);
     if (target !== root && !target.startsWith(root + sep)) return value;
   }
   return null;
+}
+
+/**
+ * A `..` segment in a Glob PATTERN is refused outright rather than resolved.
+ *
+ * `offendingPath` checks a pattern lexically, but glob metacharacters aren't
+ * paths: `**` resolves as a single literal segment while the real expansion
+ * walks arbitrarily deep. That mismatch gives a pattern more lexical headroom
+ * than it should have, and the headroom grows with the depth of the resolution
+ * base — so a monorepo subdir session would amplify it. Refusing `..` in a
+ * pattern removes the amplification entirely and costs the agent nothing: it can
+ * scope with Glob's `path` field plus a relative pattern, or an absolute
+ * in-worktree pattern.
+ */
+function globPatternEscapes(pattern: unknown): boolean {
+  if (typeof pattern !== "string") return false;
+  return pattern.split(/[\\/]/).includes("..");
 }
 
 /**
@@ -221,7 +269,7 @@ function evaluateBase(call: ToolCall, ctx: PolicyContext): PolicyDecision {
   // Side-effect-free meta tools: always fine, touch no filesystem.
   if (NO_FS_TOOLS.has(name)) return allow(name === "ToolSearch" ? "loads a tool definition" : "updates its task plan");
 
-  const offender = offendingPath(ctx.worktree, call.input);
+  const offender = offendingPath(ctx.worktree, call.input, ctx.cwd);
 
   if (READ_TOOLS.has(name)) {
     // Reading anything on the host + posting the answer in a thread is an
@@ -229,10 +277,16 @@ function evaluateBase(call: ToolCall, ctx: PolicyContext): PolicyDecision {
     // Glob's `pattern` is itself a path glob (it can be absolute or contain
     // `..`) and drives enumeration on its own, so it must be confined too;
     // Grep's `pattern` is a regex scoped by the (already-checked) `path`.
+    const pattern = (call.input as Record<string, unknown> | null)?.pattern;
+    if (name === "Glob" && globPatternEscapes(pattern)) {
+      return deny(
+        `"${String(pattern)}" uses ".." in a glob pattern, which isn't allowed — a pattern is ` +
+          `matched, not resolved. Scope the search with Glob's "path" field and a pattern ` +
+          `relative to it instead.`,
+      );
+    }
     const globEscape =
-      name === "Glob"
-        ? offendingPath(ctx.worktree, { path: (call.input as Record<string, unknown> | null)?.pattern })
-        : null;
+      name === "Glob" ? offendingPath(ctx.worktree, { path: pattern }, ctx.cwd) : null;
     const escaped = offender ?? globEscape;
     if (escaped) {
       return deny(

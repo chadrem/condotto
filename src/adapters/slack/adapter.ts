@@ -142,7 +142,14 @@ export function parseMentionCommand(
   if (!m) return null;
   const words = m[1]!.trim().split(/\s+/).filter(Boolean);
   const [first = "", second = "", third] = words.map((w) => w.toLowerCase());
-  if (first === "assign" && words.length <= 2) return { name: "assign", args: words.length === 2 ? words[1]! : "" };
+  // `assign <repo>`, `assign <repo>/<sub-project>`, and the two-token
+  // `assign <repo> <sub-project>` — people type both, and without the 3-word form
+  // the mention would match no rule and be silently swallowed as conversation,
+  // leaving the architect with no error at all. Original case is preserved (paths
+  // and repo names are case-sensitive); the core splits repo from sub-project.
+  if (first === "assign" && words.length <= 3) {
+    return { name: "assign", args: words.slice(1).join(" ") };
+  }
   if (first === "take" && second === "this" && third === undefined) return { name: "assign", args: "" };
   if (first === "stop" && words.length === 1) return { name: "stop", args: "" };
   if (first === "stop" && second === "clean" && words.length === 2) return { name: "stop", args: "clean" };

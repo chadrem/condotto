@@ -332,13 +332,21 @@ export interface HarnessCapabilities {
 export interface HarnessAdapter {
   readonly id: string;
   readonly capabilities: HarnessCapabilities;
-  create(opts: { cwd: string; system: string }): Promise<HarnessSession>;
+  /**
+   * `cwd` is where the agent starts. `root` is the enclosing tree it must be able
+   * to reach — the same path for an ordinary session, but the WORKTREE ROOT when
+   * `cwd` is a monorepo sub-project, since the confinement boundary stays the whole
+   * worktree while the agent works one level down. Adapters whose runtime scopes
+   * access to `cwd` must widen it to `root`; omitted = `cwd`.
+   */
+  create(opts: { cwd: string; system: string; root?: string }): Promise<HarnessSession>;
   /**
    * `system` is re-supplied on every resume: the Condotto protocol prompt is
    * core policy, not session state, so a posture change (e.g. read-only → gated)
    * must reach existing sessions. The adapter must NOT freeze it in the handle.
+   * `root` carries the same meaning as in `create`.
    */
-  resume(handle: SessionHandle, cwd: string, system: string): Promise<HarnessSession>;
+  resume(handle: SessionHandle, cwd: string, system: string, root?: string): Promise<HarnessSession>;
 }
 
 // ---------------------------------------------------------------------------

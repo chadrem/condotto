@@ -28,6 +28,11 @@ beforeAll(async () => {
   worktreesRoot = join(base, "worktrees");
   await run(["git", "init", "-q", "-b", "main", repoPath]);
   await Bun.write(join(repoPath, "README.md"), "# fixture repo\n");
+  // A real monorepo shape, so sub-project assignment can be exercised end to end:
+  // two apps plus a shared package they both reach for.
+  await Bun.write(join(repoPath, "apps", "report", "index.ts"), "// report\n");
+  await Bun.write(join(repoPath, "apps", "web", "index.ts"), "// web\n");
+  await Bun.write(join(repoPath, "packages", "shared", "util.ts"), "// shared\n");
   await run(["git", "-C", repoPath, "add", "-A"]);
   await run([
     "git",
@@ -191,6 +196,163 @@ describe("assign", () => {
     });
     expect(w.surface.posts.at(-1)?.text).toContain('Unknown repo "prod-webapp"');
     expect(w.store.getSessionByConversation("fake", "300.000001")).toBeNull();
+  });
+});
+
+// Monorepo: `assign <repo>/<sub-project>` starts the agent in a subdirectory of
+// the repo while the worktree — and the confinement boundary — stays repo-wide.
+describe("assign: monorepo sub-project", () => {
+  const assign = (w: World, id: string, args: string) =>
+    w.manager.handleEvent({ kind: "command", conv: conv(id), author: architect, name: "assign", args });
+
+  test("records workdir, still provisions the WHOLE repo worktree", async () => {
+    const w = makeWorld();
+    await assign(w, "400.000001", "testrepo/apps/report");
+
+    const row = w.store.getSessionByConversation("fake", "400.000001")!;
+    expect(row.repo_id).toBe("testrepo");
+    expect(row.workdir).toBe("apps/report");
+    // The worktree is repo-wide: the sibling app and the shared package are both
+    // checked out, which is what makes cross-cutting monorepo edits possible.
+    expect(existsSync(join(row.worktree_path, "apps", "report", "index.ts"))).toBe(true);
+    expect(existsSync(join(row.worktree_path, "packages", "shared", "util.ts"))).toBe(true);
+    expect(w.surface.posts.at(-1)!.text).toContain("apps/report");
+  });
+
+  test("both spellings work and normalize identically", async () => {
+    const w = makeWorld();
+    await assign(w, "401.000001", "testrepo/apps/report"); // slash form
+    await assign(w, "401.000002", "testrepo apps/report"); // two-token form
+    await assign(w, "401.000003", "testrepo/apps/report/"); // trailing slash
+    for (const id of ["401.000001", "401.000002", "401.000003"]) {
+      expect(w.store.getSessionByConversation("fake", id)!.workdir).toBe("apps/report");
+    }
+  });
+
+  test("naming only the repo leaves workdir null (unchanged behaviour)", async () => {
+    const w = makeWorld();
+    await assign(w, "402.000001", "testrepo");
+    await assign(w, "402.000002", "testrepo/"); // trailing slash = the repo root
+    expect(w.store.getSessionByConversation("fake", "402.000001")!.workdir).toBeNull();
+    expect(w.store.getSessionByConversation("fake", "402.000002")!.workdir).toBeNull();
+  });
+
+  test("the harness starts in the sub-project, with the worktree root still reachable", async () => {
+    const w = makeWorld();
+    await assign(w, "403.000001", "testrepo/apps/report");
+    await w.manager.handleEvent({
+      kind: "message",
+      conv: conv("403.000001"),
+      author: architect,
+      text: "hello",
+      attachments: [],
+    });
+
+    const row = w.store.getSessionByConversation("fake", "403.000001")!;
+    const created = w.harness.created.at(-1)!;
+    expect(created.cwd).toBe(join(row.worktree_path, "apps", "report"));
+    // The root is passed separately so the harness keeps the whole tree in scope.
+    expect(created.root).toBe(row.worktree_path);
+    // The agent is TOLD both, or it invents paths and never reaches shared code.
+    expect(created.system).toContain("apps/report");
+    expect(created.system).toContain(row.worktree_path);
+    expect(created.system).toContain("ENTIRE worktree is in scope");
+  });
+
+  test("a root session passes no separate root (byte-identical to before)", async () => {
+    const w = makeWorld();
+    await assign(w, "404.000001", "testrepo");
+    await w.manager.handleEvent({
+      kind: "message",
+      conv: conv("404.000001"),
+      author: architect,
+      text: "hello",
+      attachments: [],
+    });
+    const row = w.store.getSessionByConversation("fake", "404.000001")!;
+    const created = w.harness.created.at(-1)!;
+    expect(created.cwd).toBe(row.worktree_path);
+    expect(created.root).toBe(row.worktree_path);
+  });
+
+  test("a malformed sub-project is refused BEFORE any worktree is created", async () => {
+    // Shape validation is pure and runs first, so the common typo costs nothing
+    // and leaves nothing to garbage-collect.
+    const w = makeWorld(undefined, { worktreesRoot: mkdtempSync(join(tmpdir(), "condotto-shape-")) });
+    const before = readdirSync(w.worktreesRoot).length;
+    for (const bad of ["testrepo/../elsewhere", "testrepo//etc", "testrepo/~/secrets"]) {
+      await assign(w, `405.00000${bad.length}`, bad);
+      expect(w.surface.posts.at(-1)!.text).toContain("sub-project path");
+    }
+    expect(readdirSync(w.worktreesRoot).length).toBe(before);
+    expect(w.store.listSessions({ surfaceId: "fake" }).length).toBe(0);
+  });
+
+  test("a non-existent sub-project is refused AND its worktree is torn down", async () => {
+    // This check needs the checked-out tree, so the worktree already exists by the
+    // time it fails — it must not leak an orphan for the GC to find later.
+    const isolated = mkdtempSync(join(tmpdir(), "condotto-orphan-"));
+    const w = makeWorld(undefined, { worktreesRoot: isolated });
+    await assign(w, "406.000001", "testrepo/apps/nope");
+
+    const post = w.surface.posts.at(-1)!.text;
+    expect(post).toContain("doesn't exist");
+    // The error names the real top-level directories, so the typo is obvious.
+    expect(post).toContain("apps");
+    expect(post).toContain("packages");
+    expect(w.store.getSessionByConversation("fake", "406.000001")).toBeNull();
+    // No orphan left behind: the worktree existed by the time this check ran, so
+    // failing to tear it down would leak a tree the GC only reclaims much later.
+    expect(readdirSync(isolated).length).toBe(0);
+  });
+
+  test("land runs in the sub-project, not at the worktree root", async () => {
+    const w = makeWorld();
+    await assign(w, "407.000001", "testrepo/apps/report");
+    await w.manager.handleEvent({ kind: "command", conv: conv("407.000001"), author: architect, name: "land", args: "" });
+    const requestId = w.surface.lastApprovalRequestId()!;
+    await w.manager.handleEvent({ kind: "approval_decision", requestId, decider: architect, decision: "approved" });
+
+    const row = w.store.getSessionByConversation("fake", "407.000001")!;
+    expect(w.runner.calls.at(-1)!.command).toBe("echo land-ran");
+    expect(w.runner.calls.at(-1)!.cwd).toBe(join(row.worktree_path, "apps", "report"));
+  });
+
+  test("reactivation cannot re-point the session at different work", async () => {
+    // The harness keys its transcript by encoded cwd, so honouring a different
+    // sub-project would silently lose the context reactivation promises to keep.
+    const w = makeWorld();
+    const c = conv("408.000001");
+    await assign(w, "408.000001", "testrepo/apps/report");
+    await w.manager.handleEvent({ kind: "command", conv: c, author: architect, name: "stop", args: "" });
+
+    await assign(w, "408.000001", "testrepo/apps/web");
+    expect(w.surface.posts.at(-1)!.text).toContain("can't be re-pointed");
+    expect(w.store.getSessionByConversation("fake", "408.000001")!.workdir).toBe("apps/report");
+    expect(w.store.getSessionByConversation("fake", "408.000001")!.status).toBe("stopped");
+
+    // Naming the SAME target, or nothing at all, still reactivates.
+    await assign(w, "408.000001", "testrepo/apps/report");
+    expect(w.surface.posts.at(-1)!.text).toContain("reactivated");
+  });
+
+  test("reactivation refuses a different repo too (previously silently ignored)", async () => {
+    const w = makeWorld();
+    w.store.upsertRepo({ name: "otherrepo", path: repoPath, defaultBranch: "main" });
+    const c = conv("409.000001");
+    await assign(w, "409.000001", "testrepo");
+    await w.manager.handleEvent({ kind: "command", conv: c, author: architect, name: "stop", args: "" });
+
+    await assign(w, "409.000001", "otherrepo");
+    expect(w.surface.posts.at(-1)!.text).toContain("can't be re-pointed");
+    expect(w.store.getSessionByConversation("fake", "409.000001")!.repo_id).toBe("testrepo");
+  });
+
+  test("the sub-project shows up where humans look for it", async () => {
+    const w = makeWorld();
+    await assign(w, "410.000001", "testrepo/apps/report");
+    await w.manager.handleEvent({ kind: "command", conv: conv("410.000001"), author: architect, name: "status", args: "" });
+    expect(w.surface.posts.at(-1)!.text).toContain("testrepo/apps/report");
   });
 });
 

@@ -11,10 +11,17 @@ import type {
   Role,
   SurfaceAdapter,
 } from "./types";
+import { existsSync } from "node:fs";
 import { principalKey } from "./types";
 import type { Store, SessionRow, ApprovalRow, RepoRow } from "./store";
 import { ConflictError } from "./store";
-import { WorktreeManager } from "./worktrees";
+import {
+  WorktreeManager,
+  listTopLevelDirs,
+  normalizeSubdir,
+  sessionCwd,
+  verifyWorkdir,
+} from "./worktrees";
 import { CommandRunner, type CommandRunnerLike } from "./command-runner";
 import { frameMessage } from "./framing";
 import { evaluate, describeCall, type PolicyContext, type PolicyConcern } from "./policy";
@@ -57,6 +64,10 @@ const CONCERN_TEXT: Record<PolicyConcern, string> = {
 function condottoSystemPrompt(opts: {
   repoName: string;
   branch: string;
+  /** Absolute worktree root — the confinement boundary, at or above the cwd. */
+  worktreePath: string;
+  /** Relative sub-project the session starts in, or null for the repo root. */
+  workdir?: string | null;
   testCmd?: string | null;
   landAvailable?: boolean;
   deployAvailable?: boolean;
@@ -124,17 +135,62 @@ function condottoSystemPrompt(opts: {
     `  yes/no. Never paste row-level data, PII, or secrets into the thread; if the`,
     `  architect needs detail, say it has to go out of band.`,
     `- You are confined to your worktree: you cannot read or write files outside it,`,
-    `  and destructive or credential-touching commands are refused outright.`,
+    `  and destructive or credential-touching commands are refused outright. Note the`,
+    `  boundary is the WORKTREE ROOT, which may sit above your cwd — see Context.`,
     ship,
     ...(testing ? [testing] : []),
     ...(delegation ? [delegation] : []),
     ...(workflow ? [workflow] : []),
     ``,
-    `Context: repo "${opts.repoName}", working tree on branch "${opts.branch}" (your cwd).`,
+    ...(opts.workdir
+      ? [
+          `Context: repo "${opts.repoName}", working tree on branch "${opts.branch}".`,
+          `This repo is a monorepo and you are working on the sub-project "${opts.workdir}".`,
+          `- Your cwd is ${sessionCwd(opts.worktreePath, opts.workdir)}`,
+          `- The worktree root is ${opts.worktreePath}`,
+          `The ENTIRE worktree is in scope, not just your cwd: you may read and edit`,
+          `shared packages, root configuration, and sibling sub-projects — reach them`,
+          `with a relative path (e.g. ../../packages/shared) or their absolute path`,
+          `under the worktree root. Start with your sub-project and go wider only when`,
+          `the change genuinely needs it.`,
+        ]
+      : [
+          `Context: repo "${opts.repoName}", working tree on branch "${opts.branch}" (your cwd).`,
+          `- Your cwd is ${opts.worktreePath}, which is also the worktree root.`,
+        ]),
     ``,
     `Style: you are replying into a chat thread. Be terse and conversational —`,
     `short paragraphs, minimal formatting, no headers unless genuinely useful.`,
   ].join("\n");
+}
+
+/**
+ * Split an `assign` argument into a repo and an optional sub-project path.
+ *
+ * Two spellings, both accepted because both are what people type:
+ *   `monorepo/apps/report`   — one token, the natural "path" form
+ *   `monorepo apps/report`   — two tokens
+ *
+ * Splitting on the FIRST slash is unambiguous: a repo name is a simple identifier
+ * and cannot contain `/` (config.ts `parseRepoEntry`). A leading slash therefore
+ * yields an empty repo name, which the caller reports as an unknown repo rather
+ * than treating as absolute. The subdir is returned RAW — `normalizeSubdir`
+ * validates it; this function only separates the two halves.
+ */
+export function parseAssignTarget(args: string): { repoName: string; subdir?: string } {
+  const words = args.trim().split(/\s+/).filter(Boolean);
+  const first = words[0] ?? "";
+  const slash = first.indexOf("/");
+  const inline = slash === -1 ? undefined : first.slice(slash + 1);
+  const repoName = slash === -1 ? first : first.slice(0, slash);
+  // A second word is a sub-project only when the first didn't already carry one.
+  const subdir = inline !== undefined ? inline : words[1];
+  return subdir === undefined ? { repoName } : { repoName, subdir };
+}
+
+/** How a repo + optional sub-project is named back to a human, in one place. */
+function describeTarget(repoName: string, workdir: string | null): string {
+  return workdir ? `\`${repoName}/${workdir}\`` : `\`${repoName}\``;
 }
 
 /**
@@ -356,6 +412,9 @@ export class SessionManager {
     const budget = session.budget_limit_usd ?? this.defaultCostCapUsd;
     const lines = [
       `⚙️ *Session settings*`,
+      ...(session.workdir
+        ? [`• working in \`${session.workdir}\` (the whole worktree stays in scope)`]
+        : []),
       `• model \`${this.effectiveModel(session)}\`  ·  effort \`${this.effectiveEffort(session)}\``,
       `• subagents ${subagents ? "*on*" : "off"}  ·  workflows ${workflows ? "*on*" : "off"}  ·  ultra ${ultra ? "*on*" : "off"}`,
       `• cost budget $${budget.toFixed(2)}`,
@@ -509,11 +568,34 @@ export class SessionManager {
     const existing = this.store.getSessionByConversation(conv.surfaceId, conv.conversationId);
     if (existing && existing.status !== "stopped") {
       await surface.post(conv, {
-        text: `This thread is already assigned (repo ${existing.repo_id}, branch ${existing.branch}).`,
+        text:
+          `This thread is already assigned (${describeTarget(existing.repo_id, existing.workdir)}, ` +
+          `branch ${existing.branch}).`,
       });
       return;
     }
     if (existing && existing.status === "stopped") {
+      // Reactivation RESUMES this thread's one session — it cannot re-point it at
+      // different work. The harness keys transcript storage by encoded cwd and we
+      // resume at the stored path, so honouring a different repo/sub-project would
+      // silently lose the context the message below promises. Refuse instead, and
+      // say where to go. (Args are only checked when supplied: a bare `assign`, or
+      // one naming the same target, reactivates as before.)
+      const asked = parseAssignTarget(args);
+      if (asked.repoName) {
+        const askedSubdir = normalizeSubdir(asked.subdir ?? "");
+        const sameRepo = asked.repoName === existing.repo_id;
+        const sameDir = askedSubdir.ok && (askedSubdir.workdir ?? null) === existing.workdir;
+        if (!sameRepo || !sameDir) {
+          await surface.post(conv, {
+            text:
+              `This thread's session is pinned to ${describeTarget(existing.repo_id, existing.workdir)} ` +
+              `and can't be re-pointed — it would lose the prior context. Reply \`@Condotto assign\` ` +
+              `to resume it, or start a new thread for ${describeTarget(asked.repoName, askedSubdir.ok ? askedSubdir.workdir : null)}.`,
+          });
+          return;
+        }
+      }
       // One conversation -> one session, forever: re-assignment reactivates.
       // Serialize through the FIFO so it cannot overlap an in-flight turn.
       const entry = this.entryFor(existing.id);
@@ -525,7 +607,9 @@ export class SessionManager {
         const cur = this.store.getSession(existing.id);
         if (!cur) {
           await surface.post(conv, {
-            text: `That session was just cleaned up. Run \`@Condotto assign ${existing.repo_id}\` to start a fresh one.`,
+            text:
+              `That session was just cleaned up. Run \`@Condotto assign ` +
+              `${existing.repo_id}${existing.workdir ? `/${existing.workdir}` : ""}\` to start a fresh one.`,
           });
           return;
         }
@@ -544,7 +628,8 @@ export class SessionManager {
         });
         await surface.post(conv, {
           text:
-            `Session reactivated — repo \`${existing.repo_id}\`, branch \`${existing.branch}\`. ` +
+            `Session reactivated — ${describeTarget(existing.repo_id, existing.workdir)}, ` +
+            `branch \`${existing.branch}\`. ` +
             `I still have the prior context.\n` +
             this.settingsBlock(existing, this.store.getRepo(existing.repo_id)) +
             `\n\n` +
@@ -556,19 +641,32 @@ export class SessionManager {
     }
 
     // No implicit repo: a bare `assign` asks instead of picking one for you.
-    const repoName = args.trim().split(/\s+/)[0];
-    if (!repoName) {
+    const target = parseAssignTarget(args);
+    if (!target.repoName) {
       await this.promptForRepo(conv, "You didn't name a repo");
       return;
     }
-    const repo = this.store.getRepo(repoName);
+    const repo = this.store.getRepo(target.repoName);
     if (!repo) {
       const available = this.store.listRepos().map((r) => r.name).join(", ") || "(none)";
       await surface.post(conv, {
-        text: `Unknown repo "${repoName}". Available: ${available}.`,
+        text: `Unknown repo "${target.repoName}". Available: ${available}.`,
       });
       return;
     }
+
+    // Sub-project validation, stage 1 of 2: SHAPE. Pure, and deliberately BEFORE
+    // the worktree exists — the common typo then costs nothing and leaves nothing
+    // to tear down. Stage 2 (existence + symlink containment) needs the checked-out
+    // tree and runs below.
+    const shape = normalizeSubdir(target.subdir ?? "");
+    if (!shape.ok) {
+      await surface.post(conv, {
+        text: `That sub-project path ${shape.reason}. Use \`@Condotto assign ${repo.name}/<sub-project>\`.`,
+      });
+      return;
+    }
+    const workdir = shape.workdir;
 
     const sessionId = crypto.randomUUID();
     const worktree = await this.worktrees.create({
@@ -576,6 +674,28 @@ export class SessionManager {
       defaultBranch: repo.default_branch,
       sessionId,
     });
+
+    // Stage 2: the sub-project must really exist INSIDE the worktree. This
+    // resolves symlinks (see verifyWorkdir) because the policy engine's containment
+    // test is lexical, and this path becomes the base relative paths resolve
+    // against — a subdir symlinked out of the tree would make every lexically-inside
+    // path a real escape. No session row exists yet, so there is nothing to unwind
+    // beyond the worktree itself.
+    if (workdir) {
+      const verified = await verifyWorkdir(worktree.path, workdir);
+      if (!verified.ok) {
+        // Read the tree BEFORE tearing it down — these names are the whole value
+        // of the message, and the teardown would leave nothing to list.
+        const dirs = listTopLevelDirs(worktree.path);
+        await this.abandonWorktree(repo, sessionId, worktree.branch, "bad_subdir", author);
+        await surface.post(conv, {
+          text:
+            `${verified.reason}.` +
+            (dirs.length ? ` Top-level directories: ${dirs.map((d) => `\`${d}\``).join(", ")}.` : ""),
+        });
+        return;
+      }
+    }
 
     // Seed model/effort from the repo default when supported, else leave null so
     // the turn resolves to the daemon default. A configured-but-unsupported repo
@@ -600,6 +720,9 @@ export class SessionManager {
         channel_id: conv.channelId,
         repo_id: repo.name,
         worktree_path: worktree.path,
+        // Immutable for the session's life — the harness keys its transcript
+        // storage by encoded cwd, so re-pointing it would lose the conversation.
+        workdir,
         harness_id: this.harness.id,
         harness_session_handle: null,
         branch: worktree.branch,
@@ -615,17 +738,8 @@ export class SessionManager {
     } catch (err) {
       if (err instanceof ConflictError) {
         // Lost an assign race: the worktree we just created (at our own losing
-        // session id) has no session row and would leak. Tear it down
-        // immediately — precise, since we hold the exact repo + branch. Best-effort:
-        // the GC orphan sweep is the backstop if this fails.
-        await this.worktrees
-          .remove({ repoPaths: [repo.path], sessionId, branch: worktree.branch })
-          .catch((e) => this.log(`[assign] orphan worktree cleanup failed for ${sessionId}: ${e}`));
-        this.store.audit({
-          actor: principalKey(author),
-          event: "worktree_orphan_removed",
-          detail: { sessionId, reason: "assign_race", worktree: worktree.path },
-        });
+        // session id) has no session row and would leak.
+        await this.abandonWorktree(repo, sessionId, worktree.branch, "assign_race", author);
         await surface.post(conv, { text: "This thread was just assigned by someone else." });
         return;
       }
@@ -636,16 +750,41 @@ export class SessionManager {
       sessionId: session.id,
       actor: principalKey(author),
       event: "session_assigned",
-      detail: { repo: repo.name, branch: worktree.branch, worktree: worktree.path },
+      detail: { repo: repo.name, branch: worktree.branch, worktree: worktree.path, workdir },
     });
     await surface.post(conv, {
       text:
-        `I'm on it — repo \`${repo.name}\`, branch \`${worktree.branch}\`.\n` +
+        `I'm on it — repo \`${repo.name}\`${workdir ? `, sub-project \`${workdir}\`` : ""}, ` +
+        `branch \`${worktree.branch}\`.\n` +
         this.settingsBlock(session, repo) +
         `\n\n` +
         `Reply in this thread to talk — reading and analysis are free. Edits, shell ` +
         `commands, and land/deploy pause for an architect's Approve/Deny.\n\n` +
         threadCommandHelp(),
+    });
+  }
+
+  /**
+   * Tear down a worktree we created but will not use, because assign failed after
+   * provisioning it (lost race, or a sub-project that doesn't exist). Precise — we
+   * hold the exact repo and branch — and best-effort: the GC orphan sweep is the
+   * backstop if it fails. There is never a session row at this point, so nothing
+   * else needs unwinding.
+   */
+  private async abandonWorktree(
+    repo: RepoRow,
+    sessionId: string,
+    branch: string,
+    reason: string,
+    author: Principal,
+  ): Promise<void> {
+    await this.worktrees
+      .remove({ repoPaths: [repo.path], sessionId, branch })
+      .catch((e) => this.log(`[assign] orphan worktree cleanup failed for ${sessionId}: ${e}`));
+    this.store.audit({
+      actor: principalKey(author),
+      event: "worktree_orphan_removed",
+      detail: { sessionId, reason, worktree: this.worktrees.pathFor(sessionId) },
     });
   }
 
@@ -663,7 +802,8 @@ export class SessionManager {
     if (session && session.status !== "stopped") {
       await surface.post(conv, {
         text:
-          `I'm working in this thread — repo \`${session.repo_id}\`, branch \`${session.branch}\`.\n` +
+          `I'm working in this thread — ${describeTarget(session.repo_id, session.workdir)}, ` +
+          `branch \`${session.branch}\`.\n` +
           this.settingsBlock(session, this.store.getRepo(session.repo_id)) +
           `\n\n` +
           threadCommandHelp(),
@@ -700,7 +840,8 @@ export class SessionManager {
     await surface.post(conv, {
       text:
         `${lead}. Available repos: ${list}.\n` +
-        `An architect can assign with \`@Condotto assign <repo>\`, or start a fresh thread with \`/condotto assign <repo>\`.`,
+        `An architect can assign with \`@Condotto assign <repo>\`, or start a fresh thread with \`/condotto assign <repo>\`.\n` +
+        `In a monorepo, name a sub-project to start there: \`@Condotto assign <repo>/<sub-project>\`.`,
     });
   }
 
@@ -741,7 +882,9 @@ export class SessionManager {
       .filter((s) => s.channel_id === channelId);
     if (sessions.length === 0) return null;
     const lines = sessions.map(
-      (s) => `• ${s.repo_id} @ ${s.branch} — ${s.status}, ${this.capabilitySummary(s)}, last active ${s.last_active_at}`,
+      (s) =>
+        `• ${s.repo_id}${s.workdir ? `/${s.workdir}` : ""} @ ${s.branch} — ${s.status}, ` +
+        `${this.capabilitySummary(s)}, last active ${s.last_active_at}`,
     );
     return `Sessions in this channel:\n${lines.join("\n")}`;
   }
@@ -1542,17 +1685,24 @@ export class SessionManager {
         const s = this.store.getSession(session.id);
         if (!s || s.status === "stopped" || !command) return;
         const statusRef = surface.capabilities.editMessages
-          ? await surface.post(conv, { text: `⚙︎ ${kind}ing \`${s.repo_id}\`…` }).catch(() => null)
+          ? await surface
+              .post(conv, { text: `⚙︎ ${kind}ing ${describeTarget(s.repo_id, s.workdir)}…` })
+              .catch(() => null)
           : null;
         await this.turnSlots.acquire();
         try {
-          const result = await this.commandRunner.run(command, s.worktree_path);
+          // Runs where the AGENT works, not at the worktree root: for a monorepo
+          // sub-project the ship path is that project's own (its Makefile, its
+          // package scripts). A root-level runner is reachable from here too, by
+          // writing the command to step up (`cd ../.. && turbo run deploy`).
+          const cwd = sessionCwd(s.worktree_path, s.workdir);
+          const result = await this.commandRunner.run(command, cwd);
           const ok = result.code === 0 && !result.timedOut;
           this.store.audit({
             sessionId: s.id,
             actor: decider,
             event: "deploy",
-            detail: { kind, command, exitCode: result.code, timedOut: result.timedOut },
+            detail: { kind, command, cwd, exitCode: result.code, timedOut: result.timedOut },
           });
           const mark = ok ? "✅" : "⚠️";
           const status = result.timedOut ? "timed out" : ok ? "succeeded" : `exited ${result.code}`;
@@ -1815,7 +1965,12 @@ export class SessionManager {
 
     const repo = this.store.getRepo(session.repo_id);
     const policyCtx: PolicyContext = {
+      // The confinement BOUNDARY — always the whole worktree, even for a
+      // sub-project session, so shared packages and root config stay editable.
       worktree: session.worktree_path,
+      // What a RELATIVE path resolves against: the agent's actual cwd. Only the
+      // resolution base — it never participates in the containment test.
+      cwd: sessionCwd(session.worktree_path, session.workdir),
       // The repo's real test command auto-runs (DESIGN §4 lists "the test
       // command" as allowlisted) so the agent can verify its own work; it is
       // folded in here, not into the repo's stored allowlist, so config stays
@@ -2000,6 +2155,12 @@ export class SessionManager {
       // waited for a slot, tryActivate returns false — never run a turn on a
       // stopped session (#6), and the finally releases the slot.
       if (!this.store.tryActivate(sessionId)) return;
+      // A missing cwd would fail at harness spawn with an opaque error; report it.
+      const cwdProblem = this.cwdProblem(session);
+      if (cwdProblem) {
+        await surface.post(conv, { text: `⚠️ ${cwdProblem}` }).catch(() => {});
+        return;
+      }
       const harnessSession = await this.getOrAttachHarness(session);
 
       // Forward the session's harness capabilities (model/effort/subagents/
@@ -2136,6 +2297,22 @@ export class SessionManager {
     }
   }
 
+  /**
+   * The session's cwd, or an explanation of why it is unusable. `rm -rf .` is
+   * merely gated (a plausible "delete this package" refactor), so an approved edit
+   * can remove the directory the session runs in — after which every turn would
+   * die at harness spawn with an opaque error. Check first and say so plainly.
+   */
+  private cwdProblem(session: SessionRow): string | null {
+    const cwd = sessionCwd(session.worktree_path, session.workdir);
+    if (existsSync(cwd)) return null;
+    return session.workdir
+      ? `My working directory \`${session.workdir}\` no longer exists in this worktree — ` +
+          `something deleted it. Start a new thread to work elsewhere in \`${session.repo_id}\`.`
+      : `My worktree at ${session.worktree_path} no longer exists. Run \`@Condotto assign ` +
+          `${session.repo_id}\` in a new thread to start fresh.`;
+  }
+
   private async getOrAttachHarness(session: SessionRow): Promise<HarnessSession> {
     const entry = this.entryFor(session.id);
     // Re-attach when the prompt-affecting capability state changed since the
@@ -2152,6 +2329,8 @@ export class SessionManager {
     const system = condottoSystemPrompt({
       repoName: session.repo_id,
       branch: session.branch,
+      worktreePath: session.worktree_path,
+      workdir: session.workdir,
       testCmd: repo?.test_cmd,
       landAvailable: !!repo?.land_cmd,
       deployAvailable: !!repo?.deploy_cmd,
@@ -2159,10 +2338,13 @@ export class SessionManager {
       workflows: session.workflows === 1,
       workflowWrite: session.workflow_write === 1,
     });
+    // The agent starts in its sub-project; the worktree ROOT stays the boundary
+    // and is passed separately so the harness keeps the whole tree reachable.
+    const cwd = sessionCwd(session.worktree_path, session.workdir);
     const harness =
       session.harness_session_handle !== null
-        ? await this.harness.resume(session.harness_session_handle, session.worktree_path, system)
-        : await this.harness.create({ cwd: session.worktree_path, system });
+        ? await this.harness.resume(session.harness_session_handle, cwd, system, session.worktree_path)
+        : await this.harness.create({ cwd, system, root: session.worktree_path });
 
     entry.harness = harness;
     entry.promptKey = promptKey;

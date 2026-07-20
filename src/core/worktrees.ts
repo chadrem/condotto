@@ -1,4 +1,4 @@
-import { mkdir, rm } from "node:fs/promises";
+import { mkdir, realpath, rm, stat } from "node:fs/promises";
 import { existsSync, readdirSync, statSync } from "node:fs";
 import { join, resolve, sep } from "node:path";
 
@@ -24,6 +24,100 @@ async function git(args: string[], cwd?: string): Promise<{ ok: boolean; out: st
 export interface WorktreeInfo {
   path: string; // absolute, stable
   branch: string;
+}
+
+// ---------------------------------------------------------------------------
+// Monorepo sub-project working directories
+//
+// A session may be assigned to a SUBDIRECTORY of its repo (`assign <repo>/<subdir>`)
+// so the agent starts where a human would `cd` before opening their editor. The
+// worktree is still repo-wide — only the working directory moves. `workdir` is
+// stored RELATIVE (null = repo root), which keeps `worktree_path` absolute and
+// never-rewritten, and makes it obvious that the confinement boundary is unmoved.
+
+/**
+ * The session's actual working directory. The single derivation used by the
+ * harness cwd, the land/deploy command runner, and the policy resolution base, so
+ * those three can never drift apart.
+ */
+export function sessionCwd(worktreePath: string, workdir: string | null): string {
+  return workdir ? resolve(worktreePath, workdir) : resolve(worktreePath);
+}
+
+export type SubdirCheck = { ok: true; workdir: string | null } | { ok: false; reason: string };
+
+/**
+ * Shape-validate and normalize a subdirectory argument. PURE — no filesystem
+ * access — so it runs BEFORE the worktree is created and the common typo never
+ * provisions anything that would need tearing down.
+ *
+ * Empty, ".", and "/" all mean the repo root (null). Everything else is rebuilt
+ * from validated segments, so redundant "//" and trailing slashes normalize away
+ * rather than being rejected. `..` is refused here rather than resolved: a session
+ * works inside its repo, and refusing is clearer to the human who typo'd than a
+ * path that silently climbs.
+ */
+export function normalizeSubdir(raw: string): SubdirCheck {
+  const trimmed = raw.trim();
+  if (trimmed.includes("\0")) return { ok: false, reason: "contains a null byte" };
+  if (trimmed.includes("\\")) {
+    return { ok: false, reason: 'contains a backslash — separate path segments with "/"' };
+  }
+  if (trimmed.startsWith("/")) {
+    return { ok: false, reason: "must be a path inside the repo, not an absolute path" };
+  }
+  if (trimmed === "~" || trimmed.startsWith("~/")) {
+    return { ok: false, reason: "must be a path inside the repo" };
+  }
+  const segments = trimmed.split("/").filter((s) => s !== "" && s !== ".");
+  if (segments.length === 0) return { ok: true, workdir: null };
+  if (segments.includes("..")) {
+    return { ok: false, reason: 'cannot contain ".." — a session works inside its own repo' };
+  }
+  if (segments[0] === ".git") return { ok: false, reason: "cannot be inside .git" };
+  return { ok: true, workdir: segments.join("/") };
+}
+
+/**
+ * Confirm the subdirectory really exists inside the worktree. Runs AFTER creation
+ * (it needs the checked-out tree) and is the security-critical half of validation.
+ *
+ * Uses `realpath`, not `existsSync`, deliberately. The policy engine's containment
+ * test is lexical (`path.resolve` never follows symlinks), which is tolerable while
+ * the resolution base is a path Condotto derives itself — but a subdir names
+ * COMMITTED REPO CONTENT. If `apps/report` is a symlink to `/etc`, the real cwd is
+ * `/etc`, every lexically-inside path passes policy, and `open()` follows the link
+ * out of the tree. Resolving both sides and re-testing containment closes that
+ * without needing general symlink hardening.
+ */
+export async function verifyWorkdir(
+  worktreePath: string,
+  workdir: string,
+): Promise<{ ok: true } | { ok: false; reason: string }> {
+  const target = resolve(worktreePath, workdir);
+  let realTarget: string;
+  let realRoot: string;
+  try {
+    realRoot = await realpath(worktreePath);
+    realTarget = await realpath(target);
+  } catch {
+    return { ok: false, reason: `\`${workdir}\` doesn't exist in this repo` };
+  }
+  if (realTarget !== realRoot && !realTarget.startsWith(realRoot + sep)) {
+    return { ok: false, reason: `\`${workdir}\` resolves outside the repo (it is a symlink out of the tree)` };
+  }
+  const st = await stat(realTarget).catch(() => null);
+  if (!st?.isDirectory()) return { ok: false, reason: `\`${workdir}\` is not a directory` };
+  return { ok: true };
+}
+
+/** Top-level directory names inside a worktree — used to make a subdir typo obvious. */
+export function listTopLevelDirs(worktreePath: string): string[] {
+  if (!existsSync(worktreePath)) return [];
+  return readdirSync(worktreePath, { withFileTypes: true })
+    .filter((e) => e.isDirectory() && e.name !== ".git")
+    .map((e) => e.name)
+    .sort();
 }
 
 /** Outcome of a teardown — best-effort, so callers can audit what happened. */

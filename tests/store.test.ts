@@ -36,6 +36,21 @@ describe("store sessions", () => {
     });
   });
 
+  test("workdir round-trips, and defaults to null (the repo root)", () => {
+    const store = memoryStore();
+    // Omitted entirely — the shape every pre-monorepo caller uses.
+    store.createSession({ ...baseSession, id: "sw1", conversation_id: "1.000001" });
+    expect(store.getSession("sw1")!.workdir).toBeNull();
+    // Explicit null and an explicit sub-project both persist as given.
+    store.createSession({ ...baseSession, id: "sw2", conversation_id: "1.000002", workdir: null });
+    expect(store.getSession("sw2")!.workdir).toBeNull();
+    store.createSession({ ...baseSession, id: "sw3", conversation_id: "1.000003", workdir: "apps/report" });
+    expect(store.getSession("sw3")!.workdir).toBe("apps/report");
+    // And it survives the read paths the session manager actually uses.
+    expect(store.getSessionByConversation("slack", "1.000003")!.workdir).toBe("apps/report");
+    expect(store.listSessions({ surfaceId: "slack" }).find((s) => s.id === "sw3")!.workdir).toBe("apps/report");
+  });
+
   test("conversation ids are strings and leading zeros survive round-trips", () => {
     const store = memoryStore();
     const ts = "1752241234.000567"; // float-parsing this loses the leading zeros
@@ -484,7 +499,7 @@ describe("store schema migrations", () => {
   // The current schema version == the number of migrations in the runner. Bump
   // this constant in lockstep whenever a migration is appended — the tests below
   // pin the runner's behavior to it.
-  const CURRENT_SCHEMA_VERSION = 2;
+  const CURRENT_SCHEMA_VERSION = 3;
 
   const migPath = (name: string): string => join(mkdtempSync(join(tmpdir(), "condotto-mig-")), name);
   const userVersion = (path: string): number => {
@@ -525,11 +540,13 @@ describe("store schema migrations", () => {
 
     const raw = new Database(path);
     // Faithfully reconstruct the real pre-runner state: the live store predated
-    // BOTH the runner (stamp 0) AND every post-v1 column. Drop the v2 addition so
-    // re-migration re-adds it — exactly what the true upgrade does (a v0 store that
-    // never had cleanup_at). Without this the rewound store would still carry the
-    // column and migrateV2's plain ADD COLUMN would (wrongly) see a duplicate.
-    raw.run("ALTER TABLE sessions DROP COLUMN cleanup_at");
+    // BOTH the runner (stamp 0) AND every post-v1 column. Drop each post-v1
+    // addition so re-migration re-adds it — exactly what the true upgrade does (a
+    // v0 store that never had them). Without this the rewound store would still
+    // carry the column and the plain ADD COLUMN would (wrongly) see a duplicate.
+    // EVERY future migration that adds a column must be dropped here too.
+    raw.run("ALTER TABLE sessions DROP COLUMN cleanup_at"); // v2
+    raw.run("ALTER TABLE sessions DROP COLUMN workdir"); // v3
     raw.run("PRAGMA user_version = 0"); // rewind the stamp to the pre-runner state
     raw.close();
     expect(userVersion(path)).toBe(0);

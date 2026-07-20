@@ -17,6 +17,14 @@ export interface SessionRow {
   channel_id: string;
   repo_id: string;
   worktree_path: string;
+  /**
+   * The session's working directory RELATIVE to `worktree_path`, POSIX-style
+   * (`"apps/report"`), or null for the repo root. Set once at assign and never
+   * rewritten: the harness keys transcript storage by encoded cwd, so changing it
+   * would silently lose the conversation. The confinement boundary stays
+   * `worktree_path` regardless — this only moves where the agent starts.
+   */
+  workdir: string | null;
   harness_id: string;
   harness_session_handle: SessionHandle | null;
   branch: string;
@@ -306,6 +314,22 @@ function migrateV2(db: Database): void {
   db.run(`ALTER TABLE sessions ADD COLUMN cleanup_at TEXT`);
 }
 
+/**
+ * Migration **v3** (monorepo awareness): the session's working directory
+ * within its repo, for `assign <repo>/<subdir>`. Stored RELATIVE and POSIX-style;
+ * NULL means the repo root, so every session written before this migration keeps
+ * exactly its previous behaviour with no backfill.
+ *
+ * Relative rather than absolute on purpose: `worktree_path` remains the one
+ * absolute, never-rewritten path (and the confinement boundary), while this is a
+ * pure offset from it. It is IMMUTABLE for the session's life — the harness keys
+ * its transcript storage by encoded cwd, so re-pointing it would silently lose the
+ * conversation (DESIGN §5).
+ */
+function migrateV3(db: Database): void {
+  db.run(`ALTER TABLE sessions ADD COLUMN workdir TEXT`);
+}
+
 /** Add `column` to `table` only if absent (idempotent ALTER — SQLite has no
  *  `ADD COLUMN IF NOT EXISTS`). Used by the baseline migration to evolve tables
  *  a pre-runner DB already created. */
@@ -345,7 +369,8 @@ export class Store {
     const migrations: Array<(db: Database) => void> = [
       migrateBaselineV1, // v1: the schema as one idempotent baseline.
       migrateV2, // v2: sessions.cleanup_at for the worktree GC.
-      // v3+: append new migrations here. They only ever run on a store already
+      migrateV3, // v3: sessions.workdir for monorepo sub-project sessions.
+      // v4+: append new migrations here. They only ever run on a store already
       // at the prior version, so they can be plain forward DDL — no IF NOT EXISTS
       // gymnastics.
     ];
@@ -496,7 +521,7 @@ export class Store {
   createSession(
     s: Omit<
       SessionRow,
-      "created_at" | "last_active_at" | "budget_limit_usd" | "model" | "effort" | "subagents" | "workflows" | "workflow_write" | "auto_approve" | "cleanup_at"
+      "created_at" | "last_active_at" | "budget_limit_usd" | "model" | "effort" | "subagents" | "workflows" | "workflow_write" | "auto_approve" | "cleanup_at" | "workdir"
     > & {
       budget_limit_usd?: number | null;
       model?: string | null;
@@ -504,10 +529,13 @@ export class Store {
       subagents?: number;
       workflows?: number;
       auto_approve?: number;
+      /** Relative sub-project path; omitted/null = the repo root. */
+      workdir?: string | null;
     },
   ): SessionRow {
     const now = new Date().toISOString();
     const budget = s.budget_limit_usd ?? null;
+    const workdir = s.workdir ?? null;
     const model = s.model ?? null;
     const effort = s.effort ?? null;
     const subagents = s.subagents ?? 0;
@@ -519,10 +547,10 @@ export class Store {
       this.db
         .query(
           `INSERT INTO sessions
-             (id, surface_id, conversation_id, channel_id, repo_id, worktree_path,
+             (id, surface_id, conversation_id, channel_id, repo_id, worktree_path, workdir,
               harness_id, harness_session_handle, branch, status, budget_limit_usd,
               model, effort, subagents, workflows, auto_approve, created_at, last_active_at)
-           VALUES ($id, $surface_id, $conversation_id, $channel_id, $repo_id, $worktree_path,
+           VALUES ($id, $surface_id, $conversation_id, $channel_id, $repo_id, $worktree_path, $workdir,
                    $harness_id, $handle, $branch, $status, $budget,
                    $model, $effort, $subagents, $workflows, $autoApprove, $now, $now)`,
         )
@@ -533,6 +561,7 @@ export class Store {
           channel_id: s.channel_id,
           repo_id: s.repo_id,
           worktree_path: s.worktree_path,
+          workdir,
           harness_id: s.harness_id,
           handle: s.harness_session_handle === null ? null : JSON.stringify(s.harness_session_handle),
           branch: s.branch,
@@ -555,6 +584,7 @@ export class Store {
     }
     return {
       ...s,
+      workdir,
       budget_limit_usd: budget,
       model,
       effort,
