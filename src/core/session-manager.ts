@@ -407,10 +407,19 @@ export class SessionManager {
     } catch (err) {
       this.log(`[session-manager] error handling ${event.kind}: ${err}`);
       // Best-effort: a failed command should not fail silently in the thread.
-      if (event.kind === "command" && event.conv.conversationId) {
-        const surface = this.surfaces.get(event.conv.surfaceId);
+      // `choice` counts too — clicking a repo button runs the same work as
+      // typing the command, so a failure there must report rather than leave a
+      // clicked button and a dead-looking thread.
+      const target =
+        event.kind === "command"
+          ? { conv: event.conv, label: event.name }
+          : event.kind === "choice"
+            ? { conv: event.conv, label: event.choiceId }
+            : null;
+      if (target && target.conv.conversationId) {
+        const surface = this.surfaces.get(target.conv.surfaceId);
         await surface
-          ?.post(event.conv, { text: `⚠️ ${event.name} failed: ${err instanceof Error ? err.message : err}` })
+          ?.post(target.conv, { text: `⚠️ ${target.label} failed: ${err instanceof Error ? err.message : err}` })
           .catch(() => {});
       }
     }
@@ -494,16 +503,9 @@ export class SessionManager {
       await surface.post(conv, { text: "Only architects can assign sessions." });
       return;
     }
-    const repoName = args.trim().split(/\s+/)[0] || "testrepo";
-    const repo = this.store.getRepo(repoName);
-    if (!repo) {
-      const available = this.store.listRepos().map((r) => r.name).join(", ") || "(none)";
-      await surface.post(conv, {
-        text: `Unknown repo "${repoName}". Available: ${available}.`,
-      });
-      return;
-    }
-
+    // Resolve the thread's existing session before the repo argument: both
+    // branches below key off `existing.repo_id`, so a bare `assign` in an
+    // already-assigned thread reports that rather than asking which repo.
     const existing = this.store.getSessionByConversation(conv.surfaceId, conv.conversationId);
     if (existing && existing.status !== "stopped") {
       await surface.post(conv, {
@@ -550,6 +552,21 @@ export class SessionManager {
         });
       });
       await entry.chain;
+      return;
+    }
+
+    // No implicit repo: a bare `assign` asks instead of picking one for you.
+    const repoName = args.trim().split(/\s+/)[0];
+    if (!repoName) {
+      await this.promptForRepo(conv, "You didn't name a repo");
+      return;
+    }
+    const repo = this.store.getRepo(repoName);
+    if (!repo) {
+      const available = this.store.listRepos().map((r) => r.name).join(", ") || "(none)";
+      await surface.post(conv, {
+        text: `Unknown repo "${repoName}". Available: ${available}.`,
+      });
       return;
     }
 
@@ -654,9 +671,20 @@ export class SessionManager {
       return;
     }
 
+    await this.promptForRepo(conv, "👋 I'm not set up in this thread yet. To start, an architect assigns me to a repo");
+  }
+
+  /**
+   * Ask which repo to work in: choice buttons when the surface supports them and
+   * the list is short, a text list otherwise. Shared by `guide()` and a bare
+   * `assign` with no repo argument — there is no default repo, so both ask rather
+   * than guess. `lead` is a bare phrase (no trailing punctuation); the caller's
+   * context supplies the reason we're asking.
+   */
+  private async promptForRepo(conv: ConversationRef, lead: string): Promise<void> {
+    const surface = this.surfaceFor(conv);
     const repos = this.store.listRepos();
     const MAX_CHOICE_BUTTONS = 5;
-    const lead = "👋 I'm not set up in this thread yet. To start, an architect assigns me to a repo";
     if (surface.capabilities.buttons && repos.length >= 1 && repos.length <= MAX_CHOICE_BUTTONS) {
       await surface.requestChoice(conv, {
         choiceId: "assign_repo",
@@ -666,6 +694,8 @@ export class SessionManager {
       });
       return;
     }
+    // Boot validation guarantees at least one configured repo, so "(none
+    // configured)" should be unreachable — kept as defensive depth.
     const list = repos.map((r) => `\`${r.name}\``).join(", ") || "(none configured)";
     await surface.post(conv, {
       text:

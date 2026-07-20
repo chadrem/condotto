@@ -2,13 +2,12 @@
 // an architect clicking Approve, possibly after a daemon restart). Resume the
 // session and "approve" the pending call by allowing its tool_use_id on the
 // re-drive. Expect: the Write executes and HELLO.txt appears.
-import { homedir } from "node:os";
-import { join } from "node:path";
 import { existsSync, readFileSync } from "node:fs";
+import { smokeEnv } from "./smoke-fixture";
 import { ClaudeCodeAdapter } from "../src/adapters/claude-code/adapter";
 import type { GateFn } from "../src/core/types";
 
-const state = JSON.parse(readFileSync(join(homedir(), "tmp", "condotto-gate-smoke.json"), "utf8"));
+const state = JSON.parse(readFileSync((await smokeEnv()).statePath("gate.json"), "utf8"));
 console.log(`[smoke] resuming; approving deferred tool_use_id=${state.deferred.id}`);
 
 const gate: GateFn = async (call) => {

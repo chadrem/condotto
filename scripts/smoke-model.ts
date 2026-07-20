@@ -3,15 +3,15 @@
 // on one session — Opus/high, then a mid-session switch to Fable/low — and confirms
 // each completes with a reply and no error. This exercises the exact SDK model IDs
 // the adapter maps to (claude-opus-4-8 / claude-fable-5) and the effort levels.
-//   Run: bun run smoke:model   (needs ~/tmp/condotto-testrepo + subscription auth)
-import { loadConfig } from "../src/core/config";
+//   Run: bun run smoke:model   (needs CONDOTTO_SMOKE_REPO + subscription auth)
+import { smokeEnv } from "./smoke-fixture";
 import { WorktreeManager } from "../src/core/worktrees";
 import { ClaudeCodeAdapter } from "../src/adapters/claude-code/adapter";
 import type { GateFn } from "../src/core/types";
 
-const config = loadConfig();
-const repo = config.repos.find((r) => r.name === "testrepo") ?? config.repos[0]!;
-const worktrees = new WorktreeManager(config.worktreesRoot);
+const env = await smokeEnv();
+const repo = env.repo;
+const worktrees = new WorktreeManager(env.worktreesRoot);
 const worktree = await worktrees.create({
   repoPath: repo.path,
   defaultBranch: repo.defaultBranch,

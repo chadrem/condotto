@@ -18,6 +18,7 @@
     "build:linux-x64": "bun run scripts/build-binary.ts --target bun-linux-x64",
     "build:linux-arm64": "bun run scripts/build-binary.ts --target bun-linux-arm64",
     "check:ports": "bun run scripts/check-ports.ts",
+    "smoke:reset": "bun run scripts/smoke-reset.ts",
     "smoke:create": "bun run scripts/smoke-create.ts",
     "smoke:resume": "bun run scripts/smoke-resume.ts",
     "smoke:gate": "bun run scripts/smoke-gate.ts",

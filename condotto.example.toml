@@ -69,11 +69,15 @@ max_concurrent_turns = 6    # cap on harness turns running at once across all
 # ---------------------------------------------------------------------------
 # Repos Condotto can be pointed at. Assign one with `/condotto assign <name>`.
 #
-# The throwaway "testrepo" (~/tmp/condotto-testrepo, env override CONDOTTO_TEST_REPO)
-# is registered automatically; a [[repos]] entry named "testrepo" overrides it.
-# Sessions only ever see COMMITTED content (each runs in a fresh git worktree), so
-# a repo's working tree, untracked files, and .gitignored files are never visible
-# to the agent.
+# REQUIRED: declare at least one. There is no default repo — Condotto only ever
+# works in a repo you name here, and it refuses to start if this section is empty.
+# Names must be unique.
+#
+# Starting out, point your first entry at a THROWAWAY clone rather than a repo you
+# care about, and wire `land_cmd`/`deploy_cmd` to `echo ...` until you've watched
+# the approval gate work. Sessions only ever see COMMITTED content (each runs in a
+# fresh git worktree), so a repo's working tree, untracked files, and .gitignored
+# files are never visible to the agent.
 #
 # [[repos]]
 # name = "webapp"                 # simple identifier used by /condotto assign

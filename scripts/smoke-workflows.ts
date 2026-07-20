@@ -6,13 +6,13 @@
 // are on) and the real policy engine as the gate. Under bypassPermissions the
 // background workflow's sub-agent tool calls route through our PreToolUse hook with
 // `agent_id`, where the read-only subagent policy confines them (spike 2026-07-18).
-//   Run: bun run smoke:workflows   (needs testrepo + subscription auth)
+//   Run: bun run smoke:workflows   (needs CONDOTTO_SMOKE_REPO + subscription auth)
 // Set CONDOTTO_SMOKE_WRITE=1 to also exercise the worktree-write opt-in: the
 // workflow's agents WRITE inside the worktree (allowed, confined) while an
 // out-of-worktree write stays hard-denied.
 import { existsSync } from "node:fs";
 import { join } from "node:path";
-import { loadConfig } from "../src/core/config";
+import { smokeEnv } from "./smoke-fixture";
 import { WorktreeManager } from "../src/core/worktrees";
 import { ClaudeCodeAdapter } from "../src/adapters/claude-code/adapter";
 import { evaluate } from "../src/core/policy";
@@ -20,9 +20,9 @@ import type { GateFn } from "../src/core/types";
 
 const WRITE_MODE = process.env.CONDOTTO_SMOKE_WRITE === "1";
 
-const config = loadConfig();
-const repo = config.repos.find((r) => r.name === "testrepo") ?? config.repos[0]!;
-const worktrees = new WorktreeManager(config.worktreesRoot);
+const env = await smokeEnv();
+const repo = env.repo;
+const worktrees = new WorktreeManager(env.worktreesRoot);
 const worktree = await worktrees.create({
   repoPath: repo.path,
   defaultBranch: repo.defaultBranch,

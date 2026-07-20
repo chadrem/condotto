@@ -103,11 +103,12 @@ these to its native affordances: Teams message actions, signed email links, a
 web UI. The journeys themselves are surface-agnostic.)
 
 1. **Assign.** Two paths (architects only). For an **existing** thread:
-   `@Condotto assign` (or `@Condotto take this`) mentioned in the thread — Slack
-   delivers mentions with thread context. For a **new** ticket: `/condotto
-   assign <repo>` at channel top level — the daemon posts an anchor message
-   whose `ts` becomes the thread root, and the conversation happens in that
-   thread. (Custom slash commands cannot be invoked inside Slack threads at
+   `@Condotto assign <repo>` mentioned in the thread — Slack delivers mentions
+   with thread context. Naming no repo (or `@Condotto take this`) posts the repo
+   picker instead of assuming one; there is no default repo. For a **new**
+   ticket: `/condotto assign <repo>` at channel top level — the repo is required
+   there, since that path posts a public anchor message whose `ts` becomes the
+   thread root, and the conversation happens in that thread. (Custom slash commands cannot be invoked inside Slack threads at
    all — verified 2026-07-18, see DECISIONS.md.) Either way the daemon creates
    a git worktree for the repo, starts a Claude Code session pinned to it, and
    the session introduces itself in the thread ("I'm on it — repo `webapp`,
@@ -732,9 +733,9 @@ by the actual `deferred_tool_use`, with `canUseTool` as the deny-by-default
 batching backstop. Assign/stop/approvals are architect-only, verified server-side;
 roles are config-authoritative. Per-repo test/land/deploy run through the
 Approve/Deny gate via the core `CommandRunner` in the worktree (never the agent's
-shell; echo/no-op on `testrepo`, a real land/deploy command is the operating
-team's per-repo config). Streaming progress is one throttled, trailing-flushed
-status message. A daemon-wide turn semaphore bounds concurrency over per-session
+shell; a no-op `echo` while a repo is being shaken out, a real land/deploy command
+once the operating team trusts it — per-repo config either way). Streaming
+progress is one throttled, trailing-flushed status message. A daemon-wide turn semaphore bounds concurrency over per-session
 FIFOs (in-process `query()` verified under load). Cost governance is two-layer:
 cumulative `total_cost_usd` pauses a runaway thread and pings the architect
 (recovery via `@Condotto budget <usd>`), and the SDK `maxBudgetUsd` brakes a single
@@ -810,7 +811,10 @@ shape crosses the port.
    **`condotto.example.toml`** and `.gitignore`s the real one. The daemon discovers
    it at `./condotto.toml` (override with `--config <path>`/`CONDOTTO_CONFIG`) and
    **validates at boot** — missing or malformed required fields fail fast with an
-   actionable message, never a half-started daemon.
+   actionable message, never a half-started daemon. **At least one `[[repos]]`
+   entry is required and names must be unique**: there is no implicit or default
+   repo, so an operator can only ever be working in a repo they named. Likewise
+   no in-thread command falls back to a default repo — a bare `assign` asks.
 2. **Install/setup docs** — a README/runbook: install Bun or grab the binary →
    create the Slack app → copy and fill `condotto.example.toml` → run,
    *and* how the grant + auto-approve trust model lets the architect empower domain

@@ -17,6 +17,13 @@ function tomlFile(content: string): string {
 // (loadConfig ignores [slack] entirely; only loadSlackConfig reads it).
 const SLACK = `[slack]\nbot_token = "B"\napp_token = "A"\n`;
 
+// At least one [[repos]] entry is required, so tests focused on defaults/roles
+// append a filler one. APPENDED, never prepended: TOML top-level keys (e.g.
+// `architects = [...]`) must stay above the first [section] header, or they'd be
+// parsed as keys inside it.
+const FILLER_REPO = `[[repos]]\nname = "filler"\npath = "/srv/filler"\n`;
+const cfgFile = (body: string): string => tomlFile(`${body}\n${FILLER_REPO}`);
+
 describe("config discovery + validation", () => {
   test("a missing config file fails fast with an actionable message", () => {
     expect(() => loadConfig({}, "/nonexistent/condotto.toml")).toThrow(/No Condotto config found/);
@@ -46,9 +53,12 @@ describe("config discovery + validation", () => {
 });
 
 describe("loadConfig repos", () => {
-  test("defaults to the throwaway testrepo only when no [[repos]] present", () => {
-    const config = loadConfig({}, tomlFile(""));
-    expect(config.repos.map((r) => r.name)).toEqual(["testrepo"]);
+  test("no [[repos]] fails fast — there is no default repo", () => {
+    // An operator must name their own repos; nothing is assumed on their behalf.
+    expect(() => loadConfig({}, tomlFile(""))).toThrow(/No repos configured/);
+    expect(() => loadConfig({}, tomlFile(""))).toThrow(/\[\[repos\]\]/);
+    // The message shows a copy-pasteable entry and points at the example file.
+    expect(() => loadConfig({}, tomlFile(`[defaults]\nmodel = "opus"\n`))).toThrow(/condotto\.example\.toml/);
   });
 
   test("[[repos]] adds named repos with expanded paths and default branch", () => {
@@ -63,23 +73,19 @@ name = "api"
 path = "/srv/api"
 `);
     const config = loadConfig({}, path);
-    expect(config.repos.map((r) => r.name)).toEqual(["testrepo", "webapp", "api"]);
+    // Exactly the declared repos, in file order — nothing injected.
+    expect(config.repos.map((r) => r.name)).toEqual(["webapp", "api"]);
     const webapp = config.repos.find((r) => r.name === "webapp")!;
     expect(webapp.path).not.toContain("~");
     expect(webapp.defaultBranch).toBe("develop");
     expect(config.repos.find((r) => r.name === "api")!.defaultBranch).toBe("main");
   });
 
-  test("a [[repos]] entry named testrepo overrides the default", () => {
-    const path = tomlFile(`[[repos]]\nname = "testrepo"\npath = "/tmp/elsewhere"\n`);
-    const config = loadConfig({}, path);
-    expect(config.repos).toHaveLength(1);
-    expect(config.repos[0]!.path).toBe("/tmp/elsewhere");
-  });
-
-  test("CONDOTTO_TEST_REPO overrides the default testrepo path", () => {
-    const config = loadConfig({ CONDOTTO_TEST_REPO: "/tmp/tr" }, tomlFile(""));
-    expect(config.repos[0]!.path).toBe("/tmp/tr");
+  test("a duplicate repo name is rejected rather than silently discarded", () => {
+    // Names key the repos table and every `assign <repo>`, so a duplicate is a
+    // typo that would otherwise drop one of the two entries on the floor.
+    const path = tomlFile(`[[repos]]\nname = "dup"\npath = "/a"\n\n[[repos]]\nname = "dup"\npath = "/b"\n`);
+    expect(() => loadConfig({}, path)).toThrow(/duplicate name "dup"/);
   });
 
   test("malformed repo entries are rejected loudly", () => {
@@ -87,15 +93,6 @@ path = "/srv/api"
     expect(() => loadConfig({}, tomlFile(`[[repos]]\nname = "bad name!"\npath = "/x"\n`))).toThrow(/"name"/);
     expect(() => loadConfig({}, tomlFile(`[[repos]]\nname = "ok"\n`))).toThrow(/"path"/);
     expect(() => loadConfig({}, tomlFile(`repos = "notanarray"\n`))).toThrow(/array of tables/);
-  });
-
-  test("the throwaway testrepo ships a real test command and echo land/deploy no-ops", () => {
-    const testrepo = loadConfig({}, tomlFile("")).repos.find((r) => r.name === "testrepo")!;
-    expect(testrepo.testCmd).toBe("bun test");
-    expect(testrepo.landCmd).toContain("echo");
-    expect(testrepo.deployCmd).toContain("echo");
-    // Build-time safety: land/deploy must not be a real deploy path.
-    expect(testrepo.landCmd).not.toMatch(/git push|deploy|kubectl|ssh/i);
   });
 
   test("[[repos]] loads test/land/deploy commands and per-repo cost cap", () => {
@@ -162,15 +159,8 @@ path = "/srv/bare"
     );
   });
 
-  test("the throwaway testrepo is untrusted with no model/effort override", () => {
-    const testrepo = loadConfig({}, tomlFile("")).repos.find((r) => r.name === "testrepo")!;
-    expect(testrepo.trusted).toBe(false);
-    expect(testrepo.defaultModel).toBeUndefined();
-    expect(testrepo.defaultEffort).toBeUndefined();
-  });
-
   test("safe_bash_allowlist defaults to the conservative set and can be overridden", () => {
-    const def = loadConfig({}, tomlFile(""));
+    const def = loadConfig({}, cfgFile(""));
     expect(def.repos[0]!.safeBashAllowlist).toContain("git status");
     expect(def.repos[0]!.safeBashAllowlist).not.toContain("cat"); // reads go through confined tools
 
@@ -198,64 +188,64 @@ path = "/srv/unset"
 
 describe("loadConfig defaults + env overrides", () => {
   test("cost cap and concurrency: defaults, file values, and env override", () => {
-    const def = loadConfig({}, tomlFile(""));
+    const def = loadConfig({}, cfgFile(""));
     expect(def.defaultCostCapUsd).toBe(10);
     expect(def.maxConcurrentTurns).toBe(6);
 
-    const fromFile = loadConfig({}, tomlFile(`[defaults]\ncost_cap_usd = 20\nmax_concurrent_turns = 4\n`));
+    const fromFile = loadConfig({}, cfgFile(`[defaults]\ncost_cap_usd = 20\nmax_concurrent_turns = 4\n`));
     expect(fromFile.defaultCostCapUsd).toBe(20);
     expect(fromFile.maxConcurrentTurns).toBe(4);
 
     // Env wins over the file value.
     const over = loadConfig(
       { CONDOTTO_COST_CAP_USD: "42.5", CONDOTTO_MAX_CONCURRENT_TURNS: "3" },
-      tomlFile(`[defaults]\ncost_cap_usd = 20\nmax_concurrent_turns = 4\n`),
+      cfgFile(`[defaults]\ncost_cap_usd = 20\nmax_concurrent_turns = 4\n`),
     );
     expect(over.defaultCostCapUsd).toBe(42.5);
     expect(over.maxConcurrentTurns).toBe(3);
 
-    expect(() => loadConfig({ CONDOTTO_COST_CAP_USD: "-1" }, tomlFile(""))).toThrow(/positive number/);
-    expect(() => loadConfig({ CONDOTTO_MAX_CONCURRENT_TURNS: "0" }, tomlFile(""))).toThrow(/positive integer/);
-    expect(() => loadConfig({}, tomlFile(`[defaults]\nmax_concurrent_turns = 0\n`))).toThrow(/positive integer/);
+    expect(() => loadConfig({ CONDOTTO_COST_CAP_USD: "-1" }, cfgFile(""))).toThrow(/positive number/);
+    expect(() => loadConfig({ CONDOTTO_MAX_CONCURRENT_TURNS: "0" }, cfgFile(""))).toThrow(/positive integer/);
+    expect(() => loadConfig({}, cfgFile(`[defaults]\nmax_concurrent_turns = 0\n`))).toThrow(/positive integer/);
   });
 
   test("auto-approve defaults ON, is settable in-file, and env overrides it", () => {
-    expect(loadConfig({}, tomlFile("")).defaultAutoApprove).toBe(true);
-    expect(loadConfig({}, tomlFile(`[defaults]\nauto_approve = false\n`)).defaultAutoApprove).toBe(false);
+    expect(loadConfig({}, cfgFile("")).defaultAutoApprove).toBe(true);
+    expect(loadConfig({}, cfgFile(`[defaults]\nauto_approve = false\n`)).defaultAutoApprove).toBe(false);
     for (const off of ["off", "false", "0", "no", "OFF"]) {
-      expect(loadConfig({ CONDOTTO_AUTO_APPROVE: off }, tomlFile("")).defaultAutoApprove).toBe(false);
+      expect(loadConfig({ CONDOTTO_AUTO_APPROVE: off }, cfgFile("")).defaultAutoApprove).toBe(false);
     }
     // Env "on" beats a file `false`.
     expect(
-      loadConfig({ CONDOTTO_AUTO_APPROVE: "on" }, tomlFile(`[defaults]\nauto_approve = false\n`)).defaultAutoApprove,
+      loadConfig({ CONDOTTO_AUTO_APPROVE: "on" }, cfgFile(`[defaults]\nauto_approve = false\n`)).defaultAutoApprove,
     ).toBe(true);
   });
 
   test("default model/effort defaults to Opus + high, settable in-file, env overrides", () => {
-    const def = loadConfig({}, tomlFile(""));
+    const def = loadConfig({}, cfgFile(""));
     expect(def.defaultModel).toBe("opus");
     expect(def.defaultEffort).toBe("high");
 
-    const fromFile = loadConfig({}, tomlFile(`[defaults]\nmodel = "sonnet"\neffort = "max"\n`));
+    const fromFile = loadConfig({}, cfgFile(`[defaults]\nmodel = "sonnet"\neffort = "max"\n`));
     expect(fromFile.defaultModel).toBe("sonnet");
     expect(fromFile.defaultEffort).toBe("max");
 
     const over = loadConfig(
       { CONDOTTO_DEFAULT_MODEL: "fable", CONDOTTO_DEFAULT_EFFORT: "xhigh" },
-      tomlFile(`[defaults]\nmodel = "sonnet"\neffort = "max"\n`),
+      cfgFile(`[defaults]\nmodel = "sonnet"\neffort = "max"\n`),
     );
     expect(over.defaultModel).toBe("fable");
     expect(over.defaultEffort).toBe("xhigh");
   });
 
   test("paths: db + worktrees_root come from [paths] and env overrides", () => {
-    const fromFile = loadConfig({}, tomlFile(`[paths]\ndb = "/data/condotto.sqlite"\nworktrees_root = "/data/wt"\n`));
+    const fromFile = loadConfig({}, cfgFile(`[paths]\ndb = "/data/condotto.sqlite"\nworktrees_root = "/data/wt"\n`));
     expect(fromFile.dbPath).toBe("/data/condotto.sqlite");
     expect(fromFile.worktreesRoot).toBe("/data/wt");
 
     const over = loadConfig(
       { CONDOTTO_DB_PATH: "/env/db.sqlite", CONDOTTO_WORKTREES_ROOT: "/env/wt" },
-      tomlFile(`[paths]\ndb = "/data/condotto.sqlite"\nworktrees_root = "/data/wt"\n`),
+      cfgFile(`[paths]\ndb = "/data/condotto.sqlite"\nworktrees_root = "/data/wt"\n`),
     );
     expect(over.dbPath).toBe("/env/db.sqlite");
     expect(over.worktreesRoot).toBe("/env/wt");
@@ -264,7 +254,7 @@ describe("loadConfig defaults + env overrides", () => {
 
 describe("loadConfig roles", () => {
   test("architects array seeds architect mappings at scope *", () => {
-    const cfg = loadConfig({}, tomlFile(`architects = ["slack:U1", "slack:U2", "slack:U3"]\n`));
+    const cfg = loadConfig({}, cfgFile(`architects = ["slack:U1", "slack:U2", "slack:U3"]\n`));
     expect(cfg.roles).toEqual([
       { principal: "slack:U1", role: "architect", scope: "*" },
       { principal: "slack:U2", role: "architect", scope: "*" },
@@ -273,12 +263,12 @@ describe("loadConfig roles", () => {
   });
 
   test("a non-qualified architect principal is rejected (file and env)", () => {
-    expect(() => loadConfig({}, tomlFile(`architects = ["U_NOSURFACE"]\n`))).toThrow(/surface-qualified/);
-    expect(() => loadConfig({ CONDOTTO_ARCHITECTS: "U_NOSURFACE" }, tomlFile(""))).toThrow(/surface-qualified/);
+    expect(() => loadConfig({}, cfgFile(`architects = ["U_NOSURFACE"]\n`))).toThrow(/surface-qualified/);
+    expect(() => loadConfig({ CONDOTTO_ARCHITECTS: "U_NOSURFACE" }, cfgFile(""))).toThrow(/surface-qualified/);
   });
 
   test("CONDOTTO_ARCHITECTS splits on both commas and spaces", () => {
-    const cfg = loadConfig({ CONDOTTO_ARCHITECTS: "slack:U1, slack:U2 slack:U3" }, tomlFile(""));
+    const cfg = loadConfig({ CONDOTTO_ARCHITECTS: "slack:U1, slack:U2 slack:U3" }, cfgFile(""));
     expect(cfg.roles).toEqual([
       { principal: "slack:U1", role: "architect", scope: "*" },
       { principal: "slack:U2", role: "architect", scope: "*" },
@@ -290,13 +280,13 @@ describe("loadConfig roles", () => {
     // Role assignments are authority: an explicit demote in the owned file must
     // stick even if the principal is still named in CONDOTTO_ARCHITECTS (a demote
     // must never be silently re-elevated by a leftover env entry).
-    const path = tomlFile(`[[roles]]\nprincipal = "slack:U1"\nrole = "member"\nscope = "*"\n`);
+    const path = cfgFile(`[[roles]]\nprincipal = "slack:U1"\nrole = "member"\nscope = "*"\n`);
     const cfg = loadConfig({ CONDOTTO_ARCHITECTS: "slack:U1" }, path);
     expect(cfg.roles).toEqual([{ principal: "slack:U1", role: "member", scope: "*" }]);
   });
 
   test("[[roles]] adds mappings with scope and role, merged with architects + env", () => {
-    const path = tomlFile(`
+    const path = cfgFile(`
 architects = ["slack:U1"]
 
 [[roles]]
@@ -317,12 +307,12 @@ role = "observer"
 
   test("an invalid role in [[roles]] is rejected", () => {
     expect(() =>
-      loadConfig({}, tomlFile(`[[roles]]\nprincipal = "slack:U1"\nrole = "superuser"\n`)),
+      loadConfig({}, cfgFile(`[[roles]]\nprincipal = "slack:U1"\nrole = "superuser"\n`)),
     ).toThrow(/architect\|member\|observer/);
   });
 
   test("architects must be an array of strings", () => {
-    expect(() => loadConfig({}, tomlFile(`architects = "slack:U1"\n`))).toThrow(/array of surface-qualified/);
+    expect(() => loadConfig({}, cfgFile(`architects = "slack:U1"\n`))).toThrow(/array of surface-qualified/);
   });
 });
 

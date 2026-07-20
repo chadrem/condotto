@@ -95,8 +95,7 @@ async function main(): Promise<void> {
     if (!existsSync(join(repo.path, ".git"))) {
       console.error(
         `Repo "${repo.name}" missing at ${repo.path} — point [[repos]].path in condotto.toml at a ` +
-          `git repository (or remove the entry). The default throwaway testrepo lives at ` +
-          `~/tmp/condotto-testrepo; create it or override CONDOTTO_TEST_REPO.`,
+          `git repository, or remove the entry.`,
       );
       process.exit(1);
     }
@@ -104,6 +103,19 @@ async function main(): Promise<void> {
 
   const store = new Store(config.dbPath);
   for (const repo of config.repos) store.upsertRepo(repo);
+  // Config is the source of truth for which repos exist (as it is for roles
+  // below): drop rows for repos no longer declared, so a removed repo actually
+  // stops being assignable. Rows a session still references are kept and named.
+  const pruned = store.pruneReposNotIn(config.repos.map((r) => r.name));
+  if (pruned.deleted.length > 0) {
+    log(`[daemon] dropped ${pruned.deleted.length} repo(s) no longer in condotto.toml: ${pruned.deleted.join(", ")}`);
+  }
+  if (pruned.keptInUse.length > 0) {
+    log(
+      `[daemon] WARNING: repo(s) ${pruned.keptInUse.join(", ")} are no longer in condotto.toml but still have ` +
+        `sessions, so they were kept and remain assignable. Re-declare them or stop those sessions.`,
+    );
+  }
   // Config is the source of truth for CONFIG roles: clear and re-seed so removing a
   // principal from config actually revokes their authority. Runtime `@Condotto grant`
   // delegations (source='grant') are preserved across the reseed.

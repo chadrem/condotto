@@ -1773,3 +1773,136 @@ landed). CLAUDE.md and the README's cross-references were updated to match.
 (Same day, earlier: the README's top section above "Contents" was rewritten as
 the marketing-facing overview — tagline, aha, use cases, guardrails,
 differentiation — which is what made the §1 duplication obvious.)
+
+---
+
+## 2026-07-20 — No default repo: `CONDOTTO_TEST_REPO` and the injected `testrepo` are gone
+
+`parseRepos()` unconditionally prepended a synthetic `testrepo` entry (path from
+`CONDOTTO_TEST_REPO`, default `~/tmp/condotto-testrepo`) to every config. A file
+entry of the same name could overwrite it, but nothing could remove it. Two
+consequences:
+
+- **The daemon refused to boot on a correct config.** The boot check exits when a
+  configured repo has no `.git`, so an operator whose `condotto.toml` declared only
+  real repos still died on a phantom directory they never asked for. Latent on the
+  dev box (where `~/tmp/condotto-testrepo` happens to exist), but a guaranteed
+  first-run failure on any fresh install — the exact moment an operator has the
+  least context to debug it.
+- **A bare `@Condotto assign` silently targeted the throwaway** — the repo name
+  defaulted to the string literal `"testrepo"`, so a forgotten argument started a
+  real session against a scratch repo instead of asking.
+
+**Decided:** a repo is something the operator configures, always. No default, no
+env-var escape hatch, no silent fallback.
+
+- `CONDOTTO_TEST_REPO` is removed outright, along with the injected entry.
+  `parseRepos` now returns exactly the declared `[[repos]]`, in file order.
+- **Zero repos fails fast at boot** with a copy-pasteable `[[repos]]` snippet and a
+  pointer to `condotto.example.toml`. It throws from `parseRepos`, so it rides the
+  existing `Configuration error:` path rather than adding a second error channel.
+  This is the forcing function: a daemon with no repos can do nothing, so it
+  refuses to start rather than half-starting. (Contrast the deliberate
+  warn-and-continue for *no architects*, where the daemon is still useful for
+  read-only work.)
+- **Duplicate `[[repos]]` names now throw.** The last-write-wins `Map` existed only
+  so a file entry could override the injected `testrepo`; with that gone, a
+  duplicate name is an operator typo that would silently discard a repo.
+- **A bare `assign` asks which repo** instead of guessing, reusing the choice-button
+  path `guide()` already had (extracted as `promptForRepo`). The existing-session
+  checks moved above repo resolution so a bare `assign` in an assigned thread still
+  reports "already assigned" rather than posting a picker.
+
+This supersedes the build-time-safety default recorded in the config-cutover entry
+above. That guidance — point a new install at a throwaway clone, wire
+`land_cmd`/`deploy_cmd` as `echo` until the gate is trusted — is unchanged and
+still correct; it now lives in `condotto.example.toml` and the README where an
+operator can act on it, rather than being baked into the parser as behavior they
+cannot remove. The rule was always about how to *develop against* Condotto, and it
+was never the parser's business to enforce it.
+
+Tests: `tests/config.test.ts` pins zero-repos-throws, duplicate-name-throws, and
+"exactly the declared repos, nothing injected"; defaults/roles cases append a
+filler repo (appended, never prepended — TOML top-level keys must stay above the
+first `[section]` header). `tests/session-manager.test.ts` names `testrepo`
+explicitly at every `assign` call site and adds a bare-`assign`-asks case; the name
+remains a store fixture there, which is fine. 318 tests pass; `check:ports` and
+`tsc --noEmit` clean.
+
+**Follow-up the same day (review round).** A multi-agent review of the change
+found five real defects in it, all now fixed:
+
+- **The DB kept the repos config had dropped.** `condotto.toml` is copied into the
+  `repos` table at boot, but `upsertRepo` only ever inserts/updates — nothing
+  deleted. Since every runtime lookup (picker, `assign`, dashboard, worktree GC)
+  reads the *store*, not config, the `testrepo` row written by earlier boots
+  survived and stayed assignable. Confirmed empirically: the dev box's DB still
+  listed it. So removing the default from the parser had not actually removed the
+  default. New `store.pruneReposNotIn(declared)` drops undeclared rows at boot,
+  mirroring `clearConfigRoles`, but **keeps** any row a session still references
+  (`sessions.repo_id` carries the name; deleting it would strand that thread's
+  history and its GC) and logs those for the operator. No migration — deletes only.
+- **The smoke scripts lost their throwaway pin.** They had used
+  `find(r => r.name === "testrepo") ?? repos[0]`, which always hit because the
+  default was injected first. Rewriting them to `repos[0]` silently aimed a real
+  agent — worktrees, shell, writes — at whatever repo the operator listed first;
+  on the dev box that resolved to a real production repo, inverting the build-time
+  safety rule. Fixed by the same principle as the change itself: a new
+  `scripts/smoke-repo.ts` requires `CONDOTTO_SMOKE_REPO` and exits with the repo
+  list rather than guessing. `smoke-create.ts` had the same latent bug and was
+  missed by the first pass. `smoke-cancel.ts` also now uses `config.worktreesRoot`
+  like its five siblings instead of a hardcoded path.
+- **`/condotto assign` with no repo left an orphan public post.** The Slack
+  adapter posts the "🎫 New Condotto session" anchor *before* the core sees the
+  command, to mint a thread ts. Falling through to the picker meant an unanswered
+  prompt left a channel post advertising a session that did not exist. The slash
+  path now requires the repo and answers ephemerally; in-thread `@Condotto assign`
+  still gets the picker, since there the thread already exists.
+- **Picker failures were silent.** `handleEvent`'s catch posted `⚠️ … failed` only
+  for `kind === "command"`, so a failure arriving via a button click reported
+  nothing — a clicked button and a dead-looking thread. `choice` now reports too.
+- **A test gap where the reorder needed cover.** Renaming `args: ""` to
+  `args: "testrepo"` at every assign call site also disarmed the already-assigned
+  and reactivate-after-stop cases, leaving nothing exercising a bare `assign` on a
+  thread that already has a session — exactly what moving the existing-session
+  checks above repo resolution was meant to preserve. Both cases added.
+
+Two findings were **not** acted on. The review's summary claimed the default
+`land_cmd`/`deploy_cmd` "silently became real `git push` / `kubectl rollout
+restart`" — unsupported; `parseRepoEntry` leaves both `undefined` when absent and
+no such default exists in `src/`. And the claim that the reorder newly drops a
+repo argument on a stopped thread overstates it: `HEAD` shows the old code
+validated the name and then ignored it in the reactivation branch too. The only
+real regression there is losing *typo* detection (an unknown repo name on an
+assigned thread now reports "already assigned" instead of "Unknown repo"), which
+is an acceptable trade for reporting the more relevant fact first.
+
+**Smoke tests made self-provisioning (same day).** The `CONDOTTO_SMOKE_REPO`
+guardrail above was the wrong shape: it made the operator supply a throwaway repo
+correctly, every time, forever. New `scripts/smoke-fixture.ts` removes the
+question — `smokeEnv()` builds the smokes' entire world under one scratch dir
+(`~/.cache/condotto-smoke`, override `CONDOTTO_SMOKE_HOME`) and returns the repo,
+the worktrees root, and a `statePath()` for phase-1→phase-2 handoff:
+
+- **A real git repo, provisioned from nothing** — `tiny-ledger`, with `README.md`,
+  `package.json`, and `src/{ledger,format,index}.ts` on a `main` commit. The
+  content is part of the test contract, not decoration: `smoke-resume` asserts
+  `/ledger\.ts|format\.ts/` and `smoke-workflows` asserts `/ledger|tiny|readme/`,
+  so those smokes were previously only as sound as whatever repo they happened to
+  be aimed at. Committed with an inline git identity so the fixture never depends
+  on (or writes to) the developer's global git config.
+- **Reset to a known state on every run** — `worktree prune`, `reset --hard`,
+  `clean -fd`, rewrite the files, commit only if something changed. A crashed or
+  half-finished run cannot poison the next one, and re-running adds no commits.
+- **No `condotto.toml` dependency at all.** A fresh clone can run the smokes; the
+  only prerequisite left is Claude auth, which can't be provisioned. This also
+  retires the ad-hoc `~/tmp/condotto-{smoke,gate-smoke}-state.json` handoff files
+  (two inconsistent paths) in favour of `<root>/state/*.json`.
+- **`bun run smoke:reset`** deletes the scratch dir; the next run rebuilds it.
+- `CONDOTTO_SMOKE_REPO=<name>` survives as a deliberate, loudly-announced escape
+  hatch for smoking against a real configured repo. The *default* can no longer
+  reach one by construction, which is the property the old injected `testrepo`
+  used to provide and the env-var guardrail only asked for politely.
+
+README gains a **Development** section — `bun test`, `check:ports`, and the
+smokes — which the project had never documented despite being open source.

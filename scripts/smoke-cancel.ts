@@ -1,5 +1,5 @@
 // smoke: drive BOTH riders through the REAL claude-code adapter (not the
-// injectable-query test seam) on subscription auth against the throwaway testrepo.
+// injectable-query test seam) on subscription auth against the repo named by CONDOTTO_SMOKE_REPO.
 //
 //   Part A — env-scrub: a real turn runs Bash; the daemon's planted SLACK_*/CONDOTTO_*
 //     secrets are absent from the agent shell, while PATH/HOME/toolchain survive.
@@ -8,13 +8,15 @@
 //     with a cancellation notice carrying the DRAINED spend — proving the detached
 //     workflow is halted and its cost folded into the ledger.
 //
-//   Run: bun run smoke:cancel   (needs testrepo + subscription auth; ~1-2 min)
+//   Run: bun run smoke:cancel   (needs CONDOTTO_SMOKE_REPO + subscription auth; ~1-2 min)
 import { WorktreeManager } from "../src/core/worktrees";
 import { ClaudeCodeAdapter } from "../src/adapters/claude-code/adapter";
+import { smokeEnv } from "./smoke-fixture";
 import type { GateFn } from "../src/core/types";
 
-const TESTREPO = process.env.HOME + "/tmp/condotto-testrepo";
-const worktrees = new WorktreeManager(process.env.HOME + "/tmp/condotto-spike-worktrees");
+const env = await smokeEnv();
+const repo = env.repo;
+const worktrees = new WorktreeManager(env.worktreesRoot);
 const adapter = new ClaudeCodeAdapter();
 
 // A gate that allows reads + Bash + the main Workflow launch, denies real writes,
@@ -35,7 +37,7 @@ process.env.SLACK_BOT_TOKEN = "xoxb-POISON-SHOULD-NOT-LEAK";
 process.env.CONDOTTO_POISON = "CONDOTTO-POISON-SHOULD-NOT-LEAK";
 process.env.MY_TOOLCHAIN_VAR = "toolchain-keepme";
 
-const wtA = await worktrees.create({ repoPath: TESTREPO, defaultBranch: "main", sessionId: crypto.randomUUID() });
+const wtA = await worktrees.create({ repoPath: repo.path, defaultBranch: repo.defaultBranch, sessionId: crypto.randomUUID() });
 const sessionA = await adapter.create({
   cwd: wtA.path,
   system: "Condotto env-scrub smoke. Run the one bash command and report its stdout verbatim. Terse.",
@@ -67,7 +69,7 @@ if (!aOk) failures++;
 
 // ---------------- Part B: workflow cancel + cost drain (real adapter) -------
 console.log("=== Part B — cancel a running workflow + drain its cost (real adapter) ===");
-const wtB = await worktrees.create({ repoPath: TESTREPO, defaultBranch: "main", sessionId: crypto.randomUUID() });
+const wtB = await worktrees.create({ repoPath: repo.path, defaultBranch: repo.defaultBranch, sessionId: crypto.randomUUID() });
 const sessionB = await adapter.create({
   cwd: wtB.path,
   system: "Condotto cancel smoke. You may launch multi-agent workflows for parallel read-only work. Be thorough.",

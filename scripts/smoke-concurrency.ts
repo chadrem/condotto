@@ -5,15 +5,15 @@
 // ids (no cross-talk) and no interleaving of session state.
 //
 // Run: bun run smoke:concurrency   (optionally: N=6 bun run smoke:concurrency)
-import { loadConfig } from "../src/core/config";
+import { smokeEnv } from "./smoke-fixture";
 import { WorktreeManager } from "../src/core/worktrees";
 import { ClaudeCodeAdapter } from "../src/adapters/claude-code/adapter";
 import type { GateFn, SessionHandle, TurnEvent } from "../src/core/types";
 
 const N = Math.max(2, Number(process.env.N ?? 4));
-const config = loadConfig();
-const repo = config.repos.find((r) => r.name === "testrepo") ?? config.repos[0]!;
-const worktrees = new WorktreeManager(config.worktreesRoot);
+const env = await smokeEnv();
+const repo = env.repo;
+const worktrees = new WorktreeManager(env.worktreesRoot);
 const adapter = new ClaudeCodeAdapter();
 
 // Read-only turn: allow reads, gate everything else (nothing should gate here).

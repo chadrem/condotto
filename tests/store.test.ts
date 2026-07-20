@@ -81,6 +81,26 @@ describe("store sessions", () => {
     expect(store.getRepo("r2")?.safe_bash_allowlist).toEqual([]);
   });
 
+  test("pruneReposNotIn drops undeclared repos but keeps ones a session still uses", () => {
+    const store = memoryStore();
+    store.upsertRepo({ name: "declared", path: "/tmp/a", defaultBranch: "main" });
+    store.upsertRepo({ name: "gone", path: "/tmp/b", defaultBranch: "main" });
+    store.upsertRepo({ name: "testrepo", path: "/tmp/c", defaultBranch: "main" });
+    // A session pins `testrepo`: dropping the row would strand its history.
+    store.createSession({ ...baseSession, id: "s1", conversation_id: "1.1", repo_id: "testrepo" });
+
+    const res = store.pruneReposNotIn(["declared"]);
+    expect(res.deleted).toEqual(["gone"]);
+    expect(res.keptInUse).toEqual(["testrepo"]);
+    expect(store.getRepo("gone")).toBeNull();
+    expect(store.getRepo("declared")).not.toBeNull();
+    expect(store.getRepo("testrepo")).not.toBeNull();
+    expect(store.listRepos().map((r) => r.name).sort()).toEqual(["declared", "testrepo"]);
+
+    // Idempotent: a second boot with the same config changes nothing.
+    expect(store.pruneReposNotIn(["declared"])).toEqual({ deleted: [], keptInUse: ["testrepo"] });
+  });
+
   test("session model/effort/subagents/workflows seed on create and default off", () => {
     const store = memoryStore();
     // Omitted → model/effort null (daemon default), flags 0 (opt-in, off).

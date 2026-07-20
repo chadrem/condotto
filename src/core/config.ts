@@ -274,41 +274,42 @@ function parseRepoEntry(entry: unknown, where: string): RepoConfig {
 }
 
 /**
- * The throwaway test repo is always registered (build-time safety default,
- * DESIGN.md §8) unless a `[[repos]]` entry named "testrepo" overrides it.
+ * Every repo Condotto can work in is declared by the operator as a `[[repos]]`
+ * entry. There is no implicit or default repo: at least one entry is required,
+ * and a config with none fails fast at boot rather than half-starting a daemon
+ * that has nothing to be assigned to.
+ *
  * Sessions only ever see committed content via worktrees — a registered repo's
  * working tree, untracked files, and ignored files are never visible to the agent.
  */
-function parseRepos(toml: Record<string, unknown>, env: Record<string, string | undefined>): RepoConfig[] {
-  const testRepoPath = expandHome(env.CONDOTTO_TEST_REPO ?? "~/tmp/condotto-testrepo");
-  // Build-time safety (DESIGN §8): land/deploy are echo/no-ops on the throwaway
-  // repo until a real target is wired. `bun test` is its real test command.
-  const testrepo: RepoConfig = {
-    name: "testrepo",
-    path: testRepoPath,
-    defaultBranch: "main",
-    safeBashAllowlist: DEFAULT_SAFE_BASH_ALLOWLIST,
-    testCmd: "bun test",
-    landCmd: "echo '[land] no-op on the throwaway testrepo (wire a real land path per repo)'",
-    deployCmd: "echo '[deploy] no-op on the throwaway testrepo (wire a real deploy path per repo)'",
-    // The throwaway repo is never trusted, so it never loads project config/skills/MCP.
-    trusted: false,
-  };
-
+function parseRepos(toml: Record<string, unknown>, configPath: string): RepoConfig[] {
   const rawRepos = toml.repos;
-  const extras: RepoConfig[] =
-    rawRepos === undefined
-      ? []
-      : Array.isArray(rawRepos)
-        ? rawRepos.map((entry, i) => parseRepoEntry(entry, `[[repos]][${i}]`))
-        : (() => {
-            throw new Error(`"repos" must be an array of tables ([[repos]])`);
-          })();
+  if (rawRepos !== undefined && !Array.isArray(rawRepos)) {
+    throw new Error(`"repos" must be an array of tables ([[repos]])`);
+  }
+  const repos: RepoConfig[] =
+    rawRepos === undefined ? [] : rawRepos.map((entry, i) => parseRepoEntry(entry, `[[repos]][${i}]`));
 
-  // Last entry wins on duplicate names (so the file can override testrepo).
-  const byName = new Map<string, RepoConfig>();
-  for (const repo of [testrepo, ...extras]) byName.set(repo.name, repo);
-  return [...byName.values()];
+  if (repos.length === 0) {
+    throw new Error(
+      `No repos configured — add at least one [[repos]] entry to ${configPath}:\n\n` +
+        `  [[repos]]\n` +
+        `  name = "my-app"\n` +
+        `  path = "~/code/my-app"\n\n` +
+        `See condotto.example.toml for the full set of per-repo options.`,
+    );
+  }
+
+  // Names key the repos table and every `assign <repo>`, so a duplicate is an
+  // operator typo that would silently discard a repo. Fail instead.
+  const seen = new Set<string>();
+  for (const [i, repo] of repos.entries()) {
+    if (seen.has(repo.name)) {
+      throw new Error(`[[repos]][${i}]: duplicate name "${repo.name}" — repo names must be unique.`);
+    }
+    seen.add(repo.name);
+  }
+  return repos;
 }
 
 /**
@@ -391,7 +392,7 @@ export function loadConfig(
   env: Record<string, string | undefined> = process.env,
   configPathOverride?: string,
 ): CondottoConfig {
-  const { toml } = readParsedConfig(env, configPathOverride);
+  const { toml, path: configPath } = readParsedConfig(env, configPathOverride);
   warnUnknownKeys(toml, TOP_LEVEL_KEYS, "condotto.toml");
 
   const paths = toml.paths === undefined ? {} : asTable(toml.paths, "[paths]");
@@ -413,7 +414,7 @@ export function loadConfig(
     worktreesRoot: expandHome(
       envStr(env.CONDOTTO_WORKTREES_ROOT) ?? optString(paths.worktrees_root, "[paths].worktrees_root") ?? "~/tmp/condotto-worktrees",
     ),
-    repos: parseRepos(toml, env),
+    repos: parseRepos(toml, configPath),
     roles: parseRoles(toml, env),
     defaultCostCapUsd:
       envPosNumber(env.CONDOTTO_COST_CAP_USD, "CONDOTTO_COST_CAP_USD") ??

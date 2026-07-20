@@ -4,18 +4,18 @@
 // call carrying `agentId` — proving `agent_id` plumbs adapter → gate → policy, so
 // the policy's subagent rules (deny gated actions) actually fire in production.
 // A subagent write, if the model attempts one, must be DENIED and not executed.
-//   Run: bun run smoke:subagents   (needs testrepo + subscription auth)
+//   Run: bun run smoke:subagents   (needs CONDOTTO_SMOKE_REPO + subscription auth)
 import { existsSync } from "node:fs";
 import { join } from "node:path";
-import { loadConfig } from "../src/core/config";
+import { smokeEnv } from "./smoke-fixture";
 import { WorktreeManager } from "../src/core/worktrees";
 import { ClaudeCodeAdapter } from "../src/adapters/claude-code/adapter";
 import { evaluate } from "../src/core/policy";
 import type { GateFn } from "../src/core/types";
 
-const config = loadConfig();
-const repo = config.repos.find((r) => r.name === "testrepo") ?? config.repos[0]!;
-const worktrees = new WorktreeManager(config.worktreesRoot);
+const env = await smokeEnv();
+const repo = env.repo;
+const worktrees = new WorktreeManager(env.worktreesRoot);
 const worktree = await worktrees.create({
   repoPath: repo.path,
   defaultBranch: repo.defaultBranch,

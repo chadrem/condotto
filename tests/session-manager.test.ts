@@ -101,7 +101,7 @@ describe("assign", () => {
       conv: conv("100.000001"),
       author: architect,
       name: "assign",
-      args: "",
+      args: "testrepo",
     });
 
     const row = w.store.getSessionByConversation("fake", "100.000001");
@@ -121,10 +121,63 @@ describe("assign", () => {
   test("assigning an already-assigned conversation is refused", async () => {
     const w = makeWorld();
     const c = conv("200.000001");
-    await w.manager.handleEvent({ kind: "command", conv: c, author: architect, name: "assign", args: "" });
-    await w.manager.handleEvent({ kind: "command", conv: c, author: architect, name: "assign", args: "" });
+    await w.manager.handleEvent({ kind: "command", conv: c, author: architect, name: "assign", args: "testrepo" });
+    await w.manager.handleEvent({ kind: "command", conv: c, author: architect, name: "assign", args: "testrepo" });
     expect(w.surface.posts.at(-1)?.text).toContain("already assigned");
     expect(w.store.listSessions({ surfaceId: "fake" }).length).toBe(1);
+  });
+
+  test("a bare `assign` asks which repo instead of picking one", async () => {
+    // There is no default repo, so a forgotten argument must never silently
+    // start a session somewhere the architect didn't name.
+    const w = makeWorld();
+    await w.manager.handleEvent({
+      kind: "command",
+      conv: conv("150.000001"),
+      author: architect,
+      name: "assign",
+      args: "",
+    });
+
+    expect(w.store.getSessionByConversation("fake", "150.000001")).toBeNull();
+    const choice = w.surface.lastChoice()!;
+    expect(choice.choiceId).toBe("assign_repo");
+    expect(choice.architectOnly).toBe(true);
+    expect(choice.options.map((o) => o.value)).toEqual(["testrepo"]);
+
+    // Answering the prompt assigns, closing the loop.
+    await w.manager.handleEvent({
+      kind: "choice",
+      conv: conv("150.000001"),
+      author: architect,
+      choiceId: "assign_repo",
+      value: "testrepo",
+    });
+    expect(w.store.getSessionByConversation("fake", "150.000001")!.repo_id).toBe("testrepo");
+  });
+
+  test("a bare `assign` on an already-assigned thread reports that, it does not ask", async () => {
+    // The existing-session checks deliberately run BEFORE repo resolution, so a
+    // forgotten argument in an assigned thread reports the assignment rather
+    // than posting a repo picker. Guards that ordering against a future refactor.
+    const w = makeWorld();
+    const c = conv("160.000001");
+    await w.manager.handleEvent({ kind: "command", conv: c, author: architect, name: "assign", args: "testrepo" });
+    const choicesBefore = w.surface.choiceRequests.length;
+    await w.manager.handleEvent({ kind: "command", conv: c, author: architect, name: "assign", args: "" });
+    expect(w.surface.posts.at(-1)?.text).toContain("already assigned");
+    expect(w.surface.choiceRequests.length).toBe(choicesBefore); // no picker
+  });
+
+  test("a bare `assign` on a stopped thread reactivates it instead of asking", async () => {
+    const w = makeWorld();
+    const c = conv("170.000001");
+    await w.manager.handleEvent({ kind: "command", conv: c, author: architect, name: "assign", args: "testrepo" });
+    await w.manager.handleEvent({ kind: "command", conv: c, author: architect, name: "stop", args: "" });
+    const choicesBefore = w.surface.choiceRequests.length;
+    await w.manager.handleEvent({ kind: "command", conv: c, author: architect, name: "assign", args: "" });
+    expect(w.surface.posts.at(-1)?.text).toContain("reactivated");
+    expect(w.surface.choiceRequests.length).toBe(choicesBefore); // no picker
   });
 
   test("unknown repo is refused", async () => {
@@ -143,7 +196,7 @@ describe("assign", () => {
 
 describe("conversing", () => {
   async function assignAndMessage(w: World, id: string, text: string): Promise<void> {
-    await w.manager.handleEvent({ kind: "command", conv: conv(id), author: architect, name: "assign", args: "" });
+    await w.manager.handleEvent({ kind: "command", conv: conv(id), author: architect, name: "assign", args: "testrepo" });
     await w.manager.handleEvent({
       kind: "message",
       conv: conv(id),
@@ -235,7 +288,7 @@ describe("conversing", () => {
 
   test("queued messages run as sequential turns, never interleaved", async () => {
     const w = makeWorld();
-    await w.manager.handleEvent({ kind: "command", conv: conv("600.000001"), author: architect, name: "assign", args: "" });
+    await w.manager.handleEvent({ kind: "command", conv: conv("600.000001"), author: architect, name: "assign", args: "testrepo" });
     await Promise.all([
       w.manager.handleEvent({ kind: "message", conv: conv("600.000001"), author: architect, text: "one", attachments: [] }),
       w.manager.handleEvent({ kind: "message", conv: conv("600.000001"), author: architect, text: "two", attachments: [] }),
@@ -251,7 +304,7 @@ describe("stop & status", () => {
   test("stop parks the session permanently; later messages are ignored", async () => {
     const w = makeWorld();
     const c = conv("700.000001");
-    await w.manager.handleEvent({ kind: "command", conv: c, author: architect, name: "assign", args: "" });
+    await w.manager.handleEvent({ kind: "command", conv: c, author: architect, name: "assign", args: "testrepo" });
     await w.manager.handleEvent({ kind: "command", conv: c, author: architect, name: "stop", args: "" });
     expect(w.surface.posts.at(-1)?.text).toContain("Session stopped");
 
@@ -263,10 +316,10 @@ describe("stop & status", () => {
   test("re-assign after stop reactivates the same session (one conversation, one session, forever)", async () => {
     const w = makeWorld();
     const c = conv("800.000001");
-    await w.manager.handleEvent({ kind: "command", conv: c, author: architect, name: "assign", args: "" });
+    await w.manager.handleEvent({ kind: "command", conv: c, author: architect, name: "assign", args: "testrepo" });
     const first = w.store.getSessionByConversation("fake", "800.000001")!;
     await w.manager.handleEvent({ kind: "command", conv: c, author: architect, name: "stop", args: "" });
-    await w.manager.handleEvent({ kind: "command", conv: c, author: architect, name: "assign", args: "" });
+    await w.manager.handleEvent({ kind: "command", conv: c, author: architect, name: "assign", args: "testrepo" });
     const second = w.store.getSessionByConversation("fake", "800.000001")!;
     expect(second.id).toBe(first.id);
     expect(second.status).toBe("parked");
@@ -275,7 +328,7 @@ describe("stop & status", () => {
   test("stop during an in-flight turn sticks — the turn's cleanup never resurrects the session", async () => {
     const w = makeWorld();
     const c = conv("810.000001");
-    await w.manager.handleEvent({ kind: "command", conv: c, author: architect, name: "assign", args: "" });
+    await w.manager.handleEvent({ kind: "command", conv: c, author: architect, name: "assign", args: "testrepo" });
 
     // Hold the turn open until we release it, so stop lands mid-turn.
     let release!: () => void;
@@ -303,7 +356,7 @@ describe("stop & status", () => {
 
   test("status lists sessions", async () => {
     const w = makeWorld();
-    await w.manager.handleEvent({ kind: "command", conv: conv("900.000001"), author: architect, name: "assign", args: "" });
+    await w.manager.handleEvent({ kind: "command", conv: conv("900.000001"), author: architect, name: "assign", args: "testrepo" });
     await w.manager.handleEvent({
       kind: "command",
       conv: { surfaceId: "fake", channelId: "C1", conversationId: "" },
@@ -322,7 +375,7 @@ describe("operator status & slash stop guidance", () => {
       conv: { surfaceId: "fake", channelId, conversationId: id },
       author: architect,
       name: "assign",
-      args: "",
+      args: "testrepo",
     });
   }
 
@@ -465,7 +518,7 @@ describe("guided onboarding", () => {
 
   test("@Condotto in an assigned thread shows the command summary, not a picker", async () => {
     const w = makeWorld();
-    await w.manager.handleEvent({ kind: "command", conv: conv("h30.000001"), author: architect, name: "assign", args: "" });
+    await w.manager.handleEvent({ kind: "command", conv: conv("h30.000001"), author: architect, name: "assign", args: "testrepo" });
     const choicesBefore = w.surface.choiceRequests.length;
     await w.manager.handleEvent({ kind: "command", conv: conv("h30.000001"), author: member, name: "help", args: "" });
     expect(w.surface.choiceRequests.length).toBe(choicesBefore); // no picker on an assigned thread
@@ -503,7 +556,7 @@ describe("guided onboarding", () => {
 describe("roles: command authority", () => {
   test("a member cannot assign a session", async () => {
     const w = makeWorld();
-    await w.manager.handleEvent({ kind: "command", conv: conv("a00.000001"), author: member, name: "assign", args: "" });
+    await w.manager.handleEvent({ kind: "command", conv: conv("a00.000001"), author: member, name: "assign", args: "testrepo" });
     expect(w.surface.posts.at(-1)?.text).toContain("Only architects can assign");
     expect(w.store.getSessionByConversation("fake", "a00.000001")).toBeNull();
   });
@@ -511,7 +564,7 @@ describe("roles: command authority", () => {
   test("a member cannot stop an architect's session", async () => {
     const w = makeWorld();
     const c = conv("a10.000001");
-    await w.manager.handleEvent({ kind: "command", conv: c, author: architect, name: "assign", args: "" });
+    await w.manager.handleEvent({ kind: "command", conv: c, author: architect, name: "assign", args: "testrepo" });
     await w.manager.handleEvent({ kind: "command", conv: c, author: member, name: "stop", args: "" });
     expect(w.surface.posts.at(-1)?.text).toContain("Only architects can stop");
     expect(w.store.getSessionByConversation("fake", "a10.000001")!.status).not.toBe("stopped");
@@ -522,7 +575,7 @@ describe("gating & approval loop", () => {
   const writeCall = { id: "tu-write", name: "Write", input: { file_path: "hello.txt", content: "hi" } };
 
   async function assignWithScript(w: World, id: string, calls: any[]): Promise<void> {
-    await w.manager.handleEvent({ kind: "command", conv: conv(id), author: architect, name: "assign", args: "" });
+    await w.manager.handleEvent({ kind: "command", conv: conv(id), author: architect, name: "assign", args: "testrepo" });
     w.harness.scriptTurn(calls);
     await w.manager.handleEvent({
       kind: "message",
@@ -697,7 +750,7 @@ describe("gating & approval loop", () => {
     expect(w.store.hasPendingApproval(session.id)).toBe(false);
 
     // Reassign, then a message runs a normal turn — no leftover pending block.
-    await w.manager.handleEvent({ kind: "command", conv: conv("b90.000001"), author: architect, name: "assign", args: "" });
+    await w.manager.handleEvent({ kind: "command", conv: conv("b90.000001"), author: architect, name: "assign", args: "testrepo" });
     w.harness.scriptTurn([{ id: "tu-read2", name: "Read", input: { file_path: "README.md" } }]);
     await w.manager.handleEvent({ kind: "message", conv: conv("b90.000001"), author: member, text: "hello again", attachments: [] });
     expect(w.harness.executed.map((c) => c.name)).toContain("Read");
@@ -706,7 +759,7 @@ describe("gating & approval loop", () => {
 
 describe("land / deploy (DESIGN §2 journey 4)", () => {
   async function assign(w: World, id: string): Promise<string> {
-    await w.manager.handleEvent({ kind: "command", conv: conv(id), author: architect, name: "assign", args: "" });
+    await w.manager.handleEvent({ kind: "command", conv: conv(id), author: architect, name: "assign", args: "testrepo" });
     return w.store.getSessionByConversation("fake", id)!.id;
   }
 
@@ -772,7 +825,7 @@ describe("land / deploy (DESIGN §2 journey 4)", () => {
 
 describe("cost budgets & runaway cap (DESIGN §4)", () => {
   async function assignAndSpend(w: World, id: string, spent: number): Promise<string> {
-    await w.manager.handleEvent({ kind: "command", conv: conv(id), author: architect, name: "assign", args: "" });
+    await w.manager.handleEvent({ kind: "command", conv: conv(id), author: architect, name: "assign", args: "testrepo" });
     const sid = w.store.getSessionByConversation("fake", id)!.id;
     w.store.insertTurn({ sessionId: sid, direction: "out", text: "prior", costUsd: spent });
     return sid;
@@ -780,14 +833,14 @@ describe("cost budgets & runaway cap (DESIGN §4)", () => {
 
   test("a new turn passes the remaining budget to the harness as a per-turn cap", async () => {
     const w = makeWorld(undefined, { costCap: 5 });
-    await w.manager.handleEvent({ kind: "command", conv: conv("e00.000001"), author: architect, name: "assign", args: "" });
+    await w.manager.handleEvent({ kind: "command", conv: conv("e00.000001"), author: architect, name: "assign", args: "testrepo" });
     await w.manager.handleEvent({ kind: "message", conv: conv("e00.000001"), author: member, text: "hi", attachments: [] });
     expect(w.harness.allTurns.at(-1)!.budgetUsd).toBe(5); // full headroom on the first turn
   });
 
   test("an approval-resume turn runs uncapped so a near-budget approved action isn't stranded", async () => {
     const w = makeWorld(undefined, { costCap: 5 });
-    await w.manager.handleEvent({ kind: "command", conv: conv("e05.000001"), author: architect, name: "assign", args: "" });
+    await w.manager.handleEvent({ kind: "command", conv: conv("e05.000001"), author: architect, name: "assign", args: "testrepo" });
     const sid = w.store.getSessionByConversation("fake", "e05.000001")!.id;
     w.store.insertTurn({ sessionId: sid, direction: "out", text: "prior", costUsd: 4.9 }); // near the $5 cap
     w.harness.scriptTurn([{ id: "tu-w", name: "Write", input: { file_path: "x.txt", content: "hi" } }]);
@@ -824,7 +877,7 @@ describe("cost budgets & runaway cap (DESIGN §4)", () => {
 
   test("a turn that ends in an error still records its cost (budget can't be evaded)", async () => {
     const w = makeWorld(undefined, { costCap: 5 });
-    await w.manager.handleEvent({ kind: "command", conv: conv("e40.000001"), author: architect, name: "assign", args: "" });
+    await w.manager.handleEvent({ kind: "command", conv: conv("e40.000001"), author: architect, name: "assign", args: "testrepo" });
     const sid = w.store.getSessionByConversation("fake", "e40.000001")!.id;
     w.harness.nextError = { message: "I hit this turn's cost budget ($6.00) and stopped.", costUsd: 6 };
     await w.manager.handleEvent({ kind: "message", conv: conv("e40.000001"), author: architect, text: "spendy", attachments: [] });
@@ -848,7 +901,7 @@ describe("cost budgets & runaway cap (DESIGN §4)", () => {
   test("an approved WORKFLOW-launch resume IS capped at the remaining headroom (auto-cancel on breach)", async () => {
     const w = makeWorld(undefined, { costCap: 5 });
     const c = conv("e50.000001");
-    await w.manager.handleEvent({ kind: "command", conv: c, author: architect, name: "assign", args: "" });
+    await w.manager.handleEvent({ kind: "command", conv: c, author: architect, name: "assign", args: "testrepo" });
     await w.manager.handleEvent({ kind: "command", conv: c, author: architect, name: "workflows", args: "on" });
     const sid = w.store.getSessionByConversation("fake", "e50.000001")!.id;
     w.store.insertTurn({ sessionId: sid, direction: "out", text: "prior", costUsd: 4.9 }); // near the $5 cap
@@ -866,7 +919,7 @@ describe("cost budgets & runaway cap (DESIGN §4)", () => {
   test("a NON-workflow approved action resumes UNCAPPED even in a workflow-enabled session (precision)", async () => {
     const w = makeWorld(undefined, { costCap: 5 });
     const c = conv("e55.000001");
-    await w.manager.handleEvent({ kind: "command", conv: c, author: architect, name: "assign", args: "" });
+    await w.manager.handleEvent({ kind: "command", conv: c, author: architect, name: "assign", args: "testrepo" });
     await w.manager.handleEvent({ kind: "command", conv: c, author: architect, name: "workflows", args: "on" });
     const sid = w.store.getSessionByConversation("fake", "e55.000001")!.id;
     w.store.insertTurn({ sessionId: sid, direction: "out", text: "prior", costUsd: 4.9 }); // near the $5 cap
@@ -887,7 +940,7 @@ describe("cancel a running turn", () => {
   test("an architect cancels an in-flight turn: interrupts the harness, acks, audits, session lives on", async () => {
     const w = makeWorld();
     const c = conv("cn1.000001");
-    await w.manager.handleEvent({ kind: "command", conv: c, author: architect, name: "assign", args: "" });
+    await w.manager.handleEvent({ kind: "command", conv: c, author: architect, name: "assign", args: "testrepo" });
     const sid = w.store.getSessionByConversation("fake", "cn1.000001")!.id;
     // Hold the turn open so the session stays `active` while we cancel; interrupt()
     // releases the hold (models the real adapter halting its query).
@@ -913,7 +966,7 @@ describe("cancel a running turn", () => {
   test("a member cannot cancel", async () => {
     const w = makeWorld();
     const c = conv("cn2.000001");
-    await w.manager.handleEvent({ kind: "command", conv: c, author: architect, name: "assign", args: "" });
+    await w.manager.handleEvent({ kind: "command", conv: c, author: architect, name: "assign", args: "testrepo" });
     const sid = w.store.getSessionByConversation("fake", "cn2.000001")!.id;
     await w.manager.handleEvent({ kind: "command", conv: c, author: member, name: "cancel", args: "" });
     expect(w.surface.posts.at(-1)!.text).toContain("Only architects");
@@ -924,7 +977,7 @@ describe("cancel a running turn", () => {
   test("cancel on an idle (parked) session reports nothing running and interrupts nothing", async () => {
     const w = makeWorld();
     const c = conv("cn3.000001");
-    await w.manager.handleEvent({ kind: "command", conv: c, author: architect, name: "assign", args: "" });
+    await w.manager.handleEvent({ kind: "command", conv: c, author: architect, name: "assign", args: "testrepo" });
     await w.manager.handleEvent({ kind: "command", conv: c, author: architect, name: "cancel", args: "" });
     expect(w.surface.posts.at(-1)!.text).toContain("Nothing is running");
     expect(w.harness.interruptCount).toBe(0);
@@ -941,7 +994,7 @@ describe("streaming progress", () => {
   test("a burst of progress events is coalesced into the one status message and never clobbers the reply", async () => {
     const w = makeWorld();
     w.harness.progressBurst = 5; // emits 5 extra progress events before the reply
-    await w.manager.handleEvent({ kind: "command", conv: conv("g00.000001"), author: architect, name: "assign", args: "" });
+    await w.manager.handleEvent({ kind: "command", conv: conv("g00.000001"), author: architect, name: "assign", args: "testrepo" });
     await w.manager.handleEvent({ kind: "message", conv: conv("g00.000001"), author: architect, text: "go", attachments: [] });
 
     // Throttled: 6 progress events did NOT produce 6 edits.
@@ -961,7 +1014,7 @@ describe("concurrency (DESIGN §7)", () => {
     const w = makeWorld(undefined, { maxConcurrentTurns: 2 });
     const ids = ["f00.000001", "f01.000001", "f02.000001", "f03.000001"];
     for (const id of ids) {
-      await w.manager.handleEvent({ kind: "command", conv: conv(id), author: architect, name: "assign", args: "" });
+      await w.manager.handleEvent({ kind: "command", conv: conv(id), author: architect, name: "assign", args: "testrepo" });
     }
 
     // Every turn blocks at its start until we open the shared gate, so the
@@ -995,7 +1048,7 @@ describe("concurrency (DESIGN §7)", () => {
   test("a stop landing while a turn waits for a concurrency slot aborts that turn (review)", async () => {
     const w = makeWorld(undefined, { maxConcurrentTurns: 1 });
     for (const id of ["f10.000001", "f11.000001"]) {
-      await w.manager.handleEvent({ kind: "command", conv: conv(id), author: architect, name: "assign", args: "" });
+      await w.manager.handleEvent({ kind: "command", conv: conv(id), author: architect, name: "assign", args: "testrepo" });
     }
     // Session A holds the single slot open; B's turn will block on acquire.
     let releaseA!: () => void;
@@ -1020,7 +1073,7 @@ describe("concurrency (DESIGN §7)", () => {
 
 describe("harness capabilities — model & effort", () => {
   async function assign(w: World, id: string): Promise<void> {
-    await w.manager.handleEvent({ kind: "command", conv: conv(id), author: architect, name: "assign", args: "" });
+    await w.manager.handleEvent({ kind: "command", conv: conv(id), author: architect, name: "assign", args: "testrepo" });
   }
 
   test("assign advertises the default model & effort (Opus + high)", async () => {
@@ -1133,7 +1186,7 @@ describe("harness capabilities — model & effort", () => {
 
 describe("harness capabilities — subagents & ultra", () => {
   async function assign(w: World, id: string): Promise<void> {
-    await w.manager.handleEvent({ kind: "command", conv: conv(id), author: architect, name: "assign", args: "" });
+    await w.manager.handleEvent({ kind: "command", conv: conv(id), author: architect, name: "assign", args: "testrepo" });
   }
 
   test("subagents default off, and the intro doesn't claim them", async () => {
@@ -1272,7 +1325,7 @@ describe("harness capabilities — subagents & ultra", () => {
 
 describe("harness capabilities — workflows", () => {
   async function assign(w: World, id: string): Promise<void> {
-    await w.manager.handleEvent({ kind: "command", conv: conv(id), author: architect, name: "assign", args: "" });
+    await w.manager.handleEvent({ kind: "command", conv: conv(id), author: architect, name: "assign", args: "testrepo" });
   }
 
   test("workflows default off, and the join announcement lists it", async () => {
@@ -1394,7 +1447,7 @@ describe("harness capabilities — workflows", () => {
 
 describe("informed worktree-write opt-in", () => {
   async function assign(w: World, id: string): Promise<void> {
-    await w.manager.handleEvent({ kind: "command", conv: conv(id), author: architect, name: "assign", args: "" });
+    await w.manager.handleEvent({ kind: "command", conv: conv(id), author: architect, name: "assign", args: "testrepo" });
   }
 
   test("a workflow/subagent write is denied read-only, then ALLOWED after `workflows write on`", async () => {
@@ -1511,7 +1564,7 @@ describe("informed worktree-write opt-in", () => {
 
 describe("trust-scoped project config", () => {
   async function assign(w: World, id: string): Promise<void> {
-    await w.manager.handleEvent({ kind: "command", conv: conv(id), author: architect, name: "assign", args: "" });
+    await w.manager.handleEvent({ kind: "command", conv: conv(id), author: architect, name: "assign", args: "testrepo" });
   }
   function trust(w: World, trusted: boolean): void {
     w.store.upsertRepo({
@@ -1561,7 +1614,7 @@ describe("architect auto-approve", () => {
   const writeCall = { id: "tu-w", name: "Write", input: { file_path: "hello.txt", content: "hi" } };
 
   async function assignAndScript(w: World, id: string, author: Principal, calls: any[]): Promise<void> {
-    await w.manager.handleEvent({ kind: "command", conv: conv(id), author: architect, name: "assign", args: "" });
+    await w.manager.handleEvent({ kind: "command", conv: conv(id), author: architect, name: "assign", args: "testrepo" });
     w.harness.scriptTurn(calls);
     await w.manager.handleEvent({ kind: "message", conv: conv(id), author, text: "do the thing", attachments: [] });
   }
@@ -1593,7 +1646,7 @@ describe("architect auto-approve", () => {
   test("auto-approve off → the architect's own write defers again", async () => {
     const w = makeWorld();
     const c = conv("aa20.000001");
-    await w.manager.handleEvent({ kind: "command", conv: c, author: architect, name: "assign", args: "" });
+    await w.manager.handleEvent({ kind: "command", conv: c, author: architect, name: "assign", args: "testrepo" });
     await w.manager.handleEvent({ kind: "command", conv: c, author: architect, name: "auto-approve", args: "off" });
     w.harness.scriptTurn([writeCall]);
     await w.manager.handleEvent({ kind: "message", conv: c, author: architect, text: "go", attachments: [] });
@@ -1644,7 +1697,7 @@ describe("architect auto-approve", () => {
   test("auto-approve toggle: an architect sets it; a member is refused", async () => {
     const w = makeWorld();
     const c = conv("aa60.000001");
-    await w.manager.handleEvent({ kind: "command", conv: c, author: architect, name: "assign", args: "" });
+    await w.manager.handleEvent({ kind: "command", conv: c, author: architect, name: "assign", args: "testrepo" });
     expect(w.store.getSessionByConversation("fake", "aa60.000001")!.auto_approve).toBe(1); // default on
     await w.manager.handleEvent({ kind: "command", conv: c, author: architect, name: "auto-approve", args: "off" });
     const session = w.store.getSessionByConversation("fake", "aa60.000001")!;
@@ -1721,7 +1774,7 @@ describe("role delegation — grant/revoke", () => {
   test("a granted architect can approve a member's gated action", async () => {
     const w = makeWorld();
     const c = conv("g70.000001");
-    await w.manager.handleEvent({ kind: "command", conv: c, author: architect, name: "assign", args: "" });
+    await w.manager.handleEvent({ kind: "command", conv: c, author: architect, name: "assign", args: "testrepo" });
     await w.manager.handleEvent({ kind: "command", conv: c, author: architect, name: "grant", args: `${abby} architect` });
     w.harness.scriptTurn([{ id: "tu-mw", name: "Write", input: { file_path: "m.txt", content: "x" } }]);
     await w.manager.handleEvent({ kind: "message", conv: c, author: member, text: "add file", attachments: [] });
@@ -1787,7 +1840,7 @@ describe("worktree cleanup — GC & the park-and-resume invariant", () => {
     return out;
   }
   const assign = (w: World, id: string) =>
-    w.manager.handleEvent({ kind: "command", conv: conv(id), author: architect, name: "assign", args: "" });
+    w.manager.handleEvent({ kind: "command", conv: conv(id), author: architect, name: "assign", args: "testrepo" });
   const FAR_FUTURE = Date.now() + 3650 * 24 * 3600 * 1000; // ~10y — well past any window
 
   test("a plain `stop` keeps the worktree; the GC never collects it (journey 5/6)", async () => {
@@ -1911,8 +1964,8 @@ describe("worktree cleanup — GC & the park-and-resume invariant", () => {
     // session, both provision a worktree, one insert wins and one hits the UNIQUE
     // constraint. The loser must remove its now-orphaned worktree (fix).
     await Promise.all([
-      w.manager.handleEvent({ kind: "command", conv: c, author: architect, name: "assign", args: "" }),
-      w.manager.handleEvent({ kind: "command", conv: c, author: architect, name: "assign", args: "" }),
+      w.manager.handleEvent({ kind: "command", conv: c, author: architect, name: "assign", args: "testrepo" }),
+      w.manager.handleEvent({ kind: "command", conv: c, author: architect, name: "assign", args: "testrepo" }),
     ]);
 
     const sessions = w.store.listSessions({ surfaceId: "fake" });

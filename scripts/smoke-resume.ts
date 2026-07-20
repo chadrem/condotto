@@ -1,12 +1,11 @@
 // Smoke test, phase 2: run in a SEPARATE process after smoke-create. Resumes
 // the harness session from the persisted opaque handle and verifies the agent
 // still has the phase-1 context (proves park & resume across daemon restarts).
-import { homedir } from "node:os";
-import { join } from "node:path";
+import { smokeEnv } from "./smoke-fixture";
 import { ClaudeCodeAdapter } from "../src/adapters/claude-code/adapter";
 import type { GateFn } from "../src/core/types";
 
-const STATE_PATH = join(homedir(), "tmp", "condotto-smoke-state.json");
+const STATE_PATH = (await smokeEnv()).statePath("session.json");
 const READ_ONLY = new Set(["Read", "Glob", "Grep", "TodoWrite"]);
 
 const gate: GateFn = async (call) => {

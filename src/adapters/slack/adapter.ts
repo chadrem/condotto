@@ -301,6 +301,20 @@ export class SlackAdapter implements SurfaceAdapter {
 
     switch (sub.toLowerCase()) {
       case "assign": {
+        // A repo is required. Answer here rather than posting the anchor first:
+        // the anchor is public and announces a session, so falling through to
+        // the core's repo picker would leave a channel post advertising a
+        // session that may never exist. In-thread `@Condotto assign` has no such
+        // problem (the thread already exists) and still gets the picker.
+        if (args.trim() === "") {
+          await respond({
+            response_type: "ephemeral",
+            text:
+              "Usage: `/condotto assign <repo>` — name the repo to work in (there is no default).\n" +
+              "To see the configured repos, mention `@Condotto assign` inside an existing thread and pick from the list.",
+          });
+          return;
+        }
         // Slash commands carry no thread context — create a fresh conversation
         // by posting an anchor message; its ts becomes the thread root.
         let anchorTs: string;
@@ -335,7 +349,7 @@ export class SlackAdapter implements SurfaceAdapter {
         await respond({
           response_type: "ephemeral",
           text:
-            "Usage: `/condotto assign [repo]` (new session in this channel), " +
+            "Usage: `/condotto assign <repo>` (new session in this channel), " +
             "`/condotto status` (operator dashboard — architects), " +
             "`/condotto stop` (list this channel's sessions).\n" +
             "Inside a session thread (mention me): `@Condotto stop`, `@Condotto cancel` (stop the running turn), " +
@@ -344,7 +358,7 @@ export class SlackAdapter implements SurfaceAdapter {
             "`@Condotto subagents on|off`, `@Condotto workflows on|off`, `@Condotto ultra on|off`.\n" +
             "Approvals & roles: `@Condotto auto-approve on|off` (skip your own Approve clicks), " +
             "`@Condotto grant @user architect [everywhere]`, `@Condotto revoke @user`.\n" +
-            "To assign an existing thread: `@Condotto assign` in that thread.",
+            "To assign an existing thread: `@Condotto assign <repo>` in that thread.",
         });
       }
     }

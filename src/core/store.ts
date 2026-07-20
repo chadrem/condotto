@@ -425,6 +425,37 @@ export class Store {
       });
   }
 
+  /**
+   * Reconcile the repos table with config: drop rows for repos no longer
+   * declared in `condotto.toml`. Config is the source of truth for which repos
+   * exist, but `upsertRepo` only ever inserts/updates — without this, a repo an
+   * operator removed (or the synthesized `testrepo` from before it was deleted)
+   * lingers in the DB and stays assignable, since every runtime lookup reads the
+   * store rather than config.
+   *
+   * A row still referenced by a session is KEPT and reported, never deleted:
+   * `sessions.repo_id` carries the name, so dropping it would strand that
+   * thread's history and its worktree GC. The caller surfaces those so an
+   * operator can re-declare the repo or stop the session.
+   */
+  pruneReposNotIn(declared: string[]): { deleted: string[]; keptInUse: string[] } {
+    const keep = new Set(declared);
+    const deleted: string[] = [];
+    const keptInUse: string[] = [];
+    const inUse = this.db.query<{ repo_id: string }, []>(`SELECT DISTINCT repo_id FROM sessions`).all();
+    const referenced = new Set(inUse.map((r) => r.repo_id));
+    for (const row of this.db.query<{ name: string }, []>(`SELECT name FROM repos`).all()) {
+      if (keep.has(row.name)) continue;
+      if (referenced.has(row.name)) {
+        keptInUse.push(row.name);
+        continue;
+      }
+      this.db.query<unknown, { name: string }>(`DELETE FROM repos WHERE name = $name`).run({ name: row.name });
+      deleted.push(row.name);
+    }
+    return { deleted, keptInUse };
+  }
+
   getRepo(name: string): RepoRow | null {
     const row = this.db
       .query<RawRepoRow, { name: string }>(

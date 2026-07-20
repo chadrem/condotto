@@ -384,8 +384,8 @@ export interface RepoConfig {
    * `CLAUDE.md`, skills, `.claude/agents`, and daemon-configured MCP — while the
    * §4 gate still applies. Default (false/undefined) keeps the untrusted-repo
    * isolation (`settingSources: []`). Set ONLY for repos the admin vouches for:
-   * it also loads that repo's permissions/hooks/MCP. Build-time safety: the
-   * throwaway `testrepo` stays untrusted.
+   * it also loads that repo's permissions/hooks/MCP. A throwaway repo used to
+   * shake out a new install should stay untrusted.
    */
   trusted?: boolean;
   /**

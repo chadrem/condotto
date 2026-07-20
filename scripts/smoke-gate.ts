@@ -7,20 +7,18 @@
 // decision becomes an SDK `defer`, and the adapter surfaces it as a `deferred`
 // TurnEvent with the pending tool call — everything the daemon needs to post an
 // approval. Nothing is written during this turn.
-import { homedir } from "node:os";
 import { join } from "node:path";
 import { existsSync } from "node:fs";
-import { loadConfig } from "../src/core/config";
+import { smokeEnv } from "./smoke-fixture";
 import { WorktreeManager } from "../src/core/worktrees";
 import { ClaudeCodeAdapter } from "../src/adapters/claude-code/adapter";
 import { evaluate } from "../src/core/policy";
 import type { GateFn, ToolCall } from "../src/core/types";
 
-const STATE_PATH = join(homedir(), "tmp", "condotto-gate-smoke.json");
-
-const config = loadConfig();
-const repo = config.repos.find((r) => r.name === "testrepo") ?? config.repos[0]!;
-const worktrees = new WorktreeManager(config.worktreesRoot);
+const env = await smokeEnv();
+const STATE_PATH = env.statePath("gate.json");
+const repo = env.repo;
+const worktrees = new WorktreeManager(env.worktreesRoot);
 const sessionId = crypto.randomUUID();
 const worktree = await worktrees.create({
   repoPath: repo.path,

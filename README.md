@@ -59,6 +59,7 @@ exactly what that means, and what Condotto does and does not defend against.
 - [Run](#run)
 - [Your first session](#your-first-session)
 - [Command reference](#command-reference)
+- [Development](#development) — *tests and smoke tests*
 - [Security & trust model](#security--trust-model) — *how the architect empowers domain experts*
 - [Operations (runbook)](#operations-runbook) — *service units, the audit log, upgrades, cost, troubleshooting*
 - [Further reading](#further-reading)
@@ -268,11 +269,25 @@ deploy_cmd = "make deploy"        # architect-ordered `@Condotto deploy`, same h
 # cost_cap_usd / default_model / default_effort / auto_approve  # per-repo overrides
 ```
 
-A throwaway **`testrepo`** (`~/tmp/condotto-testrepo`, override `CONDOTTO_TEST_REPO`)
-is registered automatically with echo/no-op land/deploy — the safe target for
-your first session. Create it with `git init ~/tmp/condotto-testrepo && (cd
-~/tmp/condotto-testrepo && git commit --allow-empty -m init)`, or point a
-`[[repos]]` entry named `testrepo` at your own throwaway to override it.
+**At least one `[[repos]]` entry is required.** There is no default repo: Condotto
+only works in repos you name, and it refuses to start with none configured.
+
+For your first session, point an entry at a throwaway clone and leave land/deploy
+as no-ops until you've watched the gate work:
+
+```sh
+git init ~/tmp/condotto-testbed
+(cd ~/tmp/condotto-testbed && git commit --allow-empty -m init)
+```
+
+```toml
+[[repos]]
+name = "testbed"
+path = "~/tmp/condotto-testbed"
+land_cmd = "echo '[land] no-op'"
+deploy_cmd = "echo '[deploy] no-op'"
+# test_cmd = "bun test"   # add once the repo actually has tests
+```
 
 ---
 
@@ -315,7 +330,7 @@ To keep it running across reboots, install a service unit — see
 In a channel the bot has been invited to (you're the architect who set it up, so
 you can assign):
 
-1. **Assign a session:** `/condotto assign testrepo`
+1. **Assign a session:** `/condotto assign <repo>` (naming one of your `[[repos]]`)
    Condotto posts an anchor message; its thread is your session. (To assign an
    *existing* thread instead, mention **`@Condotto assign`** inside it — slash
    commands can't run in threads.)
@@ -326,7 +341,7 @@ you can assign):
    shell, an architect gets an **Approve / Deny** prompt (or, with auto-approve
    on, an architect's own turn just proceeds). Members can watch but can't decide.
 4. **Ship it:** `@Condotto land` (and `@Condotto deploy`) run the repo's configured
-   command **through the gate** — on `testrepo` those are safe no-ops.
+   command **through the gate** — no-ops until you wire them to something real.
 5. **End it:** `@Condotto stop` keeps the worktree for later; `@Condotto stop clean`
    schedules it for teardown.
 
@@ -338,7 +353,7 @@ you can assign):
 
 | Command | Who | Does |
 |---|---|---|
-| `/condotto assign [repo]` | architect | Start a new session in this channel (defaults to `testrepo`). |
+| `/condotto assign <repo>` | architect | Start a new session in this channel. Omit the repo and Condotto asks which one — there is no default. |
 | `/condotto status` | architect | Daemon-wide **operator dashboard** (ephemeral): uptime, session counts, turns-in-flight vs. cap, pending approvals, config summary. |
 | `/condotto stop` | anyone | Lists this channel's sessions and points you to the in-thread stop. |
 
@@ -353,7 +368,7 @@ sessions themselves, an architect `@Condotto grant`s them architect rights (see
 
 | Mention | Who | Does |
 |---|---|---|
-| `@Condotto assign` | architect | Assign *this* thread as a session. |
+| `@Condotto assign <repo>` | architect | Assign *this* thread as a session. Omit the repo and Condotto asks which one. |
 | `@Condotto status` | anyone | This channel's sessions + their settings. |
 | `@Condotto stop [clean]` | architect | End the session; `clean` also discards the worktree. |
 | `@Condotto cancel` | architect | Interrupt the running turn (e.g. a runaway workflow); the session lives on. |
@@ -552,11 +567,41 @@ first). Worktrees are disposable; their branches live in your real repos.
 |---|---|
 | `not_in_channel` on assign | `/invite @Condotto` into the channel. |
 | Boot: `WARNING: no architects configured` | Set `architects` in `condotto.toml` (or `CONDOTTO_ARCHITECTS`) and restart. |
-| Boot: `Repo "x" missing at …` | Point `[[repos]].path` at a real git repo, or remove the entry. Create the default `~/tmp/condotto-testrepo` or override `CONDOTTO_TEST_REPO`. |
+| Boot: `Repo "x" missing at …` | Point `[[repos]].path` at a real git repo, or remove the entry. |
+| Boot: `No repos configured` | Add at least one `[[repos]]` entry to `condotto.toml` — there is no default repo. The message shows the shape. |
+| Boot: `duplicate name "x"` | Two `[[repos]]` entries share a `name`. Names must be unique. |
 | `Configuration error: …` at boot | The message names the bad field. Fix `condotto.toml` (compare against `condotto.example.toml`). |
 | Binary: "found no `claude` CLI beside it" | Ship `claude` next to the `condotto` binary, or set `CONDOTTO_CLAUDE_CLI` to an installed `claude`. |
 | Boot: `default model "x" not in harness models` | Use `opus`, `sonnet`, or `fable` for `[defaults].model`. |
 | Approve button does nothing | The clicker isn't an architect. Check `architects` / `@Condotto grant`. |
+
+---
+
+## Development
+
+```sh
+bun test                # the full unit suite — no config, no network, no auth
+bun run check:ports     # guards the port boundaries (no platform imports in core)
+```
+
+**Smoke tests** exercise the real Claude Code adapter end to end — a live agent
+with a real shell — so they need Claude auth, and they cost tokens. They need no
+configuration otherwise: each one provisions its own throwaway git repo, its own
+worktrees root, and its own scratch state under `~/.cache/condotto-smoke`
+(override with `CONDOTTO_SMOKE_HOME`). They never read your `condotto.toml` and
+never touch a repo you care about.
+
+```sh
+bun run smoke:gate      # gate a Write -> defer; then smoke:approve resumes and approves it
+bun run smoke:create    # a real session + turn; then smoke:resume proves park & resume
+bun run smoke:workflows # multi-agent Workflow, gated and confined
+bun run smoke:reset     # delete the scratch dir; the next run rebuilds it
+```
+
+Each run resets the fixture repo to a known state first, so a crashed or
+half-finished run never poisons the next one. To point a smoke at one of your own
+configured repos instead, set `CONDOTTO_SMOKE_REPO=<name>` — it will say so
+loudly, since that runs an agent against a real repo.
 
 ---
 
