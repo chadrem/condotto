@@ -2069,33 +2069,44 @@ Q1/Q2 are answered behaviourally, not by asking the model to introspect its
 context: each `CLAUDE.md` defines a codename and the agent either produces it or
 does not. Worth keeping that shape if the smoke is ever extended.
 
-**Unexpected finding, PRE-EXISTING and unrelated to monorepos: the operator's
-user-level skills reach every session, trusted or not.** The Q2 skill list
-contained the operator's own personal skills (`update-config`, `schedule`,
-`fewer-permission-prompts`, …), not just the fixture's. A follow-up probe against
-a repo with NO skills of its own listed them in **both** postures — including
-`projectConfig: false`, the untrusted default. That contradicts the isolation the
-adapter documents ("Untrusted (default) stays isolated … `"user"` and `"local"`
-are never included").
+### 2026-07-20 — The operator's own skills reach the agent, and that is intended
 
-**Cause (verified in `sdk.d.ts:1889-1890`):** omitting the `skills` option is
-explicitly *not* "skills off" — "no SDK auto-configuration. **The CLI's own
-defaults still apply.**" `settingSources: []` governs settings/CLAUDE.md/MCP, not
-skill discovery. So the untrusted path, which omits `skills` entirely, inherits
-the CLI default and loads `~/.claude` skills.
+Found while reading the monorepo smoke's Q2 output: the skill list contained the
+OPERATOR's personal skills (`update-config`, `schedule`, `fewer-permission-prompts`,
+…), not just the fixture's. A follow-up probe against a repo with NO skills of its
+own listed them in **both** postures, including `projectConfig: false` — the
+untrusted default.
 
-**Blast radius, traced.** Not a gate bypass: a skill is instructions, and every
-tool call it makes still flows through the §4 hook. Skill *files* are also
-unreadable — `sdk.d.ts:1895-1898` warns they stay on disk and reachable via
-Read/Bash, but `~/.claude` is outside the worktree, so confinement already covers
-that. The real exposure is that an agent driven by Slack members carries the
-operator's personal instruction set, some of which (`update-config`, `schedule`,
-`fewer-permission-prompts`) exists to widen permissions — gated, but a plausible
-thing for an architect on auto-approve to wave through. Logged rather than fixed
-in this commit: the untrusted half has an obvious lever (`skills: []`, an empty
-allowlist, which the SDK treats as "enable only these"), but the trusted half is a
-design question — `"all"` is discovery-wide, and restricting it to a repo's OWN
-skills means enumerating them from the worktree.
+**Cause (verified in `sdk.d.ts:1889-1890`).** Omitting the `skills` option is
+explicitly *not* "skills off": "no SDK auto-configuration. **The CLI's own defaults
+still apply.**" `settingSources` governs settings / `CLAUDE.md` / `.mcp.json`
+discovery; it does **not** govern skill discovery. So the untrusted path, which
+omits `skills`, inherits the CLI default and loads `~/.claude` skills.
+
+**Decision: keep it.** Condotto runs on the operator's own machine under their own
+account, and DESIGN §1's north-star is an implementer that is genuinely
+first-class — deliberately hobbling it relative to the same person's terminal
+would work against that. The operator's skills are part of the environment they
+chose to run the daemon in.
+
+**Blast radius, traced (why this is a posture choice and not a hole).** A skill is
+instructions, not authority: every tool call one makes still flows through the §4
+hook, and `Skill` is itself an unknown tool to the policy engine, so *invoking* one
+gates (verified end to end — `Skill{repo-codebook} -> gate`, approved, ran, and
+returned the token in its body; on an architect-initiated turn auto-approve covers
+the click). Skill *files* are not readable either: `sdk.d.ts:1895-1898` warns they
+stay on disk and reachable via Read/Bash, but `~/.claude` is outside the worktree,
+so read confinement already covers it. The residue worth naming: an agent driven by
+Slack MEMBERS carries the operator's instruction set, some of which exists to widen
+permissions — still gated, but an architect on auto-approve should know it is there.
+
+**What was actually wrong was the documentation.** `adapter.ts` claimed "Untrusted
+(default) stays isolated: … no skills", which is false and had been since skills
+were wired up. Corrected in place, with the `skills: []` lever named for any install
+that does want the operator's skills genuinely off. **Not verified:** whether a
+repo's OWN skills can be loaded without also loading the operator's (`"all"` is
+discovery-wide; scoping would mean enumerating the worktree's skill names and
+passing them explicitly).
 
 **Tests:** `tests/policy.test.ts` pins the invariant table (relative sibling
 allowed; `/etc/passwd`, `~/.aws/credentials`, deep `../`, and the `/wt-evil`

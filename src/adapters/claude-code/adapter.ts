@@ -401,7 +401,20 @@ class ClaudeCodeSession implements HarnessSession {
     // A trusted repo loads its own project settings + skills; the §4 gate
     // still applies (the PreToolUse hook fires regardless of settingSources, and a
     // hook deny/defer beats any repo allow-rule per SDK precedence). Untrusted
-    // (default) stays isolated: no repo CLAUDE.md/.mcp.json/.claude/, no skills.
+    // (default) does not load the REPO's CLAUDE.md/.mcp.json/.claude/ — repo
+    // content is untrusted input and must not register MCP servers or alter
+    // permissions (§4). That is what `settingSources` governs.
+    //
+    // It does NOT govern skill discovery. The OPERATOR's own user-level skills
+    // (~/.claude) reach the agent in BOTH postures — verified live 2026-07-20, and
+    // stated in sdk.d.ts: omitting the `skills` option is "no SDK auto-configuration.
+    // The CLI's own defaults still apply", i.e. explicitly NOT "skills off".
+    // This is INTENDED for Condotto (decision 2026-07-20): the daemon runs on the
+    // operator's own machine under their account, and the implementer is meant to
+    // be as capable there as they are. It is not a gate hole — a skill is
+    // instructions, and every tool call it makes still hits the hook (`Skill`
+    // itself is an unknown tool, so invoking one gates). Pass `skills: []` here if
+    // an install ever wants the operator's skills genuinely off.
     const settingSources: ("user" | "project" | "local")[] = h?.projectConfig ? ["project"] : [];
 
     // Workflows run under bypassPermissions ONLY so the background workflow's
