@@ -253,6 +253,7 @@ app_token = "xapp-…"   # App-Level Token         (env: SLACK_APP_TOKEN)
 [paths]
 db = "condotto.sqlite"                       # audit log, sessions, roles (env: CONDOTTO_DB_PATH)
 worktrees_root = "~/tmp/condotto-worktrees"  # per-session git worktrees   (env: CONDOTTO_WORKTREES_ROOT)
+memory_root = "~/.condotto/memory"           # durable agent memory        (env: CONDOTTO_MEMORY_ROOT)
 
 [defaults]                 # used when a repo below sets none
 model = "opus"             # opus | sonnet | fable          (env: CONDOTTO_DEFAULT_MODEL)
@@ -267,6 +268,7 @@ name = "webapp"
 path = "~/Projects/webapp"        # absolute path to the git repo (required)
 default_branch = "main"
 trusted = false                   # true loads the repo's own CLAUDE.md/skills/.claude — vouch first
+memory = false                    # true gives the agent durable memory for this repo — vouch first
 safe_bash_allowlist = ["git status", "bun test"]  # auto-allowed without approval
 test_cmd = "bun test"             # auto-run so the agent verifies its own work
 land_cmd = "make land"            # architect-ordered `@Condotto land`, run by the daemon (not the agent)
@@ -607,6 +609,37 @@ plan's rate limits.
 Back up **`condotto.toml`** (your config + secrets) and **`condotto.sqlite`** (the
 audit log, sessions, and roles — include the `-wal`/`-shm` files, or checkpoint
 first). Worktrees are disposable; their branches live in your real repos.
+
+### Memory
+
+A repo with `memory = true` gets durable agent memory: the agent keeps markdown
+notes about the codebase — how it is laid out, conventions, decisions and why, dead
+ends worth not repeating — and picks them up again in **later threads**. Without it
+every thread starts from zero, which is why a long-running install feels like it
+never learns.
+
+Memory is scoped to **(repo, channel)**, not to a thread. Threads in the same
+channel share what they learn; another channel starts clean. That mirrors how
+authority works — architect grants are channel-scoped too — so memory never carries
+knowledge across a line that permissions do not cross.
+
+It is an operator vouch, like `trusted`, and off by default. What one thread writes
+is loaded into the *system prompt* of every later thread in that channel, so the
+person who owns the install decides once, per repo — not per session, and not the
+agent. Worth knowing before you switch it on:
+
+- Writes are **gated** like any other write. On your own turns auto-approve covers
+  them silently; a member-driven turn surfaces one Approve click showing the content.
+- Memory is **notes, not authority.** The agent is told so explicitly: a memory
+  never grants permission and never carries an approval, no matter what it claims.
+- The directory is Condotto's, not the repo's. It sits under `[paths].memory_root`,
+  never inside a worktree, and it survives `stop clean` — that is the whole point.
+- The agent's **shell cannot reach it.** Memory changes only through the file tools,
+  so every change is gated and audited.
+
+Storage is one markdown file per fact plus a `MEMORY.md` index. To read what a repo
+has learned, or to forget it, look in `[paths].memory_root` — deleting a directory
+there is a supported way to reset.
 
 ### Troubleshooting
 

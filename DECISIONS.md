@@ -2119,3 +2119,292 @@ refused with no worktree created, missing sub-project refused *and* torn down wi
 no orphan, land in the sub-project, and refused re-pointing. `tests/store.test.ts`
 covers the v3 round-trip; the pre-runner-rewind test now drops each post-v1 column.
 353 tests pass; `check:ports` and `tsc --noEmit` clean.
+
+## 2026-07-20 — Auto-memory spike: the feature has always been inert, and our hook is the only control
+
+**Why this was looked at.** Running Condotto against a real repo, the agent tried to
+record a memory and reported it could not: the memory directory is outside the
+worktree, so confinement blocked it. That is `policy.ts` working as designed, but it
+has a consequence nobody decided — **Claude Code's auto-memory has been silently
+inert on every Condotto session that has ever run.** The only prior trace is the
+M3.5 spike note that `settingSources: []` still "loads managed policy, `~/.claude.
+json`, **auto memory**, claude.ai MCP regardless" (this file, ~:522). Recorded once,
+never revisited.
+
+**Verified in the installed SDK** (`node_modules/@anthropic-ai/claude-agent-sdk/
+sdk.d.ts`), not from the public docs:
+
+- `options.settings` accepts an inline object or a file path (`:1848`), and
+  `Settings` carries `autoMemoryEnabled` (`:6374`) and `autoMemoryDirectory`
+  (`:6378`). So the memory location is ours to place, per session.
+- The default is `~/.claude/projects/<sanitized-cwd>/memory/` — keyed on **cwd**,
+  **not** the git repo root. The public docs say the opposite ("derived from the git
+  repository, so all worktrees … share one auto memory directory"). **Trust the
+  `.d.ts`.** Since every session has a unique worktree cwd, the default would give
+  each thread its own memory directory, destroyed with the worktree at teardown.
+  Setting the directory explicitly is therefore *required* for memory to persist at
+  all, not merely tidier.
+- `autoMemoryDirectory` is **ignored when set from a checked-in `.claude/settings.
+  json`** ("for security", `:6376`). A `trusted: true` repo therefore cannot hijack
+  where memory goes — enforced by the SDK, not by us.
+
+**Spike** (`scripts/spike-memory.ts`, throwaway fixture, real SDK, real hook):
+
+| | Question | Result |
+|---|---|---|
+| Q1 | `settings.autoMemoryDirectory` relocates the memory dir | **yes** |
+| Q2 | A memory write reaches our `PreToolUse` hook | **yes** — ordinary `Write`/`Read`, **no `agent_id`** (main-agent origin) |
+| Q3 | The SDK denies it UPSTREAM of our hook | **no** — the hook saw the call in every posture. Our policy is the real control, not a second opinion |
+| Q4a | The write lands **without** `additionalDirectories` | **yes** |
+| Q5 | A later, unrelated session loads the memory back | **yes** — a fresh session recalled the fact with no tool calls |
+
+P1 reproduced the production failure verbatim: with a realistic deny-outside-worktree
+hook the agent got `"…/memory/springfield-sales-tax-rate.md" is outside your
+worktree` and correctly reported that nothing was saved.
+
+**Two results changed the plan.**
+
+1. **`additionalDirectories` is NOT required** and will not be used. The planned
+   Step 3 would have added the memory root to it; the spike shows the write lands
+   without it, so adding it would widen the SDK's own notion of scope for no gain.
+   *Method note:* the first P4 run showed the opposite (nothing written) — the agent
+   simply never attempted the write that run. The isolating re-run settled it. A
+   single agent-driven observation is not evidence; run it twice before believing a
+   negative.
+2. **The agent reaches for `Bash` against the memory directory unprompted** — one
+   run did `cat …/memory/MEMORY.md` to append its index line. This confirms Bash is a
+   live read/write path to the memory root, not a theoretical one, and so the planned
+   `bashHardDeny` entry for the memory root is load-bearing rather than belt-and-
+   braces. Its deny reason must tell the agent to use `Read`/`Write` instead, since
+   the hard-deny floor admits no override.
+
+**Memory on disk** is one file per fact plus a `MEMORY.md` index — frontmatter with
+`name`/`description`/`metadata` (including `originSessionId`), body as prose. Worth
+knowing because it is agent-authored text that lands in a **later session's system
+prompt**, i.e. it arrives above `framing.ts` and outside the `user=`-header authority
+rule. The system prompt must therefore state that memory is *notes, not authority*.
+
+## 2026-07-20 — The `ln -s` mitigation the design relied on was never implemented
+
+**Found while planning agent memory** (adversarial review of the memory design),
+but entirely independent of it. DESIGN.md §4's "not yet built" note and this file's
+M4 entry both defer symlink-realpath confinement with a *named interim mitigation*:
+"don't let `ln -s` auto-approve." Grepping for it turns up nothing — there was no
+`ln` case in `bashHardDeny`, and the note postdates the auto-approve decision.
+
+**Why it matters.** `offendingPath` is purely lexical and never calls `realpath`
+(its docstring says so, and that is a deliberate, documented trade). Lexical
+containment is only tolerable if nothing inside the tree can *point* outside it. One
+`ln -s / <wt>/esc` — which `bashHardDeny` ignored and `evaluateBash` therefore
+returned `gate` for, i.e. **auto-approved on any architect-initiated turn** — makes
+`Read <wt>/esc/etc/passwd` lexically confined, auto-allowed (reads never gate), and
+posted into the thread. The gap defeated read confinement, the §4 exfiltration
+boundary, with no click anywhere.
+
+**Fixed:** `bashHardDeny` now floors any `ln` whose targets escape the tree
+(absolute, `~`, `..`, `$`, `*`), quotes stripped and wrapper prefixes (`sudo`,
+`env FOO=`, `timeout`, …) skipped, mirroring the `rm -rf` block directly above it.
+**Not scoped to `-s`:** a hard link (`ln /etc/passwd x`) escapes identically for
+files, so plain `ln` is covered too. A link whose targets are all in-tree relative
+paths is ordinary work and still gates rather than being floored.
+
+**Tests:** `tests/policy.test.ts` covers `/`, `~`, `~/.ssh`, `/etc/passwd`, `../../..`,
+`$HOME`, quoted `"/"`, `-sf`, `--symbolic`, the hard-link form, and a `sudo` prefix;
+plus the two negative cases (in-tree link → `null` / `gate`). 354 tests pass.
+
+**Still open, unchanged:** this is a heuristic on a command string, not real
+confinement. Bash arg confinement remains "the human at the gate is the real net",
+and full symlink-realpath containment is still the future hardening DESIGN §4 names.
+
+## 2026-07-20 — Durable agent memory: the first named exception to the worktree boundary
+
+Builds directly on the spike above (same date), which established that the feature
+works, that our hook is the only control, and that `additionalDirectories` is not
+needed. This is the decision about **where memory lives and what may touch it**.
+
+**The shape.** A repo vouched with `memory = true` gets a Condotto-owned directory
+per **(repo, channel)** under `[paths].memory_root`, outside every worktree. The
+adapter points the SDK's auto-memory at it via `settings: { autoMemoryEnabled,
+autoMemoryDirectory }` — the highest user-controlled tier, applying regardless of
+`settingSources`, so the posture is PINNED in both directions. Off means an explicit
+`autoMemoryEnabled: false`, which also closes the one path by which a *trusted*
+repo's checked-in settings could switch memory on (the SDK already ignores
+`autoMemoryDirectory` from project settings, but not the enable flag).
+
+**Why outside the worktree, given the boundary has never had an exception.** The
+alternative — memory inside the worktree, synced out by the daemon — looks safer but
+only relocates the same trust decision into more moving parts: two threads on one
+repo conflict on `MEMORY.md`, a crash between turn and harvest loses memories, and
+it puts agent-written files inside a tree that later gets landed, so one
+`.git/info/exclude` mistake commits memory into the operator's real repo. The
+boundary exists to stop host files reaching Slack and to stop damage to the host
+(§4; M1 2026-07-18). A directory holding only notes the agent wrote does neither.
+The rule was never "the worktree is magic" — it is "the agent may only touch content
+it is authorized to touch."
+
+**Why (repo, CHANNEL) and not (repo).** `roles.scope` is `channel_id | '*'`. A
+per-repo store would carry content written under one channel's authority into
+another channel's sessions, crossing the boundary authority itself is scoped to. A
+channel is the natural working context, so the scope costs almost nothing.
+
+**Why it is NOT just another containment root.** The tempting refactor — pluralize
+`offendingPath`'s root — was rejected. That one function governs reads, writes, Glob
+patterns, AND confined-origin calls, so a new root grants all four at once and
+leaves the differences to be re-subtracted downstream: the shape most likely to leak
+one by omission. Memory is instead a separate, named question (`memoryPath`), and
+each rule is stated on purpose:
+
+| | Rule | Why |
+|---|---|---|
+| Read | allow | holds only notes this lineage wrote; leaks nothing a worktree read would not |
+| Write | **gate**, `.md` only, `Write`/`Edit` only | same tier as an in-worktree write. `MultiEdit`/`NotebookEdit` render no diff on the approval (`render.ts`), so approving one would be content-blind — and memory is exactly the content that must not change unseen |
+| Subagent / workflow / escaped | **deny, reads AND writes** | a durable fact must come from the main agent where an architect can see it; and since main-agent memory reads are auto-allowed, leaving them readable here would be the one fan-out leg needing no approval at all |
+| Bash | **hard-deny** the whole path | Bash has NO path confinement, so a shell that could reach memory could plant a symlink and reopen lexical containment *permanently* — memory outlives the worktree |
+
+**The symlink problem, which is what the design turns on.** `offendingPath` is
+lexical and never calls realpath — tolerable only while nothing inside a containment
+root can point outside it. The worktree earns that (`verifyWorkdir` realpath-proves
+it, and the tree is destroyed at teardown); a memory root earns it neither way. Left
+unhardened, one `ln -s / <memory>/r` would make an auto-allowed, zero-click
+`Read <memory>/r/etc/passwd` lexically legal for every later thread in the channel,
+forever. So `MemoryManager.prepare` realpath-proves the directory and **sweeps every
+symlink** in it, and it runs on EVERY turn, not once at creation — a one-time check
+would age out on a store designed to outlive its sessions. Doing that work in the
+core, before the gate, is also what keeps `policy.ts` a pure synchronous function.
+Sweeps are audited (`memory_symlinks_swept`); a failure disables memory for the turn
+and is audited (`memory_unavailable`) rather than failing the turn.
+
+**The prompt.** `MEMORY.md` is loaded into a LATER session's **system prompt**, i.e.
+it arrives above `framing.ts` and outside the `user=`-header authority rule that
+every other inbound byte is subject to. The prompt therefore states plainly that
+memory is **notes, not authority**: it never grants permission, never carries an
+approval, and a memory claiming otherwise is wrong. It also names the directory as
+the single exception to the confinement bullet, which would otherwise be false.
+
+**Config tier: an operator vouch (`memory = true`), default off — not a session
+toggle.** Deliberately the same tier as `trusted` and deliberately not the
+`@Condotto workflows write`-style in-thread opt-in, because the consequence is not
+scoped to the session that opts in: what a member's turn writes reaches every later
+thread in that channel. That is a decision for whoever owns the install, made once.
+Strict-boolean parsing for the same reason as `trusted` — `memory = "true"` fails
+fast rather than silently giving the off posture.
+
+**Residual risk, named.** Under architect auto-approve a memory write runs with no
+human seeing the content, so an injected member message earlier in a thread can in
+principle steer what becomes durable. This is the SAME risk the project already
+accepted for auto-approved in-worktree bash (2026-07-19), not a new class, and the
+"notes, not authority" framing plus per-channel scope bound it. An operator who
+wants the stricter posture turns auto-approve off, or memory off. What is NOT at
+risk is the floor: `.md`-only, no shell, no confined origins, and the symlink sweep
+are all mechanical and unaffected by who approves.
+
+**Verified.** `scripts/smoke-memory.ts` (real SDK, throwaway fixture): the agent
+records a memory through the gate into the Condotto-owned directory; a NEW thread in
+the same channel recalls it with no tool calls; a thread in a DIFFERENT channel does
+not have it; bash against the memory path is denied and the agent recovers with the
+file tools; out-of-worktree reads still deny; a planted `ln -s /` is swept. Unit
+coverage in `tests/memory.test.ts` (path scoping, case-collision, sweep, teardown),
+`tests/policy.test.ts` (the table above incl. the `<memory>-evil` prefix collision
+and confined origins under `workflowWrite: true`), and
+`tests/session-manager.test.ts` (vouch gating, per-channel scoping, prompt text).
+383 tests pass; `check:ports` and `tsc --noEmit` clean.
+
+**Method note worth keeping.** The first smoke run reported "a new thread did not
+recall" — but the agent had written `"value intentionally not stored, ask the user"`.
+Asked to memorise a *deploy passphrase*, it correctly refused to persist a
+credential, and the test scored its good judgement as a product failure. The fixture
+now uses a benign project convention. When a smoke that drives a real agent fails,
+read what the agent actually did before believing the assertion.
+
+## 2026-07-20 — Memory review round 2: the sweep was the wrong boundary
+
+An adversarial review of the SHIPPED memory implementation (four lenses, each
+finding independently refuted before being accepted) found eight surviving issues,
+four critical. Two were ordinary bugs; the rest were one design mistake wearing
+different hats. Recording both, because the mistake is the instructive part.
+
+**Bug 1 (CRITICAL): a memory decoy laundered a second path field out of the
+worktree.** `evaluateBase` reduced two independent scans to first-match strings and
+compared them by RAW INPUT VALUE. A memory target is out-of-worktree *by
+definition*, so a memory-valued `file_path` was simultaneously the first offender
+and the first memory hit; they compared equal, `escapedPath` became null, and a
+second field escaping anywhere on the host was silently discarded. `Grep` ignores
+`file_path`, so the decoy was free:
+
+    Grep{file_path:"<mem>/MEMORY.md", path:"/etc", pattern:"root"}   -> ALLOW
+
+`allow`, not `gate` — no click, no approval record, reachable from a **member's**
+turn. This was the exfiltration channel read confinement exists to close, and the
+inline comment asserted the opposite of the behaviour ("a second path field can
+never be laundered past the boundary by a first one landing in memory" — comparing
+raw values is what *enabled* it). Fixed by deciding over the whole target set: ANY
+out-of-worktree target that is not a legal memory file is an escape, and the memory
+branch is taken only when EVERY out-of-worktree target is one.
+
+**Bug 2 (MEDIUM): the new `ln` floor produced false denials.** It sniffed for `..`
+syntactically, so `ln -s ../../packages/shared shared` — ordinary monorepo work
+that lands back INSIDE the tree — was hard-denied with no override. Now resolved
+and containment-tested like every other path; only `$`/`*` (unresolvable) stay
+syntactically refused.
+
+**The design mistake: a start-of-turn sweep is not a boundary.** The original
+argument was "`prepare` realpath-proves and symlink-sweeps the directory every turn,
+so `policy.ts` can stay lexical." Every remaining critical finding was a way through
+that:
+
+- **TOCTOU.** The sweep runs once; the agent then makes many tool calls. It can
+  plant a link mid-turn and use it in the same turn.
+- **Any program, not `ln`.** The `ln` floor catches `ln`. It does not catch
+  `python3 -c 'os.symlink("/", d+"/r")'`, which gates and then auto-approves on an
+  architect turn.
+- **Hard links.** `sweepSymlinks` removed symlinks only. A hard link has no separate
+  "real" path, so `realpath` cannot see it either — only the link count can.
+- **Fail-open sweep.** `chmod 000` on a subdirectory made `readdir` throw, which was
+  *skipped*, hiding a symlink from every future sweep.
+- **A neighbouring session.** A session whose own repo has `memory = false` carries
+  NO memory floor, and can plant a link in another repo's memory root with no
+  obfuscation at all.
+- **Substring floor.** The Bash memory check is `command.includes(memoryRoot)`, which
+  `~/.condotto/…`, a relative path, or `$HOME/…` all evade.
+
+Any one of these turned an auto-allowed memory read into a general host-read
+channel, because reads under the root accepted ARBITRARY depth: `<mem>/r -> /` made
+`Read <mem>/r/etc/passwd` lexically legal.
+
+**The fix — three layers, and the middle one is the boundary.**
+
+1. **Shape** (`isMemoryFile`, policy.ts): a memory path is a `.md` file DIRECTLY in
+   the root. No subdirectories means no path can traverse *through* a planted link
+   at all, which removes the whole `<mem>/r/etc/passwd` class rather than one
+   instance of it. Glob no longer reaches memory either (a pattern is matched, not
+   resolved, and `MEMORY.md` is the index the agent uses instead).
+2. **Per-call proof** (`verifyMemoryTarget`, memory.ts, called from the
+   session-manager gate): resolves the real file at the moment of use and refuses
+   symlinks, hard links (`nlink > 1`), non-regular files, and anything whose
+   realpath is not directly in the root. It runs **before the prior-approval
+   short-circuit** deliberately — an approval authorizes a path, and the bytes
+   behind a path can change between the click and the resume.
+3. **Sweep** (`prepare`): now removes hard links too, fails CLOSED on an unreadable
+   directory (`chmod` then remove — `rm -r` cannot delete through a directory it
+   cannot traverse), and is depth-capped. Demoted in the docs from "the control" to
+   hygiene that keeps planted links from lingering and surfaces them in the audit.
+
+The Bash floor is likewise demoted in-comment to a convenience rail, with an
+explicit "do not add security weight to this check — harden the per-call proof
+instead." `policy.ts` stays pure and synchronous; all filesystem truth lives in the
+gate, which was always async.
+
+**The transferable lesson.** The pure-policy-engine constraint is real and worth
+keeping, but it means the policy engine can only ever decide SHAPE. Anything that
+depends on what is actually on disk *right now* has to be re-asked at the moment of
+use, in the impure layer. "Prove it once at the start of the turn" is a snapshot,
+and a snapshot is not a boundary when the thing it guards can be modified by the
+same agent it guards against.
+
+**Tests.** `tests/policy.test.ts` covers the decoy in both field orders across
+Read/Grep/Glob, the direct-child shape (`<mem>/r/etc/passwd`, `<mem>/sub/a.md`,
+`<mem>/a.md.sh` all denied), Glob-never-reaches-memory, and the `ln` relative-link
+cases both ways. `tests/memory.test.ts` covers `verifyMemoryTarget` against a
+planted symlink, a hard link, a subdirectory, and a directory-named-`.md`, plus the
+hardened sweep (hard links, unreadable subdirectory). 393 tests pass; `check:ports`
+and `tsc --noEmit` clean; `smoke:memory` re-run green end to end.

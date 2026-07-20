@@ -44,12 +44,19 @@ app_token = "xapp-your-app-token"   # App-Level Token for Socket Mode (starts xa
 # scope = "C0123CHANNEL"   # a Slack channel id, or "*" for everywhere (default)
 
 # ---------------------------------------------------------------------------
-# Filesystem paths. Env overrides: CONDOTTO_DB_PATH / CONDOTTO_WORKTREES_ROOT.
+# Filesystem paths. Env overrides: CONDOTTO_DB_PATH / CONDOTTO_WORKTREES_ROOT /
+# CONDOTTO_MEMORY_ROOT.
 [paths]
 db = "condotto.sqlite"                    # SQLite store (audit log, sessions, roles)
 worktrees_root = "~/tmp/condotto-worktrees"  # where per-session git worktrees live
                                             # (absolute & stable — moving a live
                                             #  session's worktree loses the session)
+memory_root = "~/.condotto/memory"          # durable agent memory, per (repo, channel).
+                                            # Unlike a worktree this OUTLIVES the
+                                            # session that wrote it — that is the
+                                            # point — so don't put it somewhere
+                                            # disposable. Only used by repos with
+                                            # memory = true below.
 
 # ---------------------------------------------------------------------------
 # Daemon-wide defaults. Each is used when a repo (below) doesn't set its own.
@@ -95,6 +102,15 @@ max_concurrent_turns = 6    # cap on harness turns running at once across all
 # trusted = false                 # true loads the repo's own CLAUDE.md/skills/.claude
 #                                 #   config — set ONLY for repos you vouch for
 #                                 #   (it also loads that repo's permissions/hooks/MCP).
+# memory = false                  # true gives the agent durable memory for this repo:
+#                                 #   markdown notes it keeps about the codebase and
+#                                 #   picks up again in LATER threads. Scoped per
+#                                 #   (repo, channel) — threads in one channel share
+#                                 #   what they learn, another channel starts clean.
+#                                 #   A vouch like `trusted`: what one thread writes
+#                                 #   lands in the system prompt of every later thread
+#                                 #   in that channel. Writes are gated; the agent's
+#                                 #   shell cannot reach the directory.
 # safe_bash_allowlist = [         # commands auto-allowed without approval on this
 #   "git status", "bun test",     #   repo. Omit for a conservative read-only default.
 # ]

@@ -499,7 +499,7 @@ describe("store schema migrations", () => {
   // The current schema version == the number of migrations in the runner. Bump
   // this constant in lockstep whenever a migration is appended — the tests below
   // pin the runner's behavior to it.
-  const CURRENT_SCHEMA_VERSION = 3;
+  const CURRENT_SCHEMA_VERSION = 4;
 
   const migPath = (name: string): string => join(mkdtempSync(join(tmpdir(), "condotto-mig-")), name);
   const userVersion = (path: string): number => {
@@ -547,6 +547,7 @@ describe("store schema migrations", () => {
     // EVERY future migration that adds a column must be dropped here too.
     raw.run("ALTER TABLE sessions DROP COLUMN cleanup_at"); // v2
     raw.run("ALTER TABLE sessions DROP COLUMN workdir"); // v3
+    raw.run("ALTER TABLE repos DROP COLUMN memory"); // v4
     raw.run("PRAGMA user_version = 0"); // rewind the stamp to the pre-runner state
     raw.close();
     expect(userVersion(path)).toBe(0);

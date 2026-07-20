@@ -73,6 +73,25 @@ export interface PolicyContext {
    * read-only fan-out: those calls may only run genuine confined reads.
    */
   workflowWrite?: boolean;
+  /**
+   * The session's Condotto-owned memory directory, or omitted when the repo has
+   * not been vouched for memory.
+   *
+   * The one place outside the worktree the agent may write, and it earns that with
+   * its own narrower rules rather than by joining the containment root set: a `.md`
+   * file DIRECTLY in the root (`isMemoryFile`), `Write`/`Edit` only, gated like any
+   * other write, never reachable from a subagent/workflow/escaped call, and floored
+   * to Bash.
+   *
+   * This module stays pure and LEXICAL, so it decides shape only. The session
+   * manager's gate re-proves every memory target against the filesystem
+   * (`verifyMemoryTarget`) before allowing the call — that is what catches a symlink
+   * or hard link planted after the last sweep, and it is the real boundary. Do not
+   * relax the shape rules here on the assumption that the sweep has already cleaned
+   * the directory: a sweep is a snapshot, and the agent keeps acting after it.
+   * See DECISIONS 2026-07-20.
+   */
+  memoryRoot?: string;
 }
 
 /**
@@ -151,20 +170,107 @@ const deny = (reason: string): PolicyDecision => ({ action: "deny", reason });
  * otherwise make every lexically-inside path a real escape.
  */
 export function offendingPath(worktree: string, input: unknown, base?: string): string | null {
-  if (typeof input !== "object" || input === null) return null;
   const root = resolve(worktree);
   // Never derived from `base` — see THE INVARIANT above.
   const from = base === undefined ? root : resolve(base);
+  for (const { value, target } of pathTargets(input, from)) {
+    if (!containedIn(target, root)) return value;
+  }
+  return null;
+}
+
+/**
+ * THE containment test, in exactly one place. `+ sep` is what defeats the
+ * prefix-collision attack: without it `<wt>-evil/x` would pass as "inside `<wt>`".
+ */
+function containedIn(target: string, root: string): boolean {
+  return target === root || target.startsWith(root + sep);
+}
+
+/**
+ * Every filesystem target named by a tool input, resolved against `from`.
+ * Shared by the worktree and memory checks so the two can never disagree about
+ * what a given input actually points at.
+ */
+function pathTargets(input: unknown, from: string): { value: string; target: string }[] {
+  if (typeof input !== "object" || input === null) return [];
+  const out: { value: string; target: string }[] = [];
   for (const field of PATH_FIELDS) {
     const value = (input as Record<string, unknown>)[field];
     if (typeof value !== "string" || value.length === 0) continue;
     // A leading `~` is never a legitimate in-worktree relative path; expand it
     // as a shell/tool would rather than let node treat it as a literal subdir.
     const expanded = value === "~" || value.startsWith("~/") ? homedir() + value.slice(1) : value;
-    const target = resolve(from, expanded);
-    if (target !== root && !target.startsWith(root + sep)) return value;
+    out.push({ value, target: resolve(from, expanded) });
+  }
+  return out;
+}
+
+/**
+ * The first path field (if any) that targets the session's MEMORY root — the one
+ * place outside the worktree the agent may touch (DECISIONS 2026-07-20).
+ *
+ * This is deliberately NOT expressed by making `offendingPath` take a set of roots.
+ * Memory is not "another worktree": it is readable but writable only as `.md`
+ * through `Write`/`Edit`, never reachable from a subagent or from Bash, and it
+ * OUTLIVES the worktree. Folding it into the containment root set would grant all
+ * of those by default and leave the differences to be re-subtracted downstream —
+ * the shape most likely to leak one by omission. Keeping it a separate, named
+ * question means each rule has to be stated on purpose.
+ *
+ * `base` — the session cwd — is REQUIRED and has no default, unlike
+ * `offendingPath`'s. Defaulting it to the memory root would resolve every RELATIVE
+ * path there, so an ordinary `Read src/index.ts` would look like a memory access
+ * and (in `evaluateConfined`) be denied to every subagent. Memory is only ever
+ * addressable by absolute path; a relative one resolves inside the worktree and
+ * must never reach here.
+ *
+ * The root passed in has already been realpath-proven and symlink-swept by
+ * `MemoryManager.prepare`, which is what keeps this test lexical — and this whole
+ * module pure and synchronous.
+ */
+export function memoryPath(memoryRoot: string, input: unknown, base: string): string | null {
+  const root = resolve(memoryRoot);
+  const from = resolve(base);
+  for (const { value, target } of pathTargets(input, from)) {
+    if (containedIn(target, root)) return value;
   }
   return null;
+}
+
+/**
+ * Every ABSOLUTE target of this input that lands under the memory root, legal shape
+ * or not. The session-manager gate re-proves each against the filesystem before
+ * allowing the call — see `verifyMemoryTarget`. Returns absolute paths (unlike
+ * `memoryPath`, which returns the raw input value for error messages).
+ */
+export function memoryTargets(memoryRoot: string, input: unknown, base: string): string[] {
+  const root = resolve(memoryRoot);
+  return pathTargets(input, resolve(base))
+    .filter((t) => containedIn(t.target, root))
+    .map((t) => t.target);
+}
+
+/**
+ * A legal memory FILE: a direct `.md` child of the memory root. Nothing else.
+ *
+ * The shape is the security control, not tidiness. Allowing arbitrary depth under
+ * the root made one planted directory symlink (`<mem>/r -> /`) into a general host
+ * read channel, because `<mem>/r/etc/passwd` is lexically "inside memory" and reads
+ * there are auto-allowed. Requiring a DIRECT child means no path can traverse
+ * THROUGH a link at all — the only reachable shape is a single filename, so the
+ * remaining risk narrows to a link that IS a memory file, which the session
+ * manager's per-call `verifyMemoryTarget` resolves for real before allowing it.
+ *
+ * The filename charset also refuses `..`, separators, and control characters, so a
+ * "direct child" cannot be spelled as an escape.
+ */
+export function isMemoryFile(memoryRoot: string, absTarget: string): boolean {
+  const root = resolve(memoryRoot);
+  if (!containedIn(absTarget, root) || absTarget === root) return false;
+  const rel = absTarget.slice(root.length + 1);
+  if (rel.includes(sep) || rel.includes("/")) return false; // direct child only
+  return /^[A-Za-z0-9][A-Za-z0-9._-]*\.md$/.test(rel);
 }
 
 /**
@@ -246,6 +352,21 @@ function evaluateConfined(call: ToolCall, ctx: PolicyContext): PolicyDecision {
 
   if (SUBAGENT_SPAWN_TOOLS.has(name) || name === WORKFLOW_SPAWN_TOOL) return deny(denyMsg);
 
+  // Memory is off-limits to a confined call in BOTH directions, and this is
+  // checked BEFORE anything below can allow it. Writes: a durable fact that ends
+  // up in a later session's system prompt must come from the main agent, where an
+  // architect can see it — and the worktree-write opt-in below would otherwise
+  // hand it to every workflow agent silently. Reads: memory is auto-allowed for
+  // the main agent, so leaving it readable here would be the one leg of the
+  // fan-out that needs no approval at all. Expressed as its own guard rather than
+  // by root-set membership, because the natural refactor grants it by default.
+  if (touchesMemory(call, ctx)) {
+    return deny(
+      "the session's memory is not reachable from here — only the main agent may read or write it, " +
+        "so an architect can see what becomes durable.",
+    );
+  }
+
   const base = evaluateBase(call, ctx);
   // Hard boundaries (out-of-worktree, hard-deny bash) win and keep their reason.
   if (base.action === "deny") return base;
@@ -262,6 +383,38 @@ function evaluateConfined(call: ToolCall, ctx: PolicyContext): PolicyDecision {
   return deny(denyMsg);
 }
 
+/**
+ * Does this call reach for the session's memory in ANY way? Covers the ordinary
+ * path fields AND Glob's `pattern`, which is a path glob in its own right and is
+ * NOT one of `PATH_FIELDS` — checking only the path fields would leave
+ * `Glob{pattern: "<memory>/*.md"}` readable from a subagent, the one fan-out leg
+ * that needs no approval. Bash is excluded on purpose: it names no path field, and
+ * is floored against memory in `bashHardDeny` instead.
+ */
+function touchesMemory(call: ToolCall, ctx: PolicyContext): boolean {
+  if (!ctx.memoryRoot) return false;
+  const from = ctx.cwd ?? ctx.worktree;
+  if (memoryPath(ctx.memoryRoot, call.input, from) !== null) return true;
+  if (call.name !== "Glob") return false;
+  const pattern = (call.input as Record<string, unknown> | null)?.pattern;
+  return memoryPath(ctx.memoryRoot, { path: pattern }, from) !== null;
+}
+
+/**
+ * A denial reason tailored to a path that lands under the memory root but is not a
+ * legal memory file — "outside your worktree" would be true but useless there, and
+ * an agent that cannot tell "forbidden" from "wrong shape" just retries.
+ */
+function outsideReason(value: string, ctx: PolicyContext, from: string): string | null {
+  if (!ctx.memoryRoot) return null;
+  const target = resolve(from, value === "~" || value.startsWith("~/") ? homedir() + value.slice(1) : value);
+  if (!containedIn(target, resolve(ctx.memoryRoot))) return null;
+  return (
+    `"${value}" isn't a usable memory path. Memory holds markdown files directly in ` +
+    `${ctx.memoryRoot} — no subdirectories — so use a plain name like \`some-fact.md\`.`
+  );
+}
+
 /** Base tool-semantics rules (origin-agnostic): reads/writes/bash/network/unknown. */
 function evaluateBase(call: ToolCall, ctx: PolicyContext): PolicyDecision {
   const name = call.name;
@@ -270,6 +423,28 @@ function evaluateBase(call: ToolCall, ctx: PolicyContext): PolicyDecision {
   if (NO_FS_TOOLS.has(name)) return allow(name === "ToolSearch" ? "loads a tool definition" : "updates its task plan");
 
   const offender = offendingPath(ctx.worktree, call.input, ctx.cwd);
+  // Memory vs. escape, decided over the WHOLE set of path targets rather than by
+  // comparing two independent first-matches.
+  //
+  // The first-match form was a critical hole (review 2026-07-20): a memory target
+  // is out-of-worktree BY DEFINITION, so a memory-valued `file_path` was both the
+  // first offender and the first memory hit, they compared equal, and a second
+  // field escaping to anywhere on the host was silently discarded —
+  // `Grep{file_path:"<mem>/MEMORY.md", path:"/etc"}` came back ALLOW. Grep ignores
+  // `file_path`, so the decoy cost nothing and the read was auto-allowed with no
+  // approval record, on a member's turn.
+  //
+  // The rule now: ANY out-of-worktree target that is not a valid memory file is an
+  // escape, and the memory branch is taken only when EVERY out-of-worktree target
+  // is one. One list, both questions.
+  const from = resolve(ctx.cwd ?? ctx.worktree);
+  const outside = pathTargets(call.input, from).filter(
+    (t) => !containedIn(t.target, resolve(ctx.worktree)),
+  );
+  const isMemory = (t: { target: string }) =>
+    ctx.memoryRoot !== undefined && isMemoryFile(ctx.memoryRoot, t.target);
+  const escapedPath = outside.find((t) => !isMemory(t))?.value ?? null;
+  const memory = outside.length > 0 && outside.every(isMemory) ? outside[0]!.value : null;
 
   if (READ_TOOLS.has(name)) {
     // Reading anything on the host + posting the answer in a thread is an
@@ -285,22 +460,51 @@ function evaluateBase(call: ToolCall, ctx: PolicyContext): PolicyDecision {
           `relative to it instead.`,
       );
     }
+    // A Glob pattern is confined to the WORKTREE with no memory carve-out. Memory
+    // is addressed one file at a time (`MEMORY.md` is the index the agent reads to
+    // find the rest), so enumeration buys it nothing — and a pattern is matched
+    // rather than resolved, which is exactly the mismatch that would let a glob
+    // walk through anything planted under the root.
     const globEscape =
       name === "Glob" ? offendingPath(ctx.worktree, { path: pattern }, ctx.cwd) : null;
-    const escaped = offender ?? globEscape;
+    const escaped = escapedPath ?? globEscape;
     if (escaped) {
       return deny(
-        `"${escaped}" is outside your worktree. You may only read files inside your own working tree.`,
+        outsideReason(escaped, ctx, from) ??
+          `"${escaped}" is outside your worktree. You may only read files inside your own working tree.`,
       );
     }
+    // Reading memory is free, exactly like reading the worktree: it holds only
+    // notes this session lineage wrote, so it leaks nothing a read of the tree
+    // would not. (It is agent-authored, hence "notes, not authority" in the prompt.)
     return allow(describeCall(call));
   }
 
   if (WRITE_TOOLS.has(name)) {
-    // A write outside the worktree is a hard boundary no approval can widen.
-    if (offender) {
+    // A write outside the worktree is a hard boundary no approval can widen —
+    // EXCEPT the session's own memory root, which has its own narrower rules.
+    if (memory !== null && escapedPath === null) {
+      // Write/Edit only. MultiEdit and NotebookEdit are refused because the
+      // approval prompt renders a diff only for Edit (render.ts), so approving
+      // them would be content-blind — and memory is precisely the content that
+      // must not change unseen: it lands in a LATER session's system prompt.
+      if (name !== "Write" && name !== "Edit") {
+        return deny(
+          `use Write or Edit for memory files — ${name} isn't allowed there, because an ` +
+            `architect approving a memory change has to be able to see the content.`,
+        );
+      }
+      // Gated like any in-worktree write: architect auto-approve covers it
+      // silently on their own turn, a member's turn surfaces one Approve click.
+      // (The `.md`-direct-child shape was already enforced by `isMemoryFile` above —
+      // anything else fell through to `escapedPath` and denied as an escape.)
+      return gate(describeCall(call));
+    }
+    if (escapedPath ?? offender) {
+      const bad = (escapedPath ?? offender)!;
       return deny(
-        `"${offender}" is outside your worktree. Writes are confined to your own working tree.`,
+        outsideReason(bad, ctx, from) ??
+          `"${bad}" is outside your worktree. Writes are confined to your own working tree.`,
       );
     }
     return gate(describeCall(call));
@@ -322,7 +526,7 @@ function evaluateBash(input: unknown, ctx: PolicyContext): PolicyDecision {
   if (!command.trim()) return deny("empty bash command");
 
   // Hard-deny high-signal dangerous patterns first — never approvable.
-  const danger = bashHardDeny(command);
+  const danger = bashHardDeny(command, { memoryRoot: ctx.memoryRoot, worktree: ctx.worktree, cwd: ctx.cwd });
   if (danger) return deny(danger);
 
   // Production-data investigation is gated like a build (DESIGN §4) even though
@@ -395,7 +599,28 @@ export function productionDataConcern(command: string): boolean {
  * the real net for everything non-allowlisted; this only catches the sharpest
  * edges. Hardening (full shell parsing, more patterns) is future work.
  */
-export function bashHardDeny(command: string): string | null {
+export function bashHardDeny(
+  command: string,
+  ctx?: { memoryRoot?: string; worktree?: string; cwd?: string },
+): string | null {
+  const memoryRoot = ctx?.memoryRoot;
+  const worktree = ctx?.worktree;
+  const base = ctx?.cwd ?? ctx?.worktree;
+  // Keep the shell out of the memory directory, so memory changes only through the
+  // path-checked write tools and every change is gated and audited. This fires in
+  // practice: the spike caught the agent reaching for `cat <memory>/MEMORY.md`
+  // unprompted, so the reason TELLS it what to use instead — the floor admits no
+  // override, and an agent that cannot tell "forbidden" from "wrong tool" retries.
+  //
+  // BEST-EFFORT, NOT A BOUNDARY. It is a literal substring match, so `~/…`,
+  // relative, and `$HOME` spellings of the same path slip past it, and a session
+  // whose own repo has memory OFF has no memoryRoot here at all. Nothing rests on
+  // it: `verifyMemoryTarget` re-proves every memory target in the session-manager
+  // gate, so a link planted by any of those routes is caught at the moment of use.
+  // Do not add security weight to this check — harden the per-call proof instead.
+  if (memoryRoot && command.includes(memoryRoot)) {
+    return "the memory directory isn't reachable from the shell — use the Read, Write, and Edit tools for memory files.";
+  }
   // Recursive force-delete whose target escapes the worktree (absolute, home,
   // parent, variable-expanded, or wildcard). A relative `rm -rf build` is left
   // to the gate; an `rm -rf /` or `rm -rf ~` is refused outright. Quotes are
@@ -411,6 +636,45 @@ export function bashHardDeny(command: string): string | null {
     for (const t of targets) {
       if (t.startsWith("/") || t.startsWith("~") || t.includes("..") || t.includes("$") || t.includes("*")) {
         return "recursive force-delete with an out-of-worktree, home, root, or wildcard target is not allowed.";
+      }
+    }
+  }
+  // Linking something from outside the tree INTO it. Our containment is purely
+  // lexical (`offendingPath` never calls realpath — see its docstring), so a link
+  // whose target escapes turns every later in-tree path into a real escape: once
+  // `<wt>/x -> /`, an auto-allowed `Read <wt>/x/etc/passwd` is lexically confined
+  // and posts a host file into the thread. DESIGN.md §4 and this file's own
+  // 2026-07-19 entry both named "don't let `ln -s` auto-approve" as the interim
+  // mitigation that keeps lexical containment tolerable; it was never implemented,
+  // so `ln -s / <wt>/esc` auto-approved on any architect-initiated turn.
+  //
+  // Hard links (`ln` with no `-s`) escape the same way for files, so this is not
+  // scoped to `-s`. A link whose targets are all in-tree relative paths is fine and
+  // still goes to the gate. Quotes are stripped so `ln -s "/"` cannot hide.
+  for (const rawSeg of command.split(/(?:\|\||&&|;|\||&|\n)+/)) {
+    const seg = rawSeg.replace(/['"]/g, "");
+    const tokens = seg.trim().split(/\s+/).filter(Boolean);
+    let i = 0;
+    while (i < tokens.length && (/^\w+=/.test(tokens[i]!) || /^(?:sudo|doas|nice|nohup|stdbuf|time|timeout|command)$/.test(tokens[i]!))) i++;
+    if ((tokens[i] ?? "").replace(/^.*\//, "") !== "ln") continue;
+    for (const t of tokens.slice(i + 1).filter((t) => t && !t.startsWith("-"))) {
+      // `$` and `*` can't be resolved lexically at all, so they stay refused.
+      if (t.includes("$") || t.includes("*")) {
+        return "creating a link whose target is a variable or wildcard is not allowed (it can't be checked).";
+      }
+      // Everything else is RESOLVED and tested for containment, rather than sniffed
+      // for `..`. A relative `..` that lands back inside the tree is ordinary work
+      // (`ln -s ../shared/x.ts x.ts` between packages in a monorepo), and floring it
+      // would be a false denial with no override.
+      const expanded = t === "~" || t.startsWith("~/") ? homedir() + t.slice(1) : t;
+      const escapes =
+        worktree !== undefined && base !== undefined
+          ? !containedIn(resolve(base, expanded), resolve(worktree))
+          : // No worktree in hand (a direct caller): fall back to the conservative
+            // syntactic test rather than silently allowing everything.
+            expanded.startsWith("/") || t.startsWith("~") || t.includes("..");
+      if (escapes) {
+        return "creating a link to a path outside the worktree is not allowed (it would defeat path confinement).";
       }
     }
   }

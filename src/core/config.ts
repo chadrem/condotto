@@ -27,6 +27,12 @@ export interface RoleMapping {
 export interface CondottoConfig {
   dbPath: string;
   worktreesRoot: string; // absolute; worktree paths must be stable forever
+  /**
+   * Absolute root for per-(repo, channel) agent memory. Unlike a worktree this
+   * OUTLIVES the session that wrote it — that is the entire point — so it must
+   * not default anywhere disposable.
+   */
+  memoryRoot: string;
   repos: RepoConfig[];
   roles: RoleMapping[]; // seeded into the store at boot
   /** Daemon-wide per-thread cost ceiling, used when a repo sets none. */
@@ -238,6 +244,7 @@ const REPO_KEYS = [
   "default_effort",
   "trusted",
   "auto_approve",
+  "memory",
 ] as const;
 
 function parseRepoEntry(entry: unknown, where: string): RepoConfig {
@@ -270,6 +277,13 @@ function parseRepoEntry(entry: unknown, where: string): RepoConfig {
     // Per-repo default for architect self-approve. Only an explicit boolean
     // pins it; anything else (absent) = fall back to the daemon-wide default.
     autoApprove: optBool(e.auto_approve, `${where}.auto_approve`),
+    // Durable agent memory for this repo (DECISIONS 2026-07-20). Like `trusted`
+    // this is an operator VOUCH, not a session toggle: memory a member's turn
+    // writes lands in the system prompt of every later session in that channel,
+    // above the framing rules — so the person who owns the install decides,
+    // once, per repo. Explicit boolean for the same reason as `trusted`: a typo
+    // must not silently enable it.
+    memory: optBool(e.memory, `${where}.memory`) === true,
   };
 }
 
@@ -379,7 +393,7 @@ function parseRoles(toml: Record<string, unknown>, env: Record<string, string | 
 // Public API
 
 const TOP_LEVEL_KEYS = ["slack", "architects", "roles", "repos", "paths", "defaults"] as const;
-const PATHS_KEYS = ["db", "worktrees_root"] as const;
+const PATHS_KEYS = ["db", "worktrees_root", "memory_root"] as const;
 const DEFAULTS_KEYS = ["model", "effort", "auto_approve", "cost_cap_usd", "max_concurrent_turns"] as const;
 
 /**
@@ -413,6 +427,9 @@ export function loadConfig(
     dbPath: expandHome(envStr(env.CONDOTTO_DB_PATH) ?? optString(paths.db, "[paths].db") ?? "condotto.sqlite"),
     worktreesRoot: expandHome(
       envStr(env.CONDOTTO_WORKTREES_ROOT) ?? optString(paths.worktrees_root, "[paths].worktrees_root") ?? "~/tmp/condotto-worktrees",
+    ),
+    memoryRoot: expandHome(
+      envStr(env.CONDOTTO_MEMORY_ROOT) ?? optString(paths.memory_root, "[paths].memory_root") ?? "~/.condotto/memory",
     ),
     repos: parseRepos(toml, configPath),
     roles: parseRoles(toml, env),

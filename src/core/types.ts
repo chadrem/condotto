@@ -286,6 +286,18 @@ export interface HarnessTurnOptions {
   workflows?: boolean;
   /** Load the repo's project settings + skills. TRUSTED repos only. */
   projectConfig?: boolean;
+  /**
+   * Absolute directory for this session's durable agent memory, or omitted when
+   * the repo has not been vouched for memory. Supplied by the core only after
+   * `MemoryManager.prepare` has proven it (realpath + symlink sweep).
+   *
+   * The harness points its auto-memory feature here. Omitted must mean auto-memory
+   * is pinned OFF, not merely unreachable: the feature loads regardless of
+   * `settingSources`, so leaving it at its default would have the agent quietly
+   * writing to a cwd-keyed directory that dies with the worktree — which is what it
+   * has been doing all along (DECISIONS 2026-07-20).
+   */
+  memoryDir?: string;
 }
 // NOTE: the informed worktree-write opt-in is NOT a harness-tool
 // option — it does not change the model, tools, or permission mode. It is a POLICY
@@ -403,4 +415,18 @@ export interface RepoConfig {
    * default (`SessionManagerOptions.defaultAutoApprove`, on by default).
    */
   autoApprove?: boolean;
+  /**
+   * Durable agent memory for this repo. When on, the session gets a
+   * Condotto-owned memory directory (scoped per repo AND channel) that the SDK's
+   * auto-memory feature reads at session start and the agent writes through the
+   * §4 gate, so knowledge compounds across threads instead of dying with each
+   * worktree. Default (false/undefined) = off, and auto-memory is pinned off in
+   * the harness rather than merely unreachable.
+   *
+   * An operator VOUCH like `trusted`, not a per-session toggle: what one thread
+   * records is loaded into the SYSTEM PROMPT of every later thread in that
+   * channel — above `framing.ts`, and so outside the `user=`-header authority
+   * rule. See DECISIONS 2026-07-20.
+   */
+  memory?: boolean;
 }

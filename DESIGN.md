@@ -447,8 +447,34 @@ the agent cannot talk its way past.
   the deploy path. The hook returns `defer`; the daemon posts Approve / Deny
   and resumes only on an architect's click.
 - **Hard-deny (never, regardless of who asks):** a configurable denylist —
-  e.g. `rm -rf` outside the worktree, credential exfiltration patterns, editing
-  files outside the assigned worktree. Returned as `deny` with a reason.
+  e.g. `rm -rf` outside the worktree, credential exfiltration patterns, linking
+  an out-of-tree path INTO the worktree (`ln -s /` would defeat lexical
+  containment), and editing files outside the assigned worktree. Returned as
+  `deny` with a reason.
+
+**The one named exception to "outside the worktree":** a repo vouched with
+`memory = true` gets a Condotto-owned memory directory, scoped per (repo,
+**channel**), which the agent may read and write. It is not a second worktree and
+does not join the containment root set — it carries its own narrower rules:
+a markdown file **directly** in the root (no subdirectories, so no path can
+traverse through anything planted there), `Write`/`Edit` only (the approval prompt
+renders a diff only for `Edit`, so the other write tools would be content-blind),
+**gated** like any in-worktree write, floored to Bash, and unreachable from a
+subagent, workflow agent, or escaped call.
+
+Because the policy engine is lexical, the **session-manager gate re-proves every
+memory target against the filesystem before the call runs** — refusing symlinks,
+hard links, and anything not really inside the root — and it does so *before* the
+prior-approval short-circuit, so an approved write cannot be redirected through a
+link between the click and the resume. That per-call proof is the boundary; the
+start-of-turn sweep in `MemoryManager.prepare` is hygiene around it, and the Bash
+floor is a convenience rail (a substring match that `~/…` spellings evade). Leaning
+on the sweep alone was the original design and it was wrong: a sweep is a snapshot,
+while the agent keeps acting after it, its shell can plant a link with any program,
+and a *second* session whose repo has memory off carries no memory floor at all. Channel scope is not
+incidental: `roles.scope` is `channel_id | '*'`, so a per-repo store would carry
+content written under one channel's authority into another's. See DECISIONS.md
+2026-07-20.
 
 The mapping from tool call → {allow, gate, deny} is the **policy engine**, and
 it is per-repo and per-thread configurable. Default posture is deny/gate-heavy;
@@ -564,7 +590,11 @@ Keep it boring. One process, one SQLite file, WAL mode.
 
 ```
 repos           id, name, path, default_branch, safe_bash_allowlist(json),
-                deploy_cmd, land_cmd, policy_overrides(json)
+                deploy_cmd, land_cmd, policy_overrides(json), memory
+                  -- memory: operator vouch for durable agent memory (default 0).
+                  --   Backed by a Condotto-owned directory per (repo, channel)
+                  --   under [paths].memory_root — NOT a DB blob, and it
+                  --   deliberately outlives the sessions that wrote it.
 
 surfaces        id ('slack' | 'teams' | …), config(json), enabled
                   -- v1 ships one row: slack
@@ -819,6 +849,20 @@ land/deploy still gate. **Known SDK limitation:** a background workflow sub-agen
 Grep/Bash/Write can be denied by the SDK's task permission UPSTREAM of our gate, so
 those are best-effort (Read/Glob route reliably; the security boundary holds
 regardless).
+
+**Durable agent memory.** A repo vouched with `memory = true` gets a Condotto-owned
+memory directory per **(repo, channel)**, outside every worktree, which the SDK's
+auto-memory feature reads at session start and the agent maintains with ordinary
+`Write`/`Edit` — so knowledge compounds across threads instead of dying with each
+worktree. (Without it the feature is inert: the SDK's default location is keyed on
+the *sanitized cwd*, which for Condotto is a worktree that gets destroyed.) It is
+the one named exception to the confinement boundary and carries its own narrower
+rules — see §4: markdown only, `Write`/`Edit` only, gated, hard-denied to Bash, and
+unreachable from subagents/workflows/escaped calls, over a directory that is
+realpath-proven and symlink-swept every turn. Off pins `autoMemoryEnabled: false`
+rather than merely leaving the directory unreachable. Memory is framed to the agent
+as **notes, not authority**, because it arrives via the system prompt and so sits
+outside the `user=`-header rule that governs every other inbound byte.
 
 **Role delegation & architect auto-approve** (both compose through the existing
 `roleOf`/`isArchitect` read path). **Auto-approve** is the per-thread widening

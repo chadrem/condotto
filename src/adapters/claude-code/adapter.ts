@@ -493,6 +493,23 @@ class ClaudeCodeSession implements HarnessSession {
         // .mcp.json, .claude/) from the worktree — repo content is untrusted
         // input and must not register MCP servers or alter permissions (§4).
         settingSources,
+        // Auto-memory. The `settings` tier is the highest user-controlled layer and
+        // applies regardless of `settingSources`, so this PINS the posture in both
+        // directions rather than relying on a default:
+        //   on  — point it at the core's proven per-(repo, channel) directory. The
+        //         SDK default is keyed on the SANITIZED CWD (sdk.d.ts:6378), i.e. a
+        //         worktree that gets destroyed, so without this memory cannot persist.
+        //   off — explicitly false, which also closes the one path by which a
+        //         TRUSTED repo's checked-in settings could switch memory on. (The SDK
+        //         already ignores `autoMemoryDirectory` from project settings "for
+        //         security", but not `autoMemoryEnabled`.)
+        // The agent writes memory with ordinary Write/Edit, so those calls hit the
+        // hook below and the core's memory rules govern them (spike 2026-07-20).
+        // NOTE: deliberately NOT added to `additionalDirectories` — the spike showed
+        // the write lands without it, so widening the SDK's own scope buys nothing.
+        settings: h?.memoryDir
+          ? { autoMemoryEnabled: true, autoMemoryDirectory: h.memoryDir }
+          : { autoMemoryEnabled: false },
         hooks: { PreToolUse: [{ hooks: [gateHook] }] },
         // Backstop for calls that reach the un-deferrable path (batched gated
         // calls; escaped workflow-agent calls). Runs the core confinement policy

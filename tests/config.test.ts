@@ -159,6 +159,24 @@ path = "/srv/bare"
     );
   });
 
+  test("the per-repo memory vouch parses and defaults off", () => {
+    const cfg = loadConfig(
+      {},
+      tomlFile(`[[repos]]\nname = "remembers"\npath = "/srv/a"\nmemory = true\n\n[[repos]]\nname = "bare"\npath = "/srv/b"\n`),
+    );
+    expect(cfg.repos.find((r) => r.name === "remembers")!.memory).toBe(true);
+    expect(cfg.repos.find((r) => r.name === "bare")!.memory).toBe(false);
+  });
+
+  test("a non-boolean memory fails fast rather than silently disabling memory", () => {
+    // Same reasoning as `trusted`: memory a member's turn writes reaches the
+    // SYSTEM PROMPT of every later thread in the channel, so an operator who
+    // typo'd `memory = "true"` must be told, not silently given the off posture.
+    expect(() => loadConfig({}, tomlFile(`[[repos]]\nname = "r"\npath = "/x"\nmemory = "yes"\n`))).toThrow(
+      /must be a boolean/,
+    );
+  });
+
   test("safe_bash_allowlist defaults to the conservative set and can be overridden", () => {
     const def = loadConfig({}, cfgFile(""));
     expect(def.repos[0]!.safeBashAllowlist).toContain("git status");

@@ -3,6 +3,7 @@ import { basename, join } from "node:path";
 import { loadConfig, loadSlackConfig } from "./core/config";
 import { Store } from "./core/store";
 import { WorktreeManager } from "./core/worktrees";
+import { MemoryManager } from "./core/memory";
 import { SessionManager } from "./core/session-manager";
 import { principalKey } from "./core/types";
 import { VERSION } from "./version";
@@ -134,8 +135,10 @@ async function main(): Promise<void> {
   if (orphans > 0) log(`[daemon] parked ${orphans} session(s) orphaned mid-turn by a previous crash`);
 
   const worktrees = new WorktreeManager(config.worktreesRoot);
+  const memory = new MemoryManager(config.memoryRoot);
   const harness = new ClaudeCodeAdapter();
   const manager = new SessionManager(store, harness, worktrees, log, {
+    memory,
     defaultCostCapUsd: config.defaultCostCapUsd,
     maxConcurrentTurns: config.maxConcurrentTurns,
     defaultModel: config.defaultModel,

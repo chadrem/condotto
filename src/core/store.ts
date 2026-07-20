@@ -81,6 +81,8 @@ export interface RepoRow {
   default_effort: string | null;
   /** Trust flag: 1 loads project config/skills/MCP; 0 stays isolated. */
   trusted: number;
+  /** Durable agent memory: 1 gives the repo a Condotto-owned memory root. */
+  memory: number;
   /**
    * Per-repo default for architect self-approve, seeded onto each new
    * session. 1 = on, 0 = off, null = fall back to the daemon-wide default.
@@ -330,6 +332,16 @@ function migrateV3(db: Database): void {
   db.run(`ALTER TABLE sessions ADD COLUMN workdir TEXT`);
 }
 
+/**
+ * Migration **v4** (durable agent memory): per-repo opt-in for the SDK's
+ * auto-memory feature, backed by a Condotto-owned memory root outside the
+ * worktree (DECISIONS 2026-07-20). Defaults to 0, so every existing repo keeps
+ * exactly its current behaviour — memory is an operator vouch, never inherited.
+ */
+function migrateV4(db: Database): void {
+  db.run(`ALTER TABLE repos ADD COLUMN memory INTEGER NOT NULL DEFAULT 0`);
+}
+
 /** Add `column` to `table` only if absent (idempotent ALTER — SQLite has no
  *  `ADD COLUMN IF NOT EXISTS`). Used by the baseline migration to evolve tables
  *  a pre-runner DB already created. */
@@ -370,7 +382,8 @@ export class Store {
       migrateBaselineV1, // v1: the schema as one idempotent baseline.
       migrateV2, // v2: sessions.cleanup_at for the worktree GC.
       migrateV3, // v3: sessions.workdir for monorepo sub-project sessions.
-      // v4+: append new migrations here. They only ever run on a store already
+      migrateV4, // v4: repos.memory for durable agent memory.
+      // v5+: append new migrations here. They only ever run on a store already
       // at the prior version, so they can be plain forward DDL — no IF NOT EXISTS
       // gymnastics.
     ];
@@ -417,20 +430,21 @@ export class Store {
     defaultEffort?: string;
     trusted?: boolean;
     autoApprove?: boolean;
+    memory?: boolean;
   }): void {
     this.db
       .query(
         `INSERT INTO repos
            (id, name, path, default_branch, safe_bash_allowlist,
             test_cmd, land_cmd, deploy_cmd, cost_cap_usd,
-            default_model, default_effort, trusted, default_auto_approve)
+            default_model, default_effort, trusted, default_auto_approve, memory)
          VALUES ($id, $name, $path, $branch, $allow, $test, $land, $deploy, $cap,
-                 $model, $effort, $trusted, $autoApprove)
+                 $model, $effort, $trusted, $autoApprove, $memory)
          ON CONFLICT(name) DO UPDATE SET
            path = $path, default_branch = $branch, safe_bash_allowlist = $allow,
            test_cmd = $test, land_cmd = $land, deploy_cmd = $deploy, cost_cap_usd = $cap,
            default_model = $model, default_effort = $effort, trusted = $trusted,
-           default_auto_approve = $autoApprove`,
+           default_auto_approve = $autoApprove, memory = $memory`,
       )
       .run({
         id: repo.name,
@@ -447,6 +461,7 @@ export class Store {
         trusted: repo.trusted ? 1 : 0,
         // undefined = leave to the daemon default; only an explicit bool pins it.
         autoApprove: repo.autoApprove === undefined ? null : repo.autoApprove ? 1 : 0,
+        memory: repo.memory ? 1 : 0,
       });
   }
 
@@ -486,7 +501,7 @@ export class Store {
       .query<RawRepoRow, { name: string }>(
         `SELECT id, name, path, default_branch, safe_bash_allowlist,
                 test_cmd, land_cmd, deploy_cmd, cost_cap_usd,
-                default_model, default_effort, trusted, default_auto_approve
+                default_model, default_effort, trusted, default_auto_approve, memory
          FROM repos WHERE name = $name`,
       )
       .get({ name });
@@ -505,6 +520,7 @@ export class Store {
       default_effort: row.default_effort,
       trusted: row.trusted,
       default_auto_approve: row.default_auto_approve,
+      memory: row.memory,
     };
   }
 

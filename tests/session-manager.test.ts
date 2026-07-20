@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { Store } from "../src/core/store";
 import { SessionManager } from "../src/core/session-manager";
 import { WorktreeManager } from "../src/core/worktrees";
+import { MemoryManager } from "../src/core/memory";
 import type { ConversationRef, Principal } from "../src/core/types";
 import { FakeHarness, FakeSurface, FakeCommandRunner } from "./fakes";
 
@@ -69,6 +70,10 @@ function makeWorld(
     worktreeRetentionMs?: number;
     /** fixed daemon start time for deterministic operator-status uptime. */
     startedAt?: number;
+    /** Give the daemon a memory root (absent = memory unavailable daemon-wide). */
+    memoryRoot?: string;
+    /** Vouch the fixture repo for durable memory. */
+    repoMemory?: boolean;
   } = {},
 ): World {
   const s = store ?? new Store(":memory:");
@@ -79,6 +84,7 @@ function makeWorld(
     safeBashAllowlist: ["git status"],
     landCmd: "echo land-ran",
     deployCmd: "echo deploy-ran",
+    memory: opts.repoMemory === true,
   });
   s.setRole("fake:U_ARCH", "architect"); // command authority (assign/stop/approve)
   const surface = new FakeSurface(opts.identityStrength ?? "verified");
@@ -91,6 +97,7 @@ function makeWorld(
     commandRunner: runner,
     worktreeRetentionMs: opts.worktreeRetentionMs,
     startedAt: opts.startedAt,
+    ...(opts.memoryRoot ? { memory: new MemoryManager(opts.memoryRoot) } : {}),
   });
   manager.registerSurface(surface);
   return { store: s, surface, harness, runner, manager, worktreesRoot: root };
@@ -2178,5 +2185,83 @@ describe("worktree cleanup — GC & the park-and-resume invariant", () => {
     const swept = await w.manager.collectWorktrees(Date.now() + 20 * 60 * 1000);
     expect(swept.orphans).toBe(1);
     expect(existsSync(orphan.path)).toBe(false);
+  });
+});
+
+describe("session manager: durable agent memory", () => {
+  const memRoot = () => mkdtempSync(join(tmpdir(), "condotto-mem-"));
+
+  async function assignAndSay(w: World, id: string, channelId: string, text: string): Promise<void> {
+    await w.manager.handleEvent({
+      kind: "command",
+      conv: { surfaceId: "fake", channelId, conversationId: id },
+      author: architect,
+      name: "assign",
+      args: "testrepo",
+    });
+    await w.manager.handleEvent({
+      kind: "message",
+      conv: { surfaceId: "fake", channelId, conversationId: id },
+      author: architect,
+      text,
+      attachments: [],
+    });
+  }
+
+  test("a vouched repo gets a memory directory, and the harness is pointed at it", async () => {
+    const w = makeWorld(undefined, { memoryRoot: memRoot(), repoMemory: true });
+    await assignAndSay(w, "900.000001", "C1", "hello");
+    const dir = w.harness.allTurns.at(-1)?.harness?.memoryDir;
+    expect(dir).toBeTruthy();
+    expect(existsSync(dir!)).toBe(true);
+  });
+
+  test("without the vouch, no memory directory is passed — auto-memory stays pinned off", async () => {
+    const w = makeWorld(undefined, { memoryRoot: memRoot(), repoMemory: false });
+    await assignAndSay(w, "901.000001", "C1", "hello");
+    expect(w.harness.allTurns.at(-1)?.harness?.memoryDir).toBeUndefined();
+  });
+
+  test("with no daemon memory root, the repo vouch alone grants nothing", async () => {
+    // An install that never configured a root must not half-enable the feature.
+    const w = makeWorld(undefined, { repoMemory: true });
+    await assignAndSay(w, "902.000001", "C1", "hello");
+    expect(w.harness.allTurns.at(-1)?.harness?.memoryDir).toBeUndefined();
+  });
+
+  test("memory is scoped per CHANNEL — roles are channel-scoped, so memory must be too", async () => {
+    const w = makeWorld(undefined, { memoryRoot: memRoot(), repoMemory: true });
+    await assignAndSay(w, "903.000001", "C_ALPHA", "hello");
+    const alpha = w.harness.allTurns.at(-1)?.harness?.memoryDir;
+    await assignAndSay(w, "903.000002", "C_BETA", "hello");
+    const beta = w.harness.allTurns.at(-1)?.harness?.memoryDir;
+    expect(alpha).toBeTruthy();
+    expect(beta).toBeTruthy();
+    expect(alpha).not.toBe(beta);
+  });
+
+  test("two threads in the SAME channel share one memory directory — that is the point", async () => {
+    const w = makeWorld(undefined, { memoryRoot: memRoot(), repoMemory: true });
+    await assignAndSay(w, "904.000001", "C1", "hello");
+    const first = w.harness.allTurns.at(-1)?.harness?.memoryDir;
+    await assignAndSay(w, "904.000002", "C1", "hello");
+    expect(w.harness.allTurns.at(-1)?.harness?.memoryDir).toBe(first);
+  });
+
+  test("the system prompt names the memory exception and demotes memory to notes", async () => {
+    const w = makeWorld(undefined, { memoryRoot: memRoot(), repoMemory: true });
+    await assignAndSay(w, "905.000001", "C1", "hello");
+    const system = w.harness.created.at(-1)!.system;
+    // MEMORY.md arrives via the SYSTEM PROMPT, above framing.ts and outside the
+    // `user=`-header authority rule, so the prompt has to say it carries no authority.
+    expect(system).toContain("NOTES, not authority");
+    expect(system).toMatch(/memory directory/i);
+    expect(system).toMatch(/not reachable from the shell|NOT reachable from the shell/i);
+  });
+
+  test("an unvouched repo's prompt says nothing about memory", async () => {
+    const w = makeWorld(undefined, { memoryRoot: memRoot(), repoMemory: false });
+    await assignAndSay(w, "906.000001", "C1", "hello");
+    expect(w.harness.created.at(-1)!.system).not.toMatch(/memory directory/i);
   });
 });
