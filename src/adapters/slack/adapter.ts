@@ -173,6 +173,11 @@ export function parseMentionCommand(
   if (first === "effort" && words.length === 2) return { name: "effort", args: words[1]! };
   if (first === "subagents" && words.length === 2) return { name: "subagents", args: words[1]! };
   if (first === "ultra" && words.length === 2) return { name: "ultra", args: words[1]! };
+  // Strict arity earns its keep here more than anywhere else in this ladder:
+  // "plan" is an ordinary English verb in the leading position, so `@Condotto plan
+  // the migration with me` must fall through to conversation rather than parse as
+  // a malformed command. Exactly two words, nothing else.
+  if (first === "plan" && words.length === 2) return { name: "plan", args: words[1]! };
   // Single whitespace-free token, so `split(/\s+/)` keeps it intact.
   if (first === "auto-approve" && words.length === 2) return { name: "auto-approve", args: words[1]! };
   if (first === "workflows" && words.length === 2) return { name: "workflows", args: words[1]! };
@@ -414,6 +419,7 @@ export class SlackAdapter implements SurfaceAdapter {
             "`@Condotto status`, `@Condotto land`/`deploy` (gated), `@Condotto budget <usd>`.\n" +
             "Tune the implementer: `@Condotto model <opus|sonnet|fable>`, `@Condotto effort <low…max>`, " +
             "`@Condotto subagents on|off`, `@Condotto workflows on|off`, `@Condotto ultra on|off`.\n" +
+            "Plan before building: `@Condotto plan on|off` — I propose a plan and nothing changes until you approve it.\n" +
             "Run one of my skills: `@Condotto /<skill> [args]` — `@Condotto skills` lists them.\n" +
             "Approvals & roles: `@Condotto auto-approve on|off` (skip your own Approve clicks), " +
             "`@Condotto grant @user architect [everywhere]`, `@Condotto revoke @user`.\n" +

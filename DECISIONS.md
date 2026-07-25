@@ -3141,3 +3141,177 @@ memory directory.
    `workflow_write` revocation, approval expiry + the late-click notice + unwedging,
    over-budget still refused, member refusal, no-session, nothing-to-clear, memory
    untouched). 578 pass / 0 fail; `check:ports` and `tsc --noEmit` clean.
+
+## 2026-07-25 — Plan-mode spike: the gate survives `permissionMode:"plan"`, but `ExitPlanMode` does not exist
+
+**Why spike.** The plan-mode design rested on facts read from `sdk.d.ts`, not
+observed, and three of them would change it if wrong. `scripts/spike-plan-mode.ts`
+answers eight questions against the real SDK; its `RESULTS` block is the
+authority, this is the summary.
+
+**Q1 — the ship condition: YES.** Under `permissionMode: "plan"` the `PreToolUse`
+hook still fires, a `defer` still produces `deferred_tool_use`
+(`terminal_reason=tool_deferred`), and the empty-prompt resume still re-drives the
+same call. The whole gate handshake survives the mode, so plan mode could be built
+on the machinery that already exists rather than beside it.
+
+**Q2 — the one that changed the design: `ExitPlanMode` is NOT AVAILABLE.** Not
+disallowed — absent. With the tool removed from `disallowedTools` the model still
+would not emit it, said so itself ("ExitPlanMode isn't available in this session"),
+and its own `ToolSearch` returned "No matching deferred tools found". The headless
+plan protocol is a FILE: the model writes its plan to `plansDirectory`, and that
+`Write` routes through `PreToolUse` carrying the entire plan as
+`tool_input.content` (793-988 chars of markdown, observed across runs).
+
+⇒ **The plan-file write is the approval trigger**, and it is a better one than the
+tool would have been: same proven defer→approve→resume handshake, and the plan
+arrives as an ordinary tool input rather than through a tool whose own schema
+(`ExitPlanModeInput`, `{allowedPrompts?: deprecated} & [k: string]: unknown`)
+declines to name the field carrying it. The `ExitPlanMode` branch is kept in
+`policy.ts` as forward-compat: if a future SDK restores the tool it GATES rather
+than letting the model exit plan mode on its own authority, because the failure
+mode if it comes back unnoticed is silent.
+
+**Q3 — the plan file would have stranded the agent.** The default `plansDirectory`
+is `~/.claude/plans/`, OUTSIDE the worktree, where `evaluateBase` hard-denies with
+no approval possible. The write DOES route through `PreToolUse` (so our policy sees
+it), an ABSOLUTE `plansDirectory` relocates it into the worktree, and a RELATIVE
+one resolves against `cwd` — which for a monorepo session is the sub-project, not
+the worktree root. So the core supplies an absolute path built from
+`worktree_path`, and supplying it is mandatory, not optional.
+
+**Q5 — the suspected silent session fork does not exist.** No
+`conversation_reset` is emitted when a plan is approved and the `session_id` does
+not change, so the opaque handle stays valid. `sdk.d.ts` documents
+`SDKConversationResetMessage` as emitted by "plan-mode exit", and the adapter drops
+unknown message types on the floor, so this was a real data-loss candidate. It
+isn't one. Two planned items were dropped as a result: a `conversation_reset`
+branch in the adapter, and a `planExit` turn option to keep the plan-exit tool in
+context across the resume.
+
+**Q6 — the design condition: YES**, asserted against the file on disk rather than
+the transcript (`src/ledger.ts` gained `subtract`). **A false negative on the way
+there is worth recording:** the first version of the probe deferred the re-driven
+plan write a SECOND time instead of allowing it. The model reads a second defer as
+a refusal — the tool result is literally "The user doesn't want to take this action
+right now. STOP what you are doing and wait" — and ends the turn. The real gate
+allows it via the prior-approval short-circuit, so production was never affected,
+but a probe that models the approve path must actually approve.
+
+**Q7 — plan mode is a genuine second layer.** A `Write` reaches our hook but does
+NOT execute even when we allow it; the SDK refuses above us. Our own policy deny
+therefore is not the sole control — but it stays load-bearing, because it is the
+only layer covering allowlisted bash and the worktree-write opt-in, and because a
+borrowed guarantee is not one we can state.
+
+**Q8 — subagents run under plan mode** and carry `agent_id`, so read-only fan-out
+survives planning. One loose end: probe P8 crashed the CLI subprocess ("Claude Code
+process exited with code 1") at `maxBudgetUsd 0.25` with subagents + xhigh. Not
+reproduced or diagnosed. Re-check before relying on a tight budget with a subagent
+fan-out.
+
+## 2026-07-25 — Plan mode: only genuine reads run, and the plan is the one thing auto-approve never covers
+
+**Why.** Condotto gates consequential calls one at a time. That is the right
+floor, but it leaves no moment where a human reads what the agent INTENDS and says
+yes to that as a unit — an architect either approves thirty writes and discovers
+the shape of the change as it lands, or turns on auto-approve and finds out
+afterwards. `@Condotto plan on|off` adds the missing moment.
+
+**Decision.** Architect-only in both directions, in-thread only (no
+`condotto.toml` key, no per-repo default, `sessions.plan_mode` seeded to 0 — it is
+a per-TASK decision, like the worktree-write opt-in, not a posture an operator sets
+once for a repo). While on: `permissionMode: "plan"` with an absolute
+`plansDirectory` inside the worktree; only genuine reads run; the agent presents a
+plan by writing it; that write gates with concern `plan-approval`; the plan is
+posted into the thread and the Approve/Deny buttons land beneath it; approving
+clears the mode and resumes straight into implementation.
+
+**The rule is "only genuine READS run", NOT "a gate becomes a deny".** The first
+draft said the latter and it was wrong twice, both caught before shipping:
+
+1. `policy.ts` returns **`allow`**, not `gate`, for a confined write when
+   `workflow_write` is on. Subagents stay enabled while planning, so a subagent
+   `Write` would have executed during a session reporting itself read-only — and
+   the escaped (batched) path reaches the same line, so a main-agent write needed
+   only to be batched. Fixed in `evaluateConfined`, which is the ONLY place it can
+   be fixed: `evaluate` dispatches confined calls at its first branch, before the
+   plan-mode collapse ever runs. A plan-mode check that lives only in the collapse
+   is unreachable from a subagent. The first patch was in the wrong place and the
+   test said so.
+2. `evaluateBash` returns **`allow`** for a fully-allowlisted command, and the
+   session manager folds the repo's `test_cmd` into that allowlist — so `bun test`
+   and friends would have run. Allowlisted bash is now DENIED while planning, as a
+   stated decision rather than an oversight: an allowlisted command is still
+   arbitrary repo code that writes artifacts.
+
+Both are pinned by tests, with the pre-plan-mode behaviour as the control so the
+tests fail if the collapse is ever narrowed back to the gate tier.
+
+**The plan is exempt from architect auto-approve** — the second exemption after
+the hard-deny floor, and the only one about consent rather than safety.
+Auto-approve's premise is that an architect driving their own turn has already
+exercised their authority, which holds for an action they could anticipate when
+they sent the message. A plan is not that: it did not exist yet, and approving it
+is a decision about content they have not read. Without the exemption the feature
+is a silent no-op — the turn never defers, the plan is never posted, `plan_mode` is
+never cleared, and the thread wedges in a mode nobody can see with no button to
+leave it. The concern text also names the real escalation: approving grants exactly
+one thing (`plan_mode → 0`) and every action still gates, UNLESS auto-approve is
+on, in which case the single click becomes unattended execution of the whole plan
+— so the warning is appended when it is.
+
+**Ordering, and one race.** Plan mode is read LIVE from the row inside the gate
+closure and checked ABOVE the prior-approval short-circuit. `plan on` expires
+pending approvals, but a turn already in flight creates its approval AFTER that
+sweep, and the short-circuit would then run an ordinary write during plan mode. An
+approval authorizes an action under the posture it was granted in. `plan off`
+expires them too, symmetrically, so no live button survives the mode it belonged
+to. Clearing the mode on approval runs INSIDE the per-session FIFO, immediately
+before the resume: `decideApproval` has already flipped the row, so
+`hasPendingApproval` is false and an inbound message could otherwise land ahead of
+the resume and run a full-privilege turn nobody asked for.
+
+**The plan resume is budget-capped**, like a workflow launch and unlike every
+other approval resume. An ordinary resume re-drives ONE approved action and runs
+uncapped so it cannot be stranded near the budget; a plan resume re-drives one
+write and then implements the entire change, which makes it the most expensive turn
+in the session and the one that most needs a ceiling.
+
+**Consequences and residuals.**
+1. Workflows are PAUSED, not cleared, while planning (`permissionMode` holds one
+   value and plan wins; a launch is gate-tier and denied anyway). The stored column
+   is untouched, so `plan off` restores the thread's posture. Subagents stay on —
+   read-only fan-out is exactly what planning wants.
+2. Memory is paused: its writes are gate-tier, and `autoMemoryEnabled` is pinned on
+   whenever a directory is supplied, so passing one would generate denials all turn.
+3. `land`/`deploy` are refused while planning. They raise their own `condotto:`
+   approval and never touch the gate closure, so they were the one way to change the
+   world from inside a mode whose promise is that nothing runs.
+4. `@Condotto /<skill>` is refused while planning: a skill runs as a full turn, so
+   a `ship`-shaped one would half-run and report a success it never achieved.
+5. `clear` LEAVES plan mode on — posture, not consent. The deliberate counterpoint
+   to `workflow_write`, whose consent was bound to the context being discarded.
+6. `.condotto/` is added to the repo's COMMON `.git/info/exclude` at worktree
+   creation, so plan files can never ride an operator's `land_cmd` doing
+   `git add -A`. Verified that a per-worktree `$GIT_DIR/info/exclude` is silently
+   ignored — git resolves excludes from the common dir.
+7. The plan replaces the generic "⏳ awaiting approval" line as the turn's final
+   message, split across messages if long. `approvalDetail` truncates at 2500 chars,
+   and an architect must never be asked to approve a plan whose tail was silently
+   elided.
+8. Audit events `plan_mode_set` (`{on, via: "command"|"plan_approved",
+   expiredApprovals}`) and `deny(plan-mode)` on refused calls.
+9. Tests (+47): `policy.test.ts` (the read-only collapse, allowlisted bash denied,
+   the `workflow_write` hole on both confined paths, hard-deny reasons preserved,
+   the plan-write shape check incl. traversal, `planTextFrom`);
+   `session-manager.test.ts` (the full loop, the auto-approve exemption, denial →
+   revise, the budget cap, workflows paused/restored, prompt rebuild, `land`
+   refused, approval expiry, `clear` leaving it on, capability refusal);
+   `adapter-claude-code.test.ts` (permission-mode precedence, `plansDirectory`,
+   instructions); `adapter-slack.test.ts` (strict arity — "plan" is an ordinary
+   English verb); `store.test.ts` (v6, no coupling); `worktrees.test.ts` (the
+   exclude, idempotent). 626 pass / 0 fail; `check:ports` and `tsc --noEmit` clean.
+   `bun run smoke:plan` passes end to end against the real SDK: read-only while
+   planning, the ordinary write denied and absent from disk, the plan gated and
+   readable, approval resuming into a real code change.

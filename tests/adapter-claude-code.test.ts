@@ -412,6 +412,50 @@ describe("claude-code adapter: tool posture", () => {
   });
 });
 
+describe("claude-code adapter: plan mode", () => {
+  async function capture(harness?: Record<string, unknown>): Promise<any> {
+    let captured: any;
+    const q = fakeQuery(async function* (opts) {
+      captured = opts;
+      yield { type: "result", subtype: "success", result: "ok", total_cost_usd: 0 };
+    });
+    await collect(new ClaudeCodeAdapter(q), allowGate, harness);
+    return captured;
+  }
+
+  test("plan mode ⇒ permissionMode 'plan', an absolute plansDirectory, and workflow instructions", async () => {
+    const opts = await capture({ planMode: true, plansDir: "/wt/.condotto/plans" });
+    expect(opts.permissionMode).toBe("plan");
+    expect(opts.settings.plansDirectory).toBe("/wt/.condotto/plans");
+    expect(typeof opts.planModeInstructions).toBe("string");
+    expect(opts.planModeInstructions.length).toBeGreaterThan(0);
+  });
+
+  test("plan WINS over workflows — the option holds one value", async () => {
+    const opts = await capture({ planMode: true, plansDir: "/wt/.condotto/plans", workflows: true, subagents: true });
+    expect(opts.permissionMode).toBe("plan");
+  });
+
+  test("plan mode off ⇒ nothing plan-shaped is sent at all", async () => {
+    const opts = await capture({ subagents: true, workflows: false });
+    expect(opts.permissionMode).toBe("default");
+    expect(opts.planModeInstructions).toBeUndefined();
+    expect(opts.settings.plansDirectory).toBeUndefined();
+  });
+
+  test("plansDirectory is omitted when the core supplies no directory", async () => {
+    // Belt to the core's braces: a plan-mode turn without a directory would let the
+    // runtime fall back to ~/.claude/plans, which the policy hard-denies — the
+    // agent could never present a plan. Better to send nothing than a wrong path.
+    const opts = await capture({ planMode: true });
+    expect(opts.settings.plansDirectory).toBeUndefined();
+  });
+
+  test("the adapter advertises the capability, so the core may offer the command", async () => {
+    expect(new ClaudeCodeAdapter(fakeQuery(async function* () {})).capabilities.planMode).toBe(true);
+  });
+});
+
 describe("claude-code adapter: skill shell execution is pinned off", () => {
   async function captureSettings(harness?: Record<string, unknown>): Promise<any> {
     let captured: any;

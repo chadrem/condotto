@@ -131,7 +131,10 @@ function approvalDetail(toolName: string, input: unknown): string | null {
  * — the daemon re-checks the clicker's role server-side (never trusts this).
  */
 export function approvalBlocks(req: ApprovalPrompt): { text: string; blocks: unknown[] } {
-  const detail = approvalDetail(req.toolName, req.toolInput);
+  // `detailPosted` means the core already delivered this call's detail as its own
+  // message (a plan). Rendering it again would show a 2500-char-clipped duplicate
+  // directly beneath the full text the decider just read.
+  const detail = req.detailPosted ? null : approvalDetail(req.toolName, req.toolInput);
   const blocks: unknown[] = [
     {
       type: "section",

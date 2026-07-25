@@ -103,9 +103,43 @@ interface ClaudeCodeHandle {
 // (spike 2026-07-18). Via the hook, reads still auto-allow (confined) for the main
 // agent and the workflow agents alike.
 const ALLOWED_TOOLS = ["Read", "Glob", "Grep", "TodoWrite"];
-// Always removed from context, regardless of capability flags: plan-mode meta,
-// slash commands, and network reads are out of scope for the implementer.
+// Always removed from context, regardless of capability flags: slash commands and
+// network reads are out of scope for the implementer.
+//
+// `ExitPlanMode` stays listed but the entry is now belt-and-braces, not the
+// control: the runtime does not expose a plan-exit tool in a headless session at
+// all (spike 2026-07-25 — the model itself reported "ExitPlanMode isn't available
+// in this session" and its own ToolSearch found nothing), so removing it from this
+// list changes nothing. Condotto's plan mode does not need it: the model presents
+// a plan by WRITING it to `plansDirectory`, and that write is what gates. If a
+// future SDK restores the tool, leave it in NEITHER list — `allowedTools` is an
+// auto-approve list consulted before the callback, so putting it there would
+// shadow-approve the plan exit and the plan would never reach the thread.
 const BASE_DISALLOWED = ["ExitPlanMode", "SlashCommand", "WebFetch", "WebSearch"];
+
+/**
+ * The plan-mode workflow body (SDK `planModeInstructions`). Replaces the runtime's
+ * default code-implementation phases; the CLI still wraps it with its own
+ * read-only preamble and plan protocol.
+ *
+ * SHAPE ONLY, deliberately. What plan mode permits, what approval means, and what
+ * a denial means are Condotto policy and live in `condottoSystemPrompt`, which the
+ * core re-supplies on every resume. Restating the rules here would create a second
+ * copy that ages independently — and the stale one would be this one.
+ */
+const PLAN_MODE_INSTRUCTIONS = [
+  "You are planning inside a chat thread, not a terminal. Someone reads your plan on a phone.",
+  "",
+  "- Investigate as much as you need first: read files, search, and delegate read-only",
+  "  exploration to subagents if you have them.",
+  "- There is no interactive question dialog here. If you need something decided before you",
+  "  can plan, just end your turn with the question and wait for a reply in the thread.",
+  "- Write the plan to your plan file. Keep it short enough to read in one message: what you",
+  "  would change, which files you would touch, and how the change gets verified. Ordered",
+  "  steps, no headers, no preamble. Say what you would NOT do if that is the risky part.",
+  "- Writing the plan file is how you present the plan for approval; it is the one write you",
+  "  can make right now. Do not try to implement anything first.",
+].join("\n");
 // Subagent tools, disabled BY DEFAULT (subagents are architect opt-in). Both the
 // current `Agent` name and the legacy `Task` alias are listed so "subagents off"
 // is genuinely off regardless of which the runtime exposes. Un-disallowed per-turn
@@ -731,7 +765,19 @@ class ClaudeCodeSession implements HarnessSession {
     // the policy confines them — NOT to weaken gating. Hooks outrank permission
     // mode, so main-agent defer/deny and the canUseTool backstop still hold (spike
     // 2026-07-18: diag3/diag4). Non-workflow sessions stay "default" (unchanged).
-    const permissionMode = h?.workflows ? ("bypassPermissions" as const) : ("default" as const);
+    //
+    // Plan mode wins over workflows: the option holds one value, and a workflow
+    // launch is gate-tier, which the policy denies while planning — so
+    // bypassPermissions would be a mode with nothing left to serve. The core
+    // already stops sending `workflows` during plan mode; this ordering is the
+    // belt to that braces. Verified 2026-07-25 (spike Q1): the PreToolUse hook
+    // still fires under "plan" and `defer` still yields deferred_tool_use, so the
+    // whole gate handshake survives the mode.
+    const permissionMode = h?.planMode
+      ? ("plan" as const)
+      : h?.workflows
+        ? ("bypassPermissions" as const)
+        : ("default" as const);
 
     // The canUseTool backstop now runs the CORE policy on an `escaped` call —
     // a call that reached this un-deferrable path instead of the hook (a batched
@@ -836,7 +882,26 @@ class ClaudeCodeSession implements HarnessSession {
           ...(h?.memoryDir
             ? { autoMemoryEnabled: true, autoMemoryDirectory: h.memoryDir }
             : { autoMemoryEnabled: false }),
+          // Where the runtime writes plan files. REQUIRED whenever plan mode is on,
+          // and the core supplies it absolute (see HarnessTurnOptions.plansDir).
+          // Two facts make this load-bearing rather than cosmetic, both verified
+          // 2026-07-25 (spike Q3):
+          //   - the default is `~/.claude/plans/`, OUTSIDE the worktree, which
+          //     policy.ts hard-denies with no approval possible — the agent could
+          //     never present a plan at all;
+          //   - a RELATIVE value resolves against `cwd`, which for a monorepo
+          //     session is the sub-project rather than the worktree root.
+          // The plan file is also how a plan reaches Condotto: the runtime exposes
+          // no plan-exit tool headless, so the model presents a plan by writing it
+          // here, and that write carries the plan as `content` through the hook.
+          ...(h?.planMode && h.plansDir ? { plansDirectory: h.plansDir } : {}),
         },
+        // Replaces the plan-mode reminder's default code-implementation workflow
+        // body; the CLI still wraps it with its own read-only preamble and plan
+        // protocol. Shape only — the RULES of plan mode live in the core system
+        // prompt, which is re-supplied on every resume, so two texts can't drift
+        // into disagreeing about what is allowed.
+        ...(h?.planMode ? { planModeInstructions: PLAN_MODE_INSTRUCTIONS } : {}),
         hooks: { PreToolUse: [{ hooks: [gateHook] }] },
         // Backstop for calls that reach the un-deferrable path (batched gated
         // calls; escaped workflow-agent calls). Runs the core confinement policy
@@ -1227,6 +1292,11 @@ export class ClaudeCodeAdapter implements HarnessAdapter {
     // (that flag is enforced on the model-invocation route only). Verified live,
     // spike 2026-07-25.
     skillInvocation: true,
+    // `permissionMode: "plan"` runs a read-only planning turn, and the PreToolUse
+    // gate survives it intact — the hook still fires and `defer` still yields a
+    // deferred_tool_use (spike 2026-07-25, Q1). The plan reaches Condotto as the
+    // plan-file write, since the runtime exposes no plan-exit tool headless.
+    planMode: true,
   };
 
   async create(opts: { cwd: string; system: string; root?: string }): Promise<HarnessSession> {

@@ -29,7 +29,8 @@
     "smoke:workflows": "bun run scripts/smoke-workflows.ts",
     "smoke:cancel": "bun run scripts/smoke-cancel.ts",
     "smoke:monorepo": "bun run scripts/smoke-monorepo.ts",
-    "smoke:memory": "bun run scripts/smoke-memory.ts"
+    "smoke:memory": "bun run scripts/smoke-memory.ts",
+    "smoke:plan": "bun run scripts/smoke-plan-mode.ts"
   },
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "^0.3.220",

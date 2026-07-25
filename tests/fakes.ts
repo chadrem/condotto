@@ -246,7 +246,9 @@ class FakeHarnessSession implements HarnessSession {
 
 export class FakeHarness implements HarnessAdapter {
   readonly id = "fake-harness";
-  readonly capabilities: HarnessCapabilities = {
+  // Mutable on purpose: a test that wants the "this harness can't do X" refusal
+  // flips a flag here rather than defining a second fake.
+  capabilities: HarnessCapabilities = {
     mechanicalGating: true,
     resumeAfterRestart: true,
     costReporting: true,
@@ -254,6 +256,7 @@ export class FakeHarness implements HarnessAdapter {
     supportedModels: ["opus", "sonnet", "fable"],
     supportedEfforts: ["low", "medium", "high", "xhigh", "max"],
     skillInvocation: true,
+    planMode: true,
   };
 
   sessionSeq = 0;

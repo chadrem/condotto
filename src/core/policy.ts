@@ -38,7 +38,7 @@ export interface PolicyDecision {
   concern?: PolicyConcern;
 }
 
-export type PolicyConcern = "production-data" | "workflow-launch";
+export type PolicyConcern = "production-data" | "workflow-launch" | "plan-approval";
 
 export interface PolicyContext {
   /** Absolute session worktree; filesystem access is confined to it. */
@@ -92,6 +92,41 @@ export interface PolicyContext {
    * See DECISIONS 2026-07-20.
    */
   memoryRoot?: string;
+  /**
+   * The session is in PLAN MODE (`@Condotto plan on`). The agent investigates and
+   * proposes a plan; nothing it proposes runs until an architect approves the plan.
+   *
+   * The rule is "only genuine READS run", not "a gate becomes a deny", and the
+   * difference is load-bearing. Two paths reach `allow` without ever passing
+   * through `gate`, and both would execute during a supposedly read-only session:
+   *   - a fully-allowlisted bash command (`evaluateBash`) — and the session manager
+   *     folds the repo's `test_cmd` into that allowlist, so `bun test` is arbitrary
+   *     repo code that writes artifacts;
+   *   - a confined WRITE under the worktree-write opt-in (`evaluateConfined`), which
+   *     a subagent reaches while subagents stay ON during planning.
+   * So the collapse below is applied to the DECISION, not to the gate tier.
+   *
+   * The one exception is the plan-exit tool itself, which gates — that gate IS the
+   * feature: it is what posts the plan into the thread for Approve/Deny.
+   *
+   * Session-scoped rather than tool-scoped, and it lives here rather than in the
+   * session-manager gate closure because it depends only on the tool and the
+   * context — never on the initiating principal. The principal-dependent widening
+   * (architect auto-approve) stays in the closure, per DESIGN §4.
+   */
+  planMode?: boolean;
+  /**
+   * Absolute directory the harness runtime writes plan files to, when plan mode
+   * is on (the adapter's `settings.plansDirectory`). Always INSIDE the worktree,
+   * so this is not a containment exception — `evaluateBase` confines it like any
+   * other path, and outside plan mode it is an ordinary directory.
+   *
+   * Its only job is to name the one write plan mode permits. The headless plan
+   * protocol has no plan-exit tool (spike 2026-07-25): the model presents a plan
+   * by WRITING it here, and that write carries the whole plan as `content`. So
+   * this write is what gates, and its approval is the plan's approval.
+   */
+  plansDir?: string;
 }
 
 /**
@@ -112,11 +147,39 @@ const ESCAPED_GATED_MSG =
   "This action can't be paused for approval from here. The main agent must do it on its own turn, " +
   "one call at a time, so an architect can approve it.";
 
+/**
+ * Fed back in plan mode. Deliberately tells the agent what to do INSTEAD, because
+ * a bare refusal makes a model retry: the way out of plan mode is to finish
+ * investigating and present the plan, not to try the action again.
+ */
+const PLAN_MODE_MSG =
+  "You're in plan mode: nothing is written and nothing runs, including allowlisted commands and " +
+  "the test suite. Keep reading and investigating, then present your plan — an architect approves " +
+  "it and you implement immediately afterwards.";
+
+/**
+ * The approval headline for a plan. A FIXED string: it is rendered into a Slack
+ * section and into the notification-fallback text, and the plan is model-authored
+ * (injection-reachable) text that is posted as its own message above the buttons.
+ * Keeping the headline constant keeps model content out of both.
+ */
+const PLAN_APPROVAL_SUMMARY = "stop planning and start implementing the plan above";
+
+/** Fed back when the plan-exit tool is reached for outside plan mode. */
+const PLAN_EXIT_OFF_MSG =
+  "You're not in plan mode, so there's no plan to exit — just do the work. Each consequential " +
+  "action is gated normally.";
+
 // Multi-agent meta-tools. Spawning is delegation, not a filesystem
 // or shell action; when the capability is enabled the spawn auto-allows and the
 // subagent's own tool calls are gated (agent_id-tagged) downstream.
 const SUBAGENT_SPAWN_TOOLS = new Set(["Agent", "Task"]);
 const WORKFLOW_SPAWN_TOOL = "Workflow";
+/**
+ * The plan-exit tool. Reachable ONLY in plan mode — the adapter keeps it out of
+ * context otherwise, and the deny below is the backstop for that.
+ */
+const PLAN_EXIT_TOOL = "ExitPlanMode";
 
 // Tool categories. A tool absent from all of these is unknown → gated.
 // `ToolSearch` is side-effect-free: it loads tool SCHEMAS on demand. Allowing
@@ -312,8 +375,35 @@ export function evaluate(call: ToolCall, ctx: PolicyContext): PolicyDecision {
   // already removes these from context when it's off, so the gate branch is a
   // deny-heavy backstop.
   if (SUBAGENT_SPAWN_TOOLS.has(name)) {
+    // Checked BEFORE the plan-mode collapse below: parallel read-only
+    // investigation is exactly what planning is for, and a subagent's own calls
+    // are confined downstream by evaluateConfined regardless of mode.
     return ctx.subagentsEnabled ? allow("delegate to a subagent") : gate("delegate to a subagent");
   }
+
+  // Plan mode: only genuine READS run. See PolicyContext.planMode for why this
+  // collapses the DECISION rather than the gate tier — allowlisted bash and
+  // opt-in confined writes both return `allow` and would otherwise slip through.
+  if (ctx.planMode) {
+    // Forward-compat: a future SDK that restores the plan-exit tool must gate it
+    // rather than let the model exit plan mode on its own authority. It does not
+    // exist headless today (spike 2026-07-25), so this branch is currently dead —
+    // deliberately, because the failure mode if it comes back is silent.
+    if (name === PLAN_EXIT_TOOL) return gate(PLAN_APPROVAL_SUMMARY, "plan-approval");
+    const base = evaluateBase(call, ctx);
+    // A hard boundary keeps its own specific reason (out-of-worktree, credential,
+    // `rm -rf`) — the collapse must never blur "refused outright" into "not yet".
+    if (base.action === "deny") return base;
+    if (base.action === "allow" && (NO_FS_TOOLS.has(name) || READ_TOOLS.has(name))) return base;
+    // THE plan write: how a plan is presented, and therefore the one gate that
+    // exists in plan mode. `base` was already `gate` (an in-worktree write), so
+    // this widens nothing — it only tags the concern so the session manager posts
+    // the plan instead of a generic "approve this write?".
+    if (isPlanWrite(call, ctx)) return gate(PLAN_APPROVAL_SUMMARY, "plan-approval");
+    return deny(PLAN_MODE_MSG);
+  }
+  if (name === PLAN_EXIT_TOOL) return deny(PLAN_EXIT_OFF_MSG);
+
   if (name === WORKFLOW_SPAWN_TOOL) {
     // The workflow LAUNCH is a gated action: even with workflows
     // enabled, an architect approves each launch (it fans out many agents and
@@ -352,6 +442,14 @@ function evaluateConfined(call: ToolCall, ctx: PolicyContext): PolicyDecision {
 
   if (SUBAGENT_SPAWN_TOOLS.has(name) || name === WORKFLOW_SPAWN_TOOL) return deny(denyMsg);
 
+  // Exiting plan mode is a main-agent decision an ARCHITECT approves; a subagent,
+  // workflow agent, or escaped batch call must never be able to end it. This is
+  // already the outcome of the catch-all at the bottom (the tool is in neither
+  // SUBAGENT_READ_TOOLS nor WRITE_TOOLS, so the worktree-write opt-in cannot
+  // reach it either) — stated explicitly so the intent survives the next
+  // refactor rather than holding by accident.
+  if (name === PLAN_EXIT_TOOL) return deny(denyMsg);
+
   // Memory is off-limits to a confined call in BOTH directions, and this is
   // checked BEFORE anything below can allow it. Writes: a durable fact that ends
   // up in a later session's system prompt must come from the main agent, where an
@@ -376,7 +474,18 @@ function evaluateConfined(call: ToolCall, ctx: PolicyContext): PolicyDecision {
   // Worktree-write opt-in: confined WRITES may run without per-call
   // approval (out-of-worktree writes were already hard-denied by `base`). Bash is
   // intentionally excluded — see the docstring; it has no worktree confinement.
-  if (ctx.workflowWrite && WRITE_TOOLS.has(name)) return allow(describeCall(call));
+  //
+  // PLAN MODE turns the opt-in off for the duration, and this is the one place it
+  // can be done. `evaluate` dispatches a confined call here at its FIRST branch,
+  // before the plan-mode collapse ever runs, so a plan-mode check that lives only
+  // there is unreachable from a subagent — and subagents stay enabled while
+  // planning, so the fan-out would write files during a session that reports
+  // itself read-only. The escaped (batched) path lands here too, which is a
+  // main-agent write reaching the same line. The opt-in's consent was "this agent,
+  // which knows what it is doing, may write unattended"; plan mode's contract is
+  // that nothing is written until the plan is approved, and the narrower one wins.
+  if (ctx.workflowWrite && !ctx.planMode && WRITE_TOOLS.has(name)) return allow(describeCall(call));
+  if (ctx.workflowWrite && ctx.planMode && WRITE_TOOLS.has(name)) return deny(PLAN_MODE_MSG);
 
   // Anything else — bash, network, unknown, and every write when the opt-in is off —
   // can't run un-deferred here.
@@ -766,6 +875,97 @@ export function parseWorkflowMeta(script: unknown): { name?: string; description
   return name || description ? { name, description } : null;
 }
 
+/**
+ * Is this the write that presents a plan — a `.md` file DIRECTLY in the session's
+ * plans directory, written with `Write` or `Edit`?
+ *
+ * Shape-checked rather than prefix-matched, for the reason `isMemoryFile` is:
+ * "somewhere under the directory" would let `<plansDir>/../../src/index.ts` be
+ * spelled as a plan and gate as one. Requiring a direct child with a plain
+ * filename means the path cannot traverse anywhere.
+ *
+ * Lower stakes than the memory case, though, and worth saying why: the plans
+ * directory lives INSIDE the worktree, so `evaluateBase` has already confined it,
+ * and outside plan mode this write gates exactly like any other. Getting this
+ * wrong widens nothing — at worst it mislabels an ordinary write as a plan, or
+ * refuses a genuine plan and leaves the agent unable to present one.
+ */
+function isPlanWrite(call: ToolCall, ctx: PolicyContext): boolean {
+  if (!ctx.plansDir) return false;
+  return isPlanPresentation(call, ctx.plansDir, ctx.cwd ?? ctx.worktree);
+}
+
+/**
+ * The same question, asked from outside a policy evaluation: is this call the one
+ * that presents a plan? The session manager needs it on the approval path, where
+ * it has a stored `tool_name` + `tool_input` rather than a `PolicyContext`.
+ *
+ * Exported so there is exactly ONE definition of "this is a plan". Two copies
+ * would drift, and the drift is silent in the worst direction: the gate posts a
+ * plan for approval, the approve path does not recognise it, and the session stays
+ * in plan mode after the architect clicked Approve.
+ */
+export function isPlanPresentation(call: ToolCall, plansDir: string, base?: string): boolean {
+  if (!WRITE_TOOLS.has(call.name)) return false;
+  // Write/Edit only. MultiEdit and NotebookEdit are excluded for the reason the
+  // memory rules exclude them: the approval renders a readable diff for Edit and
+  // not for those, and a plan is a document a human has to be able to read.
+  if (call.name === "MultiEdit" || call.name === "NotebookEdit") return false;
+  const root = resolve(plansDir);
+  const targets = pathTargets(call.input, resolve(base ?? plansDir));
+  if (targets.length === 0) return false;
+  for (const { target } of targets) {
+    // Shape-checked, not prefix-matched: `<plansDir>/../../src/index.ts` is
+    // lexically "under" the directory by prefix but is not a plan file. Requiring
+    // a direct child with a plain filename means the path cannot traverse at all.
+    if (!containedIn(target, root)) return false;
+    const rel = target.slice(root.length + 1);
+    if (!/^[A-Za-z0-9][A-Za-z0-9._-]*\.md$/.test(rel)) return false;
+  }
+  return true;
+}
+
+/** Cap on plan text pulled out of a plan-presenting call, before the surface's own cap. */
+const MAX_PLAN_CHARS = 20_000;
+
+/**
+ * Best-effort pull of the plan text out of the call that presents a plan, so the
+ * core can post it into the thread as the thing an architect approves.
+ *
+ * `content` first: the headless plan protocol presents a plan by WRITING it, so
+ * in practice this is a `Write` and the plan is its content (spike 2026-07-25).
+ * `plan` next, for a future SDK that restores a plan-exit tool — its
+ * `ExitPlanModeInput` is `{ allowedPrompts?: deprecated } & [k: string]: unknown`
+ * and does not name the field, so the longest top-level string is the last
+ * resort. A null must degrade to a readable approval, never to a crash or a blank
+ * message the architect approves sight-unseen.
+ *
+ * Unlike `parseWorkflowMeta`, whitespace is NOT collapsed: this text is a document
+ * a human reads, and its line structure is the readability. It rides the ordinary
+ * reply path (`surface.post` → the adapter's renderer, which escapes before it
+ * linkifies), so it is exactly as safe as any other agent reply — model output has
+ * always been allowed to mint a mention token, and the renderer caps that. Control
+ * characters are stripped because they are never intentional in a plan.
+ */
+export function planTextFrom(input: unknown): string | null {
+  const i = (input ?? {}) as Record<string, unknown>;
+  const named = ["content", "plan", "new_string"]
+    .map((k) => i[k])
+    .find((v): v is string => typeof v === "string" && v.trim().length > 0);
+  const longest = named
+    ? undefined
+    : Object.entries(i)
+        // `file_path` is a path, never the plan — excluding it stops a short plan
+        // from losing to a long worktree path.
+        .filter(([k, v]) => k !== "file_path" && typeof v === "string")
+        .map(([, v]) => v as string)
+        .sort((a, b) => b.length - a.length)[0];
+  const raw = (named ?? longest ?? "").replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]+/g, "");
+  const text = raw.trim();
+  if (text.length === 0) return null;
+  return text.length > MAX_PLAN_CHARS ? text.slice(0, MAX_PLAN_CHARS) + "\n\n… (plan truncated)" : text;
+}
+
 /** Short human-readable description of a tool call, for prompts and audit. */
 export function describeCall(call: ToolCall): string {
   const i = (call.input ?? {}) as Record<string, unknown>;
@@ -779,6 +979,12 @@ export function describeCall(call: ToolCall): string {
     case "Agent":
     case "Task":
       return "delegate to a subagent";
+    // The approval headline reads "I want to ${summary}", so this must be an
+    // English clause. It deliberately carries NO plan text: the summary is
+    // rendered into a Slack section and into the notification fallback, and the
+    // plan itself is posted as its own message above the buttons.
+    case PLAN_EXIT_TOOL:
+      return PLAN_APPROVAL_SUMMARY;
     case "Read":
       return `read ${i.file_path ?? "a file"}`;
     case "Glob":

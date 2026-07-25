@@ -50,6 +50,26 @@ describe("approvalBlocks", () => {
     return (blocks as any[]).find((b) => b.type === "actions");
   }
 
+  test("detailPosted suppresses the detail block — a plan is never rendered twice", () => {
+    // The plan is delivered whole as its own message above the buttons. The
+    // detail block truncates at 2500 chars, so rendering it too would put a
+    // clipped duplicate directly under the text the architect just read.
+    const plan = "1. Rewrite the parser\n2. Add a regression test\n" + "x".repeat(4000);
+    const req = {
+      requestId: "req-plan",
+      toolName: "Write",
+      toolInput: { file_path: "/wt/.condotto/plans/plan-a.md", content: plan },
+      summary: "stop planning and start implementing the plan above",
+    };
+    const withDetail = approvalBlocks(req);
+    const suppressed = approvalBlocks({ ...req, detailPosted: true });
+    const sections = (b: unknown[]) => (b as any[]).filter((x) => x.type === "section");
+    expect(sections(withDetail.blocks).length).toBe(2); // control: an ordinary write shows its detail
+    expect(sections(suppressed.blocks).length).toBe(1); // headline only
+    expect(JSON.stringify(suppressed.blocks)).not.toContain("Rewrite the parser");
+    expect(buttons(suppressed.blocks)).toBeTruthy(); // still decidable
+  });
+
   test("renders two buttons that carry the requestId and the action detail", () => {
     const { blocks, text } = approvalBlocks({
       requestId: "req-1",

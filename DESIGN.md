@@ -962,6 +962,50 @@ Grep/Bash/Write can be denied by the SDK's task permission UPSTREAM of our gate,
 those are best-effort (Read/Glob route reliably; the security boundary holds
 regardless).
 
+**Plan mode.** `@Condotto plan on|off` (architect-only both ways) turns the thread
+read-only: the agent investigates and proposes a plan, an architect approves it,
+and only then does anything change. It is the moment the one-call-at-a-time gate
+never gave anyone — a human reading what the agent INTENDS and saying yes to that
+as a unit. In-thread only: no `condotto.toml` key and no per-repo default, because
+it is a per-task decision, not a posture an operator sets once for a repo (the
+`workflow_write` rule).
+
+The guarantee is **"only genuine reads run"**, and it is stated that way on
+purpose. Expressing it as "a gate becomes a deny" leaks twice, since two paths
+reach `allow` without passing through `gate`: a fully-allowlisted bash command
+(the repo's `test_cmd` is folded into that allowlist, so `bun test` is arbitrary
+repo code) and a confined write under the worktree-write opt-in (reachable by a
+subagent, which stays enabled while planning, and by any batched main-agent
+write). Both are denied while planning; `evaluateConfined` is the only place the
+second can be closed, because `evaluate` dispatches confined calls before the
+plan-mode collapse runs.
+
+The plan itself arrives as a tool call, so it gates like anything else. The
+runtime exposes **no plan-exit tool in a headless session** (spike 2026-07-25 — the
+model reports it as unavailable and its own `ToolSearch` finds nothing); the
+headless protocol is a plan FILE, and that write carries the whole plan as its
+`content`. So Condotto points `plansDirectory` at an absolute path inside the
+worktree (the default `~/.claude/plans/` is out-of-worktree and hard-denied; a
+relative value would resolve against a monorepo sub-project), gates that write with
+concern `plan-approval`, posts the plan as the turn's final message with the
+buttons beneath it, and on approval clears the mode and resumes into
+implementation. `permissionMode: "plan"` is a real second layer — a write reaches
+our hook but does not execute even when we allow it — but the policy deny is what
+makes the guarantee ours rather than borrowed.
+
+**The plan is the one gate architect auto-approve does not cover** — the second
+exemption after the hard-deny floor, and the only one about consent rather than
+safety. Auto-approve's premise is that an architect driving their own turn already
+exercised their authority; that holds for an action they could anticipate when they
+sent the message, and not for a plan, which did not exist yet. Without the
+exemption the feature is a silent no-op: the turn never defers, the plan is never
+posted, and the thread wedges in a mode with no button to leave it. Plan mode is
+read live inside the gate closure and checked above the prior-approval
+short-circuit (an approval authorizes an action under the posture it was granted
+in); the approval resume is budget-capped like a workflow launch, because it
+implements the entire change in one turn; and `land`/`deploy` and skill invocation
+are refused while planning, since both would otherwise route around the mode.
+
 **Architect-invocable skills.** `@Condotto /<name> [args]` runs one of the
 harness's skills as a turn of the session — with its model, effort, budget and the
 same §4 gate (a gated write inside a skill turn defers and re-drives on the
@@ -1232,7 +1276,9 @@ a string or an `AsyncIterable<SDKUserMessage>`. Key `options` (camelCase):
 | `continue` | `boolean` | Resume most-recent session in `cwd` |
 | `forkSession` | `boolean` | Fork instead of continue (new id) |
 | `model` | `string` | Model alias or full name |
-| `permissionMode` | `'default'\|'dontAsk'\|'acceptEdits'\|'bypassPermissions'\|'plan'\|'auto'` | Global permission posture |
+| `permissionMode` | `'default'\|'dontAsk'\|'acceptEdits'\|'bypassPermissions'\|'plan'\|'auto'` | Global permission posture. Condotto uses three: `default`, `bypassPermissions` (workflows on), `plan` (plan mode, which wins over workflows). The `PreToolUse` gate and `defer` survive all three — verified for `plan` 2026-07-25. |
+| `planModeInstructions` | `string` | Replaces the plan-mode reminder's workflow body; the CLI still wraps it with its own read-only preamble. Condotto puts plan SHAPE here and the rules in its core system prompt, so the two can't drift. |
+| `settings.plansDirectory` | `string` | Where plan files are written. Default `~/.claude/plans/` is out-of-worktree and hard-denied; a RELATIVE value resolves against `cwd`, not the worktree root. Condotto always supplies an absolute path under the worktree. |
 | `allowedTools` | `string[]` | Auto-approve (bare names or `mcp__server__*`) |
 | `disallowedTools` | `string[]` | Deny; bare names remove from context, `Bash(rm *)` blocks matching calls |
 | `canUseTool` | `(toolName, input, {signal, suggestions}) => Promise<Result>` | Runtime approval callback (see B4) |

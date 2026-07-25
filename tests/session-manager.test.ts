@@ -6,7 +6,7 @@ import { Store } from "../src/core/store";
 import { SessionManager } from "../src/core/session-manager";
 import { WorktreeManager } from "../src/core/worktrees";
 import { MemoryManager } from "../src/core/memory";
-import type { ConversationRef, Principal } from "../src/core/types";
+import type { ConversationRef, Principal, ToolCall } from "../src/core/types";
 import { MENTION_TOKEN_RE, mentionToken } from "../src/core/types";
 import { FakeHarness, FakeSurface, FakeCommandRunner } from "./fakes";
 
@@ -2848,5 +2848,240 @@ describe("skills — architect invocation", () => {
     await assign(w, "sk10.00001");
     await cmd(w, "sk10.00001", "skills", "", member);
     expect(w.surface.posts.at(-1)!.text).toContain("Only architects");
+  });
+});
+
+describe("plan mode — research first, implement after approval", () => {
+  const assign = (w: World, id: string) =>
+    w.manager.handleEvent({ kind: "command", conv: conv(id), author: architect, name: "assign", args: "testrepo" });
+  const plan = (w: World, id: string, args: string, author: Principal = architect) =>
+    w.manager.handleEvent({ kind: "command", conv: conv(id), author, name: "plan", args });
+  const say = (w: World, id: string, text: string, author: Principal = architect) =>
+    w.manager.handleEvent({ kind: "message", conv: conv(id), author, text, attachments: [] });
+  const decide = (w: World, requestId: string, decision: "approved" | "denied") =>
+    w.manager.handleEvent({ kind: "approval_decision", requestId, decider: architect, decision });
+  const sid = (w: World, id: string) => w.store.getSessionByConversation("fake", id)!.id;
+  /** The write that PRESENTS a plan: a .md directly in the session's plans dir. */
+  const planWrite = (w: World, id: string, content = "1. edit src/x.ts\n2. run the tests"): ToolCall => ({
+    id: "plan-1",
+    name: "Write",
+    input: {
+      file_path: `${w.store.getSessionByConversation("fake", id)!.worktree_path}/.condotto/plans/plan-a.md`,
+      content,
+    },
+  });
+  const codeWrite: ToolCall = { id: "w1", name: "Write", input: { file_path: "src/x.ts", content: "x" } };
+
+  test("`plan on` persists, and the next turn reaches the harness in plan mode", async () => {
+    const w = makeWorld();
+    await assign(w, "pm1.000001");
+    await plan(w, "pm1.000001", "on");
+    expect(w.store.getSession(sid(w, "pm1.000001"))!.plan_mode).toBe(1);
+
+    await say(w, "pm1.000001", "how would you add subtract?");
+    const opts = w.harness.allTurns.at(-1)!.harness!;
+    expect(opts.planMode).toBe(true);
+    expect(opts.plansDir).toContain(".condotto/plans");
+    expect(opts.plansDir!.startsWith(w.store.getSession(sid(w, "pm1.000001"))!.worktree_path)).toBe(true);
+  });
+
+  test("a member cannot toggle plan mode, and the refusal is audited", async () => {
+    const w = makeWorld();
+    await assign(w, "pm2.000001");
+    await plan(w, "pm2.000001", "on", member);
+    expect(w.store.getSession(sid(w, "pm2.000001"))!.plan_mode).toBe(0);
+    expect(w.surface.posts.at(-1)!.text).toContain("Only architects");
+    expect(w.store.listAudit(sid(w, "pm2.000001")).some((a) => a.event === "authz_denied")).toBe(true);
+  });
+
+  test("an ordinary write while planning is DENIED, not deferred — no approval is raised", async () => {
+    const w = makeWorld();
+    await assign(w, "pm3.000001");
+    await plan(w, "pm3.000001", "on");
+    w.harness.scriptTurn([codeWrite]);
+    await say(w, "pm3.000001", "just do it");
+
+    expect(w.harness.executed.length).toBe(0);
+    expect(w.store.hasPendingApproval(sid(w, "pm3.000001"))).toBe(false);
+    expect(w.surface.approvalRequests.length).toBe(0);
+    expect(w.surface.transcript().some((t) => t.includes("plan mode"))).toBe(true);
+  });
+
+  test("auto-approve does NOT let a write through while planning", async () => {
+    // auto_approve defaults on, and this turn is architect-initiated — the exact
+    // combination that would otherwise widen a gate into a silent allow.
+    const w = makeWorld();
+    await assign(w, "pm4.000001");
+    expect(w.store.getSession(sid(w, "pm4.000001"))!.auto_approve).toBe(1);
+    await plan(w, "pm4.000001", "on");
+    w.harness.scriptTurn([codeWrite]);
+    await say(w, "pm4.000001", "go");
+    expect(w.harness.executed.length).toBe(0);
+  });
+
+  test("THE PLAN IS NEVER AUTO-APPROVED, even on an architect's own turn", async () => {
+    // The regression that would make the whole feature a silent no-op: the turn
+    // would never defer, the plan would never be posted, plan_mode would never
+    // clear, and the thread would sit wedged with no button to leave it.
+    const w = makeWorld();
+    await assign(w, "pm5.000001");
+    await plan(w, "pm5.000001", "on");
+    w.harness.scriptTurn([planWrite(w, "pm5.000001")]);
+    await say(w, "pm5.000001", "plan it");
+
+    expect(w.surface.approvalRequests.length).toBe(1);
+    expect(w.store.hasPendingApproval(sid(w, "pm5.000001"))).toBe(true);
+    expect(w.harness.executed.length).toBe(0);
+  });
+
+  test("the plan is posted into the thread in full, above the buttons", async () => {
+    const w = makeWorld();
+    await assign(w, "pm6.000001");
+    await plan(w, "pm6.000001", "on");
+    w.harness.scriptTurn([planWrite(w, "pm6.000001", "1. rewrite the parser\n2. add a regression test")]);
+    await say(w, "pm6.000001", "plan it");
+
+    const transcript = w.surface.transcript().join("\n");
+    expect(transcript).toContain("rewrite the parser");
+    expect(transcript).toContain("add a regression test");
+    expect(transcript).toContain("Here's my plan");
+    // The concern warns that approving starts the work.
+    expect(w.surface.approvalRequests.at(-1)!.req.concern).toContain("implementing");
+    // ...and the approval itself must NOT carry a second, truncated copy of it.
+    expect(w.surface.approvalRequests.at(-1)!.req.detailPosted).toBe(true);
+  });
+
+  test("with auto-approve ON, the plan's concern says the work then runs unattended", async () => {
+    // Approving normally grants exactly one thing — plan mode goes off — and every
+    // action still gates. Auto-approve removes that bound, which changes what is
+    // being consented to, so the prompt has to say so.
+    const w = makeWorld();
+    await assign(w, "pm17.00001");
+    await plan(w, "pm17.00001", "on");
+    w.harness.scriptTurn([planWrite(w, "pm17.00001")]);
+    await say(w, "pm17.00001", "plan it");
+    expect(w.surface.approvalRequests.at(-1)!.req.concern).toContain("auto-approve is ON");
+  });
+
+  test("approving clears plan mode BEFORE the resume runs, and the agent implements", async () => {
+    const w = makeWorld();
+    await assign(w, "pm7.000001");
+    await plan(w, "pm7.000001", "on");
+    w.harness.scriptTurn([planWrite(w, "pm7.000001")]);
+    await say(w, "pm7.000001", "plan it");
+
+    // The resumed turn carries out the plan: the fake re-drives the approved write
+    // and then runs the queued continuation.
+    w.harness.scriptResume([codeWrite]);
+    await decide(w, w.surface.lastApprovalRequestId()!, "approved");
+
+    expect(w.store.getSession(sid(w, "pm7.000001"))!.plan_mode).toBe(0);
+    expect(w.harness.executed.map((c) => c.name)).toEqual(["Write", "Write"]); // plan file, then the code
+    expect(w.harness.allTurns.at(-1)!.harness!.planMode).toBeUndefined();
+    expect(w.store.listAudit(sid(w, "pm7.000001")).some((a) => a.event === "plan_mode_set")).toBe(true);
+  });
+
+  test("denying a plan keeps plan mode on and tells the agent to revise, not to stop", async () => {
+    const w = makeWorld();
+    await assign(w, "pm8.000001");
+    await plan(w, "pm8.000001", "on");
+    w.harness.scriptTurn([planWrite(w, "pm8.000001")]);
+    await say(w, "pm8.000001", "plan it");
+    await decide(w, w.surface.lastApprovalRequestId()!, "denied");
+
+    expect(w.store.getSession(sid(w, "pm8.000001"))!.plan_mode).toBe(1);
+    expect(w.harness.executed.length).toBe(0);
+    expect(w.surface.transcript().join("\n")).toContain("revised plan");
+  });
+
+  test("the approved-plan resume is budget-capped, unlike an ordinary approved action", async () => {
+    // A plan resume implements the whole change in one turn, so it is the
+    // runaway-capable shape — not the single-approved-action shape that runs
+    // uncapped so it can't be stranded near the budget.
+    const w = makeWorld(undefined, { costCap: 10 });
+    await assign(w, "pm9.000001");
+    await plan(w, "pm9.000001", "on");
+    w.harness.scriptTurn([planWrite(w, "pm9.000001")]);
+    await say(w, "pm9.000001", "plan it");
+    await decide(w, w.surface.lastApprovalRequestId()!, "approved");
+    expect(typeof w.harness.allTurns.at(-1)!.budgetUsd).toBe("number");
+  });
+
+  test("workflows are PAUSED while planning, and `plan off` restores them", async () => {
+    const w = makeWorld();
+    await assign(w, "pm10.00001");
+    await plan(w, "pm10.00001", "on");
+    await say(w, "pm10.00001", "look around");
+    expect(w.harness.allTurns.at(-1)!.harness!.workflows).toBe(false);
+    // The stored posture is untouched, which is what makes `plan off` a restore.
+    expect(w.store.getSession(sid(w, "pm10.00001"))!.workflows).toBe(1);
+
+    await plan(w, "pm10.00001", "off");
+    await say(w, "pm10.00001", "carry on");
+    expect(w.harness.allTurns.at(-1)!.harness!.workflows).toBe(true);
+  });
+
+  test("toggling plan mode rebuilds the system prompt", async () => {
+    const w = makeWorld();
+    await assign(w, "pm11.00001");
+    await say(w, "pm11.00001", "hello");
+    await plan(w, "pm11.00001", "on");
+    await say(w, "pm11.00001", "how would you do it?");
+    expect(w.harness.resumed.at(-1)!.system).toContain("PLAN MODE");
+    expect(w.harness.resumed.at(-1)!.system).not.toContain("Propose these actions normally");
+  });
+
+  test("`land` is refused while planning — it would otherwise bypass the mode entirely", async () => {
+    const w = makeWorld();
+    await assign(w, "pm12.00001");
+    await plan(w, "pm12.00001", "on");
+    await w.manager.handleEvent({ kind: "command", conv: conv("pm12.00001"), author: architect, name: "land", args: "" });
+    expect(w.surface.posts.at(-1)!.text).toContain("plan mode");
+    expect(w.runner.calls.length).toBe(0);
+  });
+
+  test("toggling plan mode expires a pending approval from the posture it left", async () => {
+    const w = makeWorld();
+    await assign(w, "pm13.00001");
+    w.harness.scriptTurn([codeWrite]);
+    // A MEMBER's turn, so the write genuinely defers rather than riding the
+    // architect auto-approve that is on by default.
+    await say(w, "pm13.00001", "write it", member);
+    const requestId = w.surface.lastApprovalRequestId()!;
+    expect(w.store.hasPendingApproval(sid(w, "pm13.00001"))).toBe(true);
+
+    await plan(w, "pm13.00001", "on");
+    expect(w.store.getApproval(requestId)!.decision).toBe("expired");
+    // A late click on it must not run the write during plan mode.
+    await decide(w, requestId, "approved");
+    expect(w.harness.executed.length).toBe(0);
+  });
+
+  test("`clear` leaves plan mode ON — it is posture, not consent", async () => {
+    // The deliberate counterpoint to workflow_write, which `clear` revokes: that
+    // opt-in's consent was bound to the context being discarded, while plan mode
+    // is a standing instruction about how this thread works.
+    const w = makeWorld();
+    await assign(w, "pm14.00001");
+    await plan(w, "pm14.00001", "on");
+    await w.manager.handleEvent({ kind: "command", conv: conv("pm14.00001"), author: architect, name: "clear", args: "" });
+    expect(w.store.getSession(sid(w, "pm14.00001"))!.plan_mode).toBe(1);
+  });
+
+  test("a harness that cannot plan refuses the command outright", async () => {
+    const w = makeWorld();
+    await assign(w, "pm15.00001");
+    w.harness.capabilities = { ...w.harness.capabilities, planMode: false };
+    await plan(w, "pm15.00001", "on");
+    expect(w.store.getSession(sid(w, "pm15.00001"))!.plan_mode).toBe(0);
+    expect(w.surface.posts.at(-1)!.text).toContain("can't run in plan mode");
+  });
+
+  test("plan mode shows up in the settings banner when a parked session comes back", async () => {
+    const w = makeWorld();
+    await assign(w, "pm16.00001");
+    await plan(w, "pm16.00001", "on");
+    await w.manager.handleEvent({ kind: "command", conv: conv("pm16.00001"), author: architect, name: "help", args: "" });
+    expect(w.surface.posts.at(-1)!.text).toContain("plan mode on");
   });
 });

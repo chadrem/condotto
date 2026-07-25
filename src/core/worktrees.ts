@@ -1,6 +1,10 @@
 import { mkdir, realpath, rm, stat } from "node:fs/promises";
-import { existsSync, readdirSync, statSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import { join, resolve, sep } from "node:path";
+
+/** The daemon's per-worktree scratch directory, kept out of the repo's index. */
+const CONDOTTO_EXCLUDE_ENTRY = "/.condotto/";
+const CONDOTTO_EXCLUDE_BLOCK = `# condotto: daemon scratch (plan files) — never part of the repo\n${CONDOTTO_EXCLUDE_ENTRY}\n`;
 
 // Worktree manager: one git worktree per session, at a stable absolute path.
 // The harness keys session storage by encoded cwd — a moved worktree loses the
@@ -158,7 +162,38 @@ export class WorktreeManager {
     if (!res.ok) {
       throw new Error(`git worktree add failed for ${opts.repoPath}: ${res.out}`);
     }
+    await this.excludeCondottoDir(opts.repoPath);
     return { path, branch };
+  }
+
+  /**
+   * Keep `.condotto/` — the daemon's per-worktree scratch, currently plan-mode
+   * plan files — out of `git status`, so it can never ride an operator's
+   * `land_cmd` doing `git add -A` into a real commit.
+   *
+   * Written to the repo's COMMON `.git/info/exclude`, not a per-worktree one:
+   * verified 2026-07-25 that git resolves excludes from the common dir, so a
+   * `$GIT_DIR/info/exclude` inside a linked worktree is silently ignored. This is
+   * the least invasive option that works — `info/exclude` is untracked and local,
+   * so it never reaches the operator's colleagues, unlike editing `.gitignore`.
+   *
+   * Idempotent, and never fatal: a worktree without the entry is untidy, not
+   * broken, and failing an assign over it would be the worse trade.
+   */
+  private async excludeCondottoDir(repoPath: string): Promise<void> {
+    try {
+      const dir = await git(["-C", repoPath, "rev-parse", "--path-format=absolute", "--git-common-dir"]);
+      if (!dir.ok) return;
+      const infoDir = join(dir.out.trim(), "info");
+      const file = join(infoDir, "exclude");
+      const existing = existsSync(file) ? readFileSync(file, "utf8") : "";
+      if (existing.includes(CONDOTTO_EXCLUDE_ENTRY)) return;
+      await mkdir(infoDir, { recursive: true });
+      const sep = existing.length > 0 && !existing.endsWith("\n") ? "\n" : "";
+      writeFileSync(file, `${existing}${sep}${CONDOTTO_EXCLUDE_BLOCK}`);
+    } catch {
+      // Best-effort hygiene only.
+    }
   }
 
   /** Session-id directories currently under the worktree root — each name IS a

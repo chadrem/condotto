@@ -425,13 +425,18 @@ you can assign):
 3. **Approve the write.** When it goes to edit a file or run non-allowlisted
    shell, an architect gets an **Approve / Deny** prompt (or, with auto-approve
    on, an architect's own turn just proceeds). Members can watch but can't decide.
-4. **Ship it:** `@Condotto land` (and `@Condotto deploy`) run the repo's configured
+4. **Or agree the shape first:** `@Condotto plan on`. The thread goes read-only —
+   the agent investigates and writes up a plan, and nothing changes until you
+   approve it. You get one decision about the whole change instead of thirty
+   decisions about individual writes. Approve and it implements straight away;
+   deny and say what you'd rather, and it re-plans. `@Condotto plan off` to leave.
+5. **Ship it:** `@Condotto land` (and `@Condotto deploy`) run the repo's configured
    command **through the gate** — no-ops until you wire them to something real.
-5. **Start over without losing the work:** `@Condotto clear` forgets the
+6. **Start over without losing the work:** `@Condotto clear` forgets the
    conversation and nothing else. Same worktree, same branch, same uncommitted
    changes, same settings. Reach for it when a long thread has drifted, or when
    the agent is stuck on an idea it won't let go of.
-6. **End it:** `@Condotto stop` keeps the worktree for later; `@Condotto stop clean`
+7. **End it:** `@Condotto stop` keeps the worktree for later; `@Condotto stop clean`
    schedules it for teardown.
 
 ---
@@ -469,6 +474,7 @@ sessions themselves, an architect `@Condotto grant`s them architect rights (see
 | `@Condotto subagents on\|off` | architect | Read-only parallel exploration fan-out (on by default). |
 | `@Condotto workflows on\|off` | architect | Multi-agent Workflow tool, gated + confined (on by default). |
 | `@Condotto workflows write on\|off` | architect | Let confined workflow/subagent calls write **in the worktree** without a per-write click (out-of-worktree/credentials still refused). Off by default, and the only one of these not settable in `condotto.toml`. |
+| `@Condotto plan on\|off` | architect | Research first. I investigate and write up a plan, and nothing is written or run — not even the test suite — until you approve it. Approving takes me straight into implementing; denying sends me back to revise. |
 | `@Condotto ultra on\|off` | architect | Preset: `xhigh` effort + subagents + workflows — the shipped default, so this is mainly how you get back after dialing down. `off` drops subagents/workflows; set effort separately. |
 | `@Condotto /<skill> [args]` | architect | Run one of the harness's skills — including one marked `disable-model-invocation`, which the agent itself cannot invoke. Mention me first: a message that *begins* with `/` is eaten by Slack. |
 | `@Condotto skills` | architect | List the skills this thread can run, and which file each one is. |

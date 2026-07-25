@@ -189,6 +189,32 @@ describe("store sessions", () => {
     expect(store.getSession("s2")!.auto_approve).toBe(0);
   });
 
+  test("plan_mode defaults off, round-trips, and is not seedable at creation", () => {
+    const store = memoryStore();
+    store.createSession({ ...baseSession, id: "s1", conversation_id: "1.1" });
+    expect(store.getSession("s1")!.plan_mode).toBe(0);
+    store.setSessionPlanMode("s1", true);
+    expect(store.getSession("s1")!.plan_mode).toBe(1);
+    store.setSessionPlanMode("s1", false);
+    expect(store.getSession("s1")!.plan_mode).toBe(0);
+    // In-thread only: `createSession` does not accept it, so no config path can
+    // seed a thread into plan mode (the `workflow_write` rule, same reasoning).
+    expect("plan_mode" in ({ ...baseSession } as Record<string, unknown>)).toBe(false);
+  });
+
+  test("plan_mode couples to nothing — toggling it leaves the rest of the posture alone", () => {
+    const store = memoryStore();
+    store.createSession({ ...baseSession, id: "s1", conversation_id: "1.1" });
+    store.setSessionWorkflows("s1", true);
+    store.setSessionWorkflowWrite("s1", true);
+    store.setSessionPlanMode("s1", true);
+    const on = store.getSession("s1")!;
+    // Workflows are PAUSED at turn time, not cleared, so `plan off` restores them.
+    expect(on.workflows).toBe(1);
+    expect(on.workflow_write).toBe(1);
+    expect(on.subagents).toBe(1);
+  });
+
   test("workflow_write defaults off and turning workflows off clears it (invariant)", () => {
     const store = memoryStore();
     store.createSession({ ...baseSession, id: "s1", conversation_id: "1.1" });
@@ -542,7 +568,7 @@ describe("store schema migrations", () => {
   // The current schema version == the number of migrations in the runner. Bump
   // this constant in lockstep whenever a migration is appended — the tests below
   // pin the runner's behavior to it.
-  const CURRENT_SCHEMA_VERSION = 5;
+  const CURRENT_SCHEMA_VERSION = 6;
 
   const migPath = (name: string): string => join(mkdtempSync(join(tmpdir(), "condotto-mig-")), name);
   const userVersion = (path: string): number => {
@@ -593,6 +619,7 @@ describe("store schema migrations", () => {
     raw.run("ALTER TABLE repos DROP COLUMN memory"); // v4
     raw.run("ALTER TABLE repos DROP COLUMN default_subagents"); // v5
     raw.run("ALTER TABLE repos DROP COLUMN default_workflows"); // v5
+    raw.run("ALTER TABLE sessions DROP COLUMN plan_mode"); // v6
     raw.run("PRAGMA user_version = 0"); // rewind the stamp to the pre-runner state
     raw.close();
     expect(userVersion(path)).toBe(0);

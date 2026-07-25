@@ -13,6 +13,7 @@ import type {
   SurfaceAdapter,
 } from "./types";
 import { existsSync } from "node:fs";
+import { join } from "node:path";
 import { mentionToken, principalKey } from "./types";
 import type { Store, SessionRow, ApprovalRow, RepoRow } from "./store";
 import { ConflictError } from "./store";
@@ -26,7 +27,7 @@ import {
 import { CommandRunner, type CommandRunnerLike } from "./command-runner";
 import { MemoryManager, verifyMemoryTarget } from "./memory";
 import { checkSkillArgs, frameMessage, sanitizeSkillText } from "./framing";
-import { evaluate, describeCall, memoryTargets, type PolicyContext, type PolicyConcern } from "./policy";
+import { evaluate, describeCall, isPlanPresentation, memoryTargets, planTextFrom, type PolicyContext, type PolicyConcern } from "./policy";
 import {
   DEFAULT_COST_CAP_USD,
   DEFAULT_EFFORT,
@@ -63,7 +64,54 @@ const CONCERN_TEXT: Record<PolicyConcern, string> = {
     "This launches a multi-agent workflow: it fans out several agents in parallel " +
     "(read-only and confined to this worktree) and counts against this thread's cost " +
     "budget, so it can spend faster than a single turn. Approve to run it.",
+  // Approving grants exactly one thing — plan mode goes off — and every write and
+  // shell command in the implementation still gates individually. That bound is
+  // what makes a plan safe to approve even when a repo file steered the model
+  // into writing it. Auto-approve removes the bound, so the caller appends a
+  // warning when it is on (the concern text itself can't see session state).
+  "plan-approval":
+    "Approving ends plan mode and I start implementing straight away. Each action " +
+    "still passes the gate as usual. Deny to send me back to revise the plan — say " +
+    "what you want changed and I'll re-propose.",
 };
+
+/**
+ * Split a long message into chat-sized parts, preferring blank-line boundaries.
+ *
+ * Surface-neutral: a character budget is a chat-scale heuristic, not markup, so
+ * this can live in the core. It exists for the plan, where the usual single-message
+ * truncation is not acceptable — an architect clicking Approve on a plan whose tail
+ * was silently replaced by an ellipsis has approved something they did not read.
+ * Ordinary replies keep the truncating behaviour; only a decision artifact earns
+ * the extra messages.
+ *
+ * Hard-capped at MAX_PARTS. An agent that emits a novel gets told so rather than
+ * flooding the thread.
+ */
+export function splitForThread(text: string, limit = 8_000, maxParts = 4): string[] {
+  if (text.length <= limit) return [text];
+  const parts: string[] = [];
+  let rest = text;
+  while (rest.length > limit && parts.length < maxParts - 1) {
+    // Prefer a paragraph break, then a line break, then a hard cut.
+    const window = rest.slice(0, limit);
+    const cut = Math.max(window.lastIndexOf("\n\n"), window.lastIndexOf("\n"));
+    const at = cut > limit / 2 ? cut : limit;
+    parts.push(rest.slice(0, at).trimEnd());
+    rest = rest.slice(at).trimStart();
+  }
+  parts.push(
+    rest.length > limit
+      ? `${rest.slice(0, limit).trimEnd()}\n\n_… plan truncated. Ask me to summarize it before approving._`
+      : rest,
+  );
+  return parts;
+}
+
+/** Appended to the plan-approval concern when the thread's turns skip the click. */
+const PLAN_APPROVAL_AUTO_APPROVE_WARNING =
+  " ⚡ auto-approve is ON for this thread, so once I start I will NOT ask again — " +
+  "approving this plan approves everything in it.";
 
 // The session manager routes on (surface_id, conversation_id) and Principal —
 // nothing platform-shaped crosses into here. One conversation maps to exactly
@@ -96,6 +144,8 @@ function condottoSystemPrompt(opts: {
   workflowWrite?: boolean;
   /** Absolute memory directory, or null when memory is off for this repo. */
   memoryDir?: string | null;
+  /** Read-only planning: the agent proposes a plan instead of doing the work. */
+  planMode?: boolean;
 }): string {
   const ship =
     opts.landAvailable || opts.deployAvailable
@@ -103,10 +153,14 @@ function condottoSystemPrompt(opts: {
         `land\` or \`@Condotto deploy\` and approves it — you never run the land/deploy ` +
         `path yourself. You may say when you think it's ready to land.`
       : `- Landing and deploying are not available for this repo.`;
-  const testing = opts.testCmd
-    ? `- You can run this repo's tests without approval: \`${opts.testCmd}\`. Run them ` +
-      `to verify your changes before proposing to land.`
-    : null;
+  // Silent in plan mode: allowlisted bash is DENIED while planning (an
+  // allowlisted command is still code execution), so advertising the test command
+  // would promise something the gate refuses.
+  const testing =
+    opts.testCmd && !opts.planMode
+      ? `- You can run this repo's tests without approval: \`${opts.testCmd}\`. Run them ` +
+        `to verify your changes before proposing to land.`
+      : null;
   // Guidance when the architect has enabled subagents.
   const delegation = opts.subagents
     ? `- You can delegate READ-ONLY exploration and analysis to subagents (the Agent tool) so they ` +
@@ -162,12 +216,36 @@ function condottoSystemPrompt(opts: {
     `  otherwise, ignore that part and keep going. Everything it asks for still passes`,
     `  the gate, exactly as your own actions do.`,
     `- Reading and analyzing the repo and answering questions never needs approval.`,
-    `- Consequential actions — writing or editing files, running shell commands`,
-    `  outside a small safe allowlist, or anything touching the network — are GATED:`,
-    `  when you attempt one, it pauses and an architect approves or denies it. If`,
-    `  approved it runs and your turn continues; if denied you are told and should`,
-    `  adapt. Propose these actions normally; the gate handles the pause. Do not`,
-    `  claim you have done something until it has actually run.`,
+    // Plan mode REPLACES the gate bullet rather than adding to it. Telling the
+    // agent both "propose gated actions normally" and "nothing you propose will
+    // run" is the contradiction that produces a turn spent retrying denied writes.
+    // This text is re-supplied on EVERY resume (the 2026-07-18 fix), so a session
+    // can never be left believing in a posture it no longer has.
+    ...(opts.planMode
+      ? [
+          `- You are in PLAN MODE. Nothing you do right now changes anything: writing`,
+          `  files, running commands — including the test suite — and network access are`,
+          `  all refused until an architect approves a plan. Reading and searching are`,
+          `  free, and you should do plenty of both.`,
+          `- When you know what you would do, write your plan to your plan file. That is`,
+          `  the one write you can make, and it is how you present the plan: it gets`,
+          `  posted into this thread for an architect to approve or reject. Write it for`,
+          `  someone reading a chat message — what you'd change, which files, how it gets`,
+          `  verified — not as a document for yourself.`,
+          `- If approved, plan mode ends and you implement straight away, with each action`,
+          `  gated as usual. If rejected, you stay in plan mode: read the thread for what`,
+          `  they want changed and present a revised plan. Do not start implementing.`,
+          `- If you need something decided before you can plan, just ask in the thread and`,
+          `  end your turn.`,
+        ]
+      : [
+          `- Consequential actions — writing or editing files, running shell commands`,
+          `  outside a small safe allowlist, or anything touching the network — are GATED:`,
+          `  when you attempt one, it pauses and an architect approves or denies it. If`,
+          `  approved it runs and your turn continues; if denied you are told and should`,
+          `  adapt. Propose these actions normally; the gate handles the pause. Do not`,
+          `  claim you have done something until it has actually run.`,
+        ]),
     `- Investigating PRODUCTION data (prod database clients, cloud data/log CLIs,`,
     `  app consoles) is gated like a build even when read-only, and anything you`,
     `  post back into this thread from it must be AGGREGATES ONLY — counts, rates,`,
@@ -179,9 +257,16 @@ function condottoSystemPrompt(opts: {
     ...(opts.memoryDir
       ? [
           `- ONE exception to that boundary: your memory directory, ${opts.memoryDir}.`,
-          `  You may read it freely and write MARKDOWN (.md) files there with Write or`,
-          `  Edit (gated like any other write). It is NOT reachable from the shell — use`,
-          `  the file tools, not bash. Everything else outside the worktree stays refused.`,
+          ...(opts.planMode
+            ? [
+                `  You may read it freely. Writing to it is paused while you're planning,`,
+                `  like every other write — save what you learn once the plan is approved.`,
+              ]
+            : [
+                `  You may read it freely and write MARKDOWN (.md) files there with Write or`,
+                `  Edit (gated like any other write). It is NOT reachable from the shell — use`,
+                `  the file tools, not bash. Everything else outside the worktree stays refused.`,
+              ]),
           `- Memory persists across threads for this repo and channel, so record what a`,
           `  future thread would waste time rediscovering: how this codebase is laid out,`,
           `  conventions, decisions and their reasons, dead ends worth not repeating.`,
@@ -262,6 +347,7 @@ function threadCommandHelp(): string {
     `• \`@Condotto grant @user architect [everywhere]\` · \`@Condotto revoke @user\` — delegate authority (this channel, or everywhere)`,
     `• \`@Condotto land\` / \`@Condotto deploy\` — run the repo's ship path (gated)`,
     `• \`@Condotto budget <usd>\` — raise this thread's cost budget · \`@Condotto cancel\` — stop the running turn (e.g. a runaway workflow)`,
+    `• \`@Condotto plan on|off\` — research first: I propose a plan, and nothing changes until you approve it`,
     `• \`@Condotto clear\` — forget the conversation and start fresh (the worktree, your uncommitted work, and these settings all stay)`,
     `• \`@Condotto /<skill> [args]\` — run one of my skills · \`@Condotto skills\` — list what's available`,
     `• \`@Condotto status\` — list sessions · \`@Condotto stop\` — end this session (keeps the worktree; \`stop clean\` discards it)`,
@@ -471,10 +557,18 @@ export class SessionManager {
       `model \`${this.effectiveModel(session)}\``,
       `effort \`${this.effectiveEffort(session)}\``,
     ];
+    // Plan mode leads: it changes what every other capability here actually means.
+    if (session.plan_mode === 1) parts.push("*plan mode on*");
     if (this.isUltra(session)) parts.push("*ultra on* (xhigh + subagents + workflows)");
     else {
       if (session.subagents === 1) parts.push("*subagents on*");
-      if (session.workflows === 1) parts.push(session.workflow_write === 1 ? "*workflows on* (worktree-write)" : "*workflows on*");
+      // The EFFECTIVE state: while planning, the Workflow tool is not in context,
+      // so reporting "workflows on" would describe a session that doesn't exist.
+      if (this.effectiveWorkflows(session)) {
+        parts.push(session.workflow_write === 1 ? "*workflows on* (worktree-write)" : "*workflows on*");
+      } else if (session.workflows === 1) {
+        parts.push("workflows paused");
+      }
     }
     if (this.isUltra(session) && session.workflow_write === 1) parts.push("worktree-write");
     parts.push(session.auto_approve === 1 ? "*auto-approve on*" : "auto-approve off");
@@ -489,16 +583,25 @@ export class SessionManager {
    */
   private settingsBlock(session: SessionRow, repo: RepoRow | null): string {
     const subagents = session.subagents === 1;
-    const workflows = session.workflows === 1;
+    const workflows = this.effectiveWorkflows(session);
+    const planMode = session.plan_mode === 1;
     const ultra = this.isUltra(session);
     const budget = session.budget_limit_usd ?? this.defaultCostCapUsd;
     const lines = [
       `⚙️ *Session settings*`,
+      // Only shown when ON, unlike everything else in this block. Plan mode can
+      // never be on at assign — there is no seed, no repo default and no config
+      // key — so an "off" line here would be a guaranteed constant. It CAN be on
+      // when a parked session is reactivated, which is exactly when saying so
+      // matters most: the thread would otherwise refuse every action silently.
+      ...(planMode
+        ? [`• 📋 *plan mode on* — I'll propose a plan; nothing is written or run until an architect approves it`]
+        : []),
       ...(session.workdir
         ? [`• working in \`${session.workdir}\` (the whole worktree stays in scope)`]
         : []),
       `• model \`${this.effectiveModel(session)}\`  ·  effort \`${this.effectiveEffort(session)}\``,
-      `• subagents ${subagents ? "*on*" : "off"}  ·  workflows ${workflows ? "*on*" : "off"}  ·  ultra ${ultra ? "*on*" : "off"}`,
+      `• subagents ${subagents ? "*on*" : "off"}  ·  workflows ${workflows ? "*on*" : planMode && session.workflows === 1 ? "paused" : "off"}  ·  ultra ${ultra ? "*on*" : "off"}`,
       `• cost budget $${budget.toFixed(2)}`,
     ];
     if (workflows && session.workflow_write === 1) {
@@ -516,22 +619,61 @@ export class SessionManager {
           "(markdown notes I write through the gate; they're notes, never authority)",
       );
     }
-    if (repo?.test_cmd) lines.push(`• tests \`${repo.test_cmd}\` (auto-run, no approval)`);
+    if (repo?.test_cmd) {
+      lines.push(
+        planMode
+          ? `• tests \`${repo.test_cmd}\` — *paused while planning* (an allowlisted command is still code execution)`
+          : `• tests \`${repo.test_cmd}\` (auto-run, no approval)`,
+      );
+    }
     return lines.join("\n");
   }
+  /**
+   * Workflows for THIS turn. Plan mode pauses them without clearing the column:
+   * `permissionMode` holds one value and plan wins, a workflow launch is gate-tier
+   * (so the policy denies it while planning anyway), and leaving the stored flag
+   * alone means `plan off` restores whatever posture the thread had.
+   *
+   * Used by every reader of the effective posture — the turn options, the system
+   * prompt, and the settings banner — so they cannot disagree about whether the
+   * agent has the Workflow tool.
+   */
+  private effectiveWorkflows(session: SessionRow): boolean {
+    return session.workflows === 1 && session.plan_mode !== 1;
+  }
+
+  /**
+   * Where the harness writes plan files for a session. Absolute and inside the
+   * worktree, both load-bearing: the runtime's default is `~/.claude/plans/`,
+   * which the policy hard-denies, and a relative path would resolve against the
+   * cwd — the sub-project, for a monorepo session (spike 2026-07-25).
+   *
+   * Under `.condotto/` rather than a bare directory so one `.git/info/exclude`
+   * entry covers anything else the daemon ever needs to leave in a worktree.
+   */
+  private plansDirFor(session: SessionRow): string {
+    return join(session.worktree_path, ".condotto", "plans");
+  }
+
   /** The per-turn harness config for a session (opaque tokens + capability flags). */
   private harnessOptionsFor(
     session: SessionRow,
     repoTrusted: boolean,
     memoryDir?: string,
   ): HarnessTurnOptions {
+    const planMode = session.plan_mode === 1;
     return {
       model: this.effectiveModel(session),
       effort: this.effectiveEffort(session),
       subagents: session.subagents === 1,
-      workflows: session.workflows === 1,
+      workflows: this.effectiveWorkflows(session),
       projectConfig: repoTrusted,
-      ...(memoryDir ? { memoryDir } : {}),
+      // Memory is paused while planning: its writes are gate-tier and therefore
+      // denied, and `autoMemoryEnabled` is pinned on whenever a directory is
+      // supplied — so passing it would have auto-memory generating denials all
+      // turn. Omitting it pins the feature off for the duration.
+      ...(memoryDir && !planMode ? { memoryDir } : {}),
+      ...(planMode ? { planMode: true, plansDir: this.plansDirFor(session) } : {}),
     };
   }
 
@@ -677,6 +819,9 @@ export class SessionManager {
         break;
       case "auto-approve":
         await this.setAutoApprove(event.conv, event.author, event.args);
+        break;
+      case "plan":
+        await this.setPlanMode(event.conv, event.author, event.args);
         break;
       case "skill":
         await this.invokeSkill(event.conv, event.author, event.args);
@@ -1754,6 +1899,96 @@ export class SessionManager {
   }
 
   /**
+   * `@Condotto plan on|off` — architect-only, both directions.
+   *
+   * On: the thread plans instead of building. Only genuine reads run; the agent
+   * writes its plan to the session's plans directory, that write is gated, and the
+   * plan is posted into the thread for Approve/Deny. Approving flips this off and
+   * resumes straight into implementation.
+   *
+   * Architect-only in BOTH directions even though turning it ON only removes
+   * authority. Turning it off is the half that matters — it hands the agent write
+   * and shell access back — and a single symmetric rule is easier to reason about
+   * than a split one. It also matches every other session control.
+   *
+   * In-thread only: no `condotto.toml` key and no per-repo default, because it is
+   * a per-TASK decision ("plan this one out first"), not a posture an operator
+   * sets once for a repo. Same reasoning as the worktree-write opt-in.
+   */
+  private async setPlanMode(conv: ConversationRef, author: Principal, args: string): Promise<void> {
+    const surface = this.surfaceFor(conv);
+    const session = this.store.getSessionByConversation(conv.surfaceId, conv.conversationId);
+    if (!session || session.status === "stopped") {
+      await surface.post(conv, { text: "No active session in this thread." });
+      return;
+    }
+    if (!this.store.isArchitect(principalKey(author), conv.channelId)) {
+      this.store.audit({ sessionId: session.id, actor: principalKey(author), event: "authz_denied", detail: { action: "plan" } });
+      await surface.post(conv, { text: "Only architects can change plan mode." });
+      return;
+    }
+    if (!this.harness.capabilities.planMode) {
+      await surface.post(conv, { text: "This harness can't run in plan mode." });
+      return;
+    }
+    const on = this.parseOnOff(args.trim());
+    if (on === null) {
+      await surface.post(conv, {
+        text: `Usage: \`@Condotto plan on|off\`. Currently ${session.plan_mode === 1 ? "*on*" : "off"}.`,
+      });
+      return;
+    }
+    if (on === (session.plan_mode === 1)) {
+      await surface.post(conv, { text: `Plan mode is already ${on ? "on" : "off"}.` });
+      return;
+    }
+    // Refused mid-turn, like `clear`. Not for correctness — the row is read fresh
+    // per call, so a mid-turn flip is honoured — but because it reads as a brake
+    // and is not one: `permissionMode` is baked into the live query and cannot be
+    // changed under it, so the running turn keeps its old posture to the end.
+    // Saying so beats letting an architect believe they stopped something.
+    if (session.status === "active") {
+      await surface.post(conv, {
+        text:
+          "Something's running right now, and switching plan mode won't stop it. " +
+          "`@Condotto cancel` first if you want it to stop, then set plan mode.",
+      });
+      return;
+    }
+    this.store.setSessionPlanMode(session.id, on);
+    // A pending approval belongs to the posture it was raised under. Turning plan
+    // mode ON must not leave an approvable write from before it; turning it OFF
+    // must not leave a live Approve button for a plan the thread has left behind,
+    // whose click would resume expecting a mode that is already gone.
+    const expired = this.store.expirePendingApprovals(session.id);
+    this.store.audit({
+      sessionId: session.id,
+      actor: principalKey(author),
+      event: "plan_mode_set",
+      detail: { on, via: "command", expiredApprovals: expired },
+    });
+    const fresh = this.store.getSession(session.id)!;
+    const lines = [
+      on
+        ? "📋 *Plan mode on.* I'll investigate and write up a plan instead of changing anything. " +
+          "Writes, shell commands — including the test suite — and network access are all refused until " +
+          "an architect approves the plan. Approving takes me straight into implementing it."
+        : "Plan mode off — I'll do the work directly again, with each consequential action gated as usual.",
+    ];
+    if (expired > 0) {
+      lines.push(
+        `• Discarded ${expired} pending approval${expired === 1 ? "" : "s"} — ` +
+          `${expired === 1 ? "it belonged" : "they belonged"} to the mode we just left. Ask again and I'll re-propose.`,
+      );
+    }
+    if (on && this.effectiveWorkflows(fresh) === false && fresh.workflows === 1) {
+      lines.push("• Multi-agent workflows are *paused* while planning (subagents still fan out, read-only). `plan off` brings them back.");
+    }
+    lines.push(`(${this.capabilitySummary(fresh)}) Takes effect on your next message.`);
+    await surface.post(conv, { text: lines.join("\n") });
+  }
+
+  /**
    * `@Condotto auto-approve on|off`. When on, a gated tool call on a turn an
    * architect initiated runs WITHOUT the Approve click — the architect is already
    * the trusted human driving (DESIGN §4 sanctions this per-thread
@@ -1924,6 +2159,15 @@ export class SessionManager {
     }
     if (!this.harness.capabilities.skillInvocation) {
       await surface.post(conv, { text: "This harness has no skills to run." });
+      return;
+    }
+    // A skill runs as a full turn, so in plan mode every consequential thing it
+    // tries is denied. A `ship`-shaped skill would half-run and report a success it
+    // never achieved — worse than refusing, because the thread would believe it.
+    if (session.plan_mode === 1) {
+      await surface.post(conv, {
+        text: "I'm in plan mode, so a skill would only half-run — its writes and commands get refused. `@Condotto plan off` first.",
+      });
       return;
     }
 
@@ -2162,6 +2406,17 @@ export class SessionManager {
         if (!s || s.status === "stopped") return;
         if (this.store.hasPendingApproval(s.id)) {
           await surface.post(conv, { text: "There's already a pending approval in this thread — resolve it first." });
+          return;
+        }
+        // Shipping is a daemon-run action: it raises its own `condotto:` approval
+        // and never touches the gate closure, so it is the ONE way to change the
+        // world from inside a mode whose whole promise is that nothing runs.
+        // Refuse it rather than let plan mode be true of the agent but not of the
+        // thread.
+        if (s.plan_mode === 1) {
+          await surface.post(conv, {
+            text: `I'm in plan mode, so I can't ${kind} yet. \`@Condotto plan off\` first (or approve a plan), then ask again.`,
+          });
           return;
         }
         const requestId = crypto.randomUUID();
@@ -2408,14 +2663,43 @@ export class SessionManager {
 
     // Resume the session with an empty prompt to re-drive the pending call; the
     // gate now answers allow/deny from the recorded decision. FIFO-serialized.
+    // Was this approval the session's PLAN? Re-derived from the stored row rather
+    // than carried on it: `tool_input` is persisted, so the same predicate the
+    // policy uses answers it, and no column has to be added.
+    const isPlan =
+      session.plan_mode === 1 &&
+      isPlanPresentation({ id: "", name: approval.tool_name, input: approval.tool_input }, this.plansDirFor(session));
+
     const entry = this.entryFor(session.id);
     entry.chain = entry.chain
-      .then(() =>
-        this.executeTurn({
+      .then(() => {
+        // Leaving plan mode happens INSIDE the FIFO, immediately before the resume.
+        // Doing it at enqueue time opens a window: `decideApproval` has already
+        // flipped the row to approved, so `hasPendingApproval` is false and an
+        // inbound human message can pass the guard in handleMessage and land AHEAD
+        // of this resume — running a full-privilege turn nobody asked for.
+        if (isPlan && outcome === "approved") {
+          const fresh = this.store.getSession(session.id);
+          if (fresh && fresh.status !== "stopped") {
+            this.store.setSessionPlanMode(session.id, false);
+            this.store.audit({
+              sessionId: session.id,
+              actor: decider,
+              event: "plan_mode_set",
+              detail: { on: false, via: "plan_approved", requestId: event.requestId },
+            });
+          }
+        }
+        return this.executeTurn({
           sessionId: session.id,
           conv,
           framedText: "",
-          placeholder: outcome === "approved" ? "…applying the approved action" : "…noting your decision",
+          placeholder:
+            isPlan && outcome === "approved"
+              ? "…implementing the approved plan"
+              : outcome === "approved"
+                ? "…applying the approved action"
+                : "…noting your decision",
           // Carry the ORIGINAL initiator (never the approving decider) so a
           // member-initiated turn can't be laundered into architect auto-approval;
           // an architect-initiated turn stays consistent across the resume.
@@ -2423,8 +2707,15 @@ export class SessionManager {
           // An approved WORKFLOW launch resumes into a runaway-capable background
           // workflow, so cap this resume to arm the auto-cancel-on-breach brake.
           workflowResume: approval.tool_name === WORKFLOW_TOOL_NAME,
-        }),
-      )
+          // Same reasoning for an approved PLAN. An ordinary approval resume runs
+          // uncapped on purpose — it re-drives ONE action an architect already
+          // approved, and capping it near the budget could strand it. A plan
+          // resume is the opposite shape: it re-drives one write and then
+          // implements the entire change, which makes it the most expensive turn
+          // in the session and the one that most needs a ceiling.
+          planResume: isPlan && outcome === "approved",
+        });
+      })
       .catch((err) => this.log(`[session ${session.id}] resume after approval failed: ${err}`));
     await entry.chain;
   }
@@ -2465,8 +2756,15 @@ export class SessionManager {
      * auto-cancel-on-breach interrupt for the background workflow.
      */
     workflowResume?: boolean;
+    /**
+     * This resume re-drives an approved PLAN, so it implements the whole change in
+     * one turn. Budget-capped for the same reason as `workflowResume`: it is the
+     * runaway-capable shape, not the single-approved-action shape that runs
+     * uncapped to avoid being stranded.
+     */
+    planResume?: boolean;
   }): Promise<void> {
-    const { sessionId, conv, framedText, skill, placeholder, inbound, initiator, workflowResume } = params;
+    const { sessionId, conv, framedText, skill, placeholder, inbound, initiator, workflowResume, planResume } = params;
     // Re-read the row: an earlier queued turn (or a stop) may have changed it.
     const session = this.store.getSession(sessionId);
     if (!session || session.status === "stopped") return;
@@ -2517,7 +2815,7 @@ export class SessionManager {
     // rather than stranding the approved action — its full spend is still drained into the
     // ledger, and `@Condotto cancel` + the inactivity watchdog remain the backstops.)
     const remaining = budgetLimit - spent;
-    const capThisTurn = inbound || workflowResume === true;
+    const capThisTurn = inbound || workflowResume === true || planResume === true;
     const turnBudgetUsd = capThisTurn && remaining > 0 ? remaining : undefined;
 
     const repo = this.store.getRepo(session.repo_id);
@@ -2547,10 +2845,18 @@ export class SessionManager {
       subagentsEnabled: session.subagents === 1,
       // The worktree-write opt-in — subagent/workflow/escaped calls may
       // WRITE (confined) without per-write approval; bash stays gated to the main agent.
-      workflowWrite: session.workflow_write === 1,
+      //
+      // Forced OFF while planning. `evaluateConfined` already refuses it in plan
+      // mode, and this is the second lock on the same door: the opt-in's consent
+      // was "this agent may write unattended", and plan mode's contract is that
+      // nothing is written until the plan is approved.
+      workflowWrite: session.workflow_write === 1 && session.plan_mode !== 1,
       // The one place outside the worktree the agent may write, already proven by
       // `MemoryManager.prepare` so the policy engine can stay pure and lexical.
       ...(memoryRoot ? { memoryRoot } : {}),
+      // Read-only planning, and the directory that names the single write it
+      // permits — the plan file, which is how a plan is presented for approval.
+      ...(session.plan_mode === 1 ? { planMode: true, plansDir: this.plansDirFor(session) } : {}),
     };
     // Remembers a policy concern (e.g. production-data) per gated tool_use_id so
     // the later approval prompt can surface it (the gate and the defer are
@@ -2605,6 +2911,31 @@ export class SessionManager {
           return { decision: "deny", reason: proof.reason };
         }
       }
+      // Plan mode is read LIVE from the row, not from the turn's snapshot, and is
+      // checked ABOVE the prior-approval short-circuit. Both halves are needed to
+      // close the same window: `plan on` expires pending approvals, but a turn
+      // already in flight creates its approval AFTER that sweep, and an architect
+      // clicking Approve would then reach the short-circuit below and run an
+      // ordinary write during a session that reports itself read-only. An approval
+      // authorizes an action under the posture it was granted in; plan mode changes
+      // the posture, so the grant no longer holds. (Same argument as the memory
+      // re-proof above: a recorded decision is not a standing permission.)
+      const planNow = this.store.getSession(sessionId)?.plan_mode === 1;
+      const ctxNow: PolicyContext = planNow
+        ? { ...policyCtx, planMode: true, plansDir: this.plansDirFor(session), workflowWrite: false }
+        : { ...policyCtx, planMode: undefined, plansDir: undefined };
+      if (planNow) {
+        const pre = evaluate(call, ctxNow);
+        if (pre.action === "deny") {
+          this.store.audit({
+            sessionId,
+            actor: "agent",
+            event: "tool_call",
+            detail: { tool: call.name, toolUseId: call.id || undefined, decision: "deny(plan-mode)", ...(call.agentId ? { agentId: call.agentId } : {}) },
+          });
+          return { decision: "deny", reason: pre.reason };
+        }
+      }
       const prior = call.id ? this.store.getApprovalByToolUse(sessionId, call.id) : null;
       let decision: Awaited<ReturnType<GateFn>>;
       let auditDecision: string;
@@ -2612,7 +2943,18 @@ export class SessionManager {
         decision = { decision: "allow" };
         auditDecision = "allow(architect-approved)";
       } else if (prior?.decision === "denied") {
-        decision = { decision: "deny", reason: "An architect denied this action." };
+        // A rejected PLAN means "revise", not "stop" — and the difference decides
+        // what the agent does next. The generic wording reads as a blocked action
+        // and invites a retry of the same write; this sends it back to planning,
+        // where the architect's follow-up message is the feedback.
+        decision = {
+          decision: "deny",
+          reason:
+            planNow && prior.tool_name !== "Bash"
+              ? "An architect wants changes to this plan. Read the thread for what they want " +
+                "different, then present a revised plan. Do not start implementing."
+              : "An architect denied this action.",
+        };
         auditDecision = "deny(architect-denied)";
       } else if (prior?.decision === "expired") {
         // The approval was abandoned (session stopped/reassigned, or it could
@@ -2621,8 +2963,20 @@ export class SessionManager {
         decision = { decision: "deny", reason: "That action was abandoned and is no longer approved; do not retry it." };
         auditDecision = "deny(expired)";
       } else {
-        const pd = evaluate(call, policyCtx);
-        if (pd.action === "gate" && autoApprove) {
+        const pd = evaluate(call, ctxNow);
+        // A PLAN is exempt from architect auto-approve — the second exemption
+        // after the hard-deny floor, and the only one that is about consent rather
+        // than safety.
+        //
+        // Auto-approve's premise is that an architect driving their own turn has
+        // already exercised their authority, so a further click is redundant. That
+        // holds for an action they could have anticipated when they sent the
+        // message. It does not hold for a plan: the plan did not exist yet, and
+        // approving it is a decision about content the architect has not read.
+        // Without this the whole feature is a silent no-op — the turn never defers,
+        // the plan is never posted, `plan_mode` is never cleared, and the thread
+        // sits wedged in a mode nobody can see with no button to leave it.
+        if (pd.action === "gate" && autoApprove && pd.concern !== "plan-approval") {
           // Architect-initiated gate → allow, no click. Record an already-decided
           // approval (ledger stays complete) + audit, both attributed to the
           // architect whose standing authority stood in — NOT "agent". `deny`
@@ -2860,7 +3214,15 @@ export class SessionManager {
   ): Promise<void> {
     const requestId = crypto.randomUUID();
     const summary = describeCall(call);
-    const concernText = concern ? CONCERN_TEXT[concern] : undefined;
+    const autoApproveOn = this.store.getSession(sessionId)?.auto_approve === 1;
+    const concernText = concern
+      ? CONCERN_TEXT[concern] +
+        // Only the plan approval is a decision about a batch of future actions, so
+        // it is the only one where "and I won't ask again" changes what is being
+        // consented to. The concern text is static, so the warning is appended here
+        // where the session row is in reach.
+        (concern === "plan-approval" && autoApproveOn ? PLAN_APPROVAL_AUTO_APPROVE_WARNING : "")
+      : undefined;
     this.store.createApproval({
       id: requestId,
       sessionId,
@@ -2875,8 +3237,32 @@ export class SessionManager {
       event: "approval_request",
       detail: { requestId, tool: call.name, toolUseId: call.id, summary, ...(concern ? { concern } : {}) },
     });
-    await deliverFinal("⏳ I need an architect's approval before I can continue — see the request below.");
-    const prompt: ApprovalPrompt = { requestId, toolName: call.name, toolInput: call.input, summary, concern: concernText };
+    // A plan IS the message. Everything else gets the generic holding line and
+    // shows its detail in the approval's code block, but that block truncates at
+    // 2500 chars — and an architect must never be asked to approve a plan they
+    // could not read. So the plan replaces the holding line and the buttons land
+    // directly beneath it. `deliverFinal` closes the progress message and posts, so
+    // any overflow parts go after it, still above the approval.
+    if (concern === "plan-approval") {
+      const [head, ...rest] = splitForThread(
+        planTextFrom(call.input) ??
+          "_I have a plan ready but couldn't read its text — approve and I'll restate it as I go._",
+      );
+      await deliverFinal(`📋 *Here's my plan.* Approve and I'll start implementing; deny and I'll revise.\n\n${head}`);
+      for (const part of rest) await surface.post(conv, { text: part }).catch(() => {});
+    } else {
+      await deliverFinal("⏳ I need an architect's approval before I can continue — see the request below.");
+    }
+    const prompt: ApprovalPrompt = {
+      requestId,
+      toolName: call.name,
+      toolInput: call.input,
+      summary,
+      concern: concernText,
+      // The plan went out above, in full. Without this the surface would render a
+      // truncated copy of it under the buttons.
+      ...(concern === "plan-approval" ? { detailPosted: true } : {}),
+    };
     try {
       await surface.requestApproval(conv, prompt);
     } catch (err) {
@@ -2917,7 +3303,11 @@ export class SessionManager {
     // toggle landing mid-attach could miss.
     // Memory is part of the key: turning it on (or losing it for a turn) changes
     // the prompt, and a cached harness built without it would keep the old text.
-    const promptKey = `${session.subagents}:${session.workflows}:${session.workflow_write}:${memoryDir ?? ""}`;
+    // plan_mode is part of the key because it rewrites the prompt wholesale (the
+    // gate bullet, the test command, the memory paragraph). Without it, `plan on`
+    // would leave a warm harness telling the agent to propose gated actions
+    // normally while the gate denies every one of them.
+    const promptKey = `${session.subagents}:${session.workflows}:${session.workflow_write}:${session.plan_mode}:${memoryDir ?? ""}`;
     if (entry.harness && entry.promptKey === promptKey) return entry.harness;
 
     // The system prompt is current Condotto policy, re-supplied on resume too —
@@ -2933,9 +3323,13 @@ export class SessionManager {
       landAvailable: !!repo?.land_cmd,
       deployAvailable: !!repo?.deploy_cmd,
       subagents: session.subagents === 1,
-      workflows: session.workflows === 1,
-      workflowWrite: session.workflow_write === 1,
+      // The EFFECTIVE posture, not the stored flags: plan mode removes the
+      // Workflow tool from context and pauses memory writes, so promising either
+      // here would describe a session the agent does not have.
+      workflows: this.effectiveWorkflows(session),
+      workflowWrite: this.effectiveWorkflows(session) && session.workflow_write === 1,
       memoryDir: memoryDir ?? null,
+      planMode: session.plan_mode === 1,
     });
     // The agent starts in its sub-project; the worktree ROOT stays the boundary
     // and is passed separately so the harness keeps the whole tree reachable.

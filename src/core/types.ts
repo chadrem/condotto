@@ -118,7 +118,13 @@ export type CommandName =
   // surface's linkified mention to a principal key so no surface id shape
   // crosses the port; it renders back out via `mentionToken`.
   | "grant"
-  | "revoke";
+  | "revoke"
+  // read-only planning for this thread ("on"|"off", architect-only, in-thread
+  // only — no config knob and no repo default, because it is a per-TASK mode).
+  // While on, only genuine reads run; the agent presents a plan, the plan is
+  // posted for Approve/Deny, and approving flips the mode off and resumes
+  // straight into implementation.
+  | "plan";
 
 export type InboundEvent =
   | {
@@ -205,6 +211,17 @@ export interface ApprovalPrompt {
    * decider, never authority.
    */
   concern?: string;
+  /**
+   * The consequential detail of this call has ALREADY been delivered into the
+   * conversation as its own message, so the surface must not render it again.
+   *
+   * Set for a plan approval. Surfaces show tool detail in a bounded, truncating
+   * block (Slack's caps at 2500 chars), which is right for a command or a diff and
+   * wrong for a plan: the architect would read the plan, then meet a clipped
+   * duplicate of it under the buttons. A plan is delivered whole, above the
+   * prompt, precisely so nobody approves a document they only half-saw.
+   */
+  detailPosted?: boolean;
 }
 
 export interface SurfaceAdapter {
@@ -341,6 +358,33 @@ export interface HarnessTurnOptions {
    * has been doing all along (DECISIONS 2026-07-20).
    */
   memoryDir?: string;
+  /**
+   * Run this turn in read-only PLANNING mode: the agent investigates and presents
+   * a plan instead of doing the work.
+   *
+   * Harness-neutral by name — the adapter maps it to whatever its runtime calls
+   * plan mode, the same way `workflows` maps to `bypassPermissions`. The core
+   * never mints an SDK mode string, just as it never mints a model id.
+   *
+   * This is a CAPABILITY flag, not the policy. What actually keeps a planning
+   * session read-only is `PolicyContext.planMode` in the core gate; the harness
+   * layer is a second, weaker line (it does not cover allowlisted bash or the
+   * worktree-write opt-in). Turning this on without the policy flag would be a
+   * session that only looks read-only.
+   */
+  planMode?: boolean;
+  /**
+   * Absolute directory the harness should write plan files to, when `planMode` is
+   * on. REQUIRED with it, and it must be absolute and inside the worktree.
+   *
+   * Not a detail the core could leave to the adapter. The Claude Code runtime
+   * defaults to `~/.claude/plans/`, which is outside the worktree and therefore
+   * hard-denied with no approval possible — the agent could never present a plan
+   * at all. And a relative path resolves against `cwd`, which for a monorepo
+   * session is the sub-project rather than the worktree root (spike 2026-07-25).
+   * The core owns the confinement boundary, so the core names the directory.
+   */
+  plansDir?: string;
 }
 // NOTE: the informed worktree-write opt-in is NOT a harness-tool
 // option — it does not change the model, tools, or permission mode. It is a POLICY
@@ -435,6 +479,16 @@ export interface HarnessCapabilities {
    * a `skill` a harness cannot honour.
    */
   skillInvocation: boolean;
+  /**
+   * The harness can run a turn in read-only planning mode (`HarnessTurnOptions.
+   * planMode`). False ⇒ `@Condotto plan on` is refused at the command, so the core
+   * never emits an option a harness cannot honour — the `skillInvocation` rule.
+   *
+   * Unlike `mechanicalGating` this is negotiable: a harness without it simply has
+   * no plan mode. The read-only guarantee itself does NOT depend on it, since the
+   * core gate enforces that independently.
+   */
+  planMode: boolean;
 }
 
 export interface HarnessAdapter {

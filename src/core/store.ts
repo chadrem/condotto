@@ -51,6 +51,17 @@ export interface SessionRow {
    */
   auto_approve: number;
   /**
+   * Plan mode: when 1, the session investigates and proposes a plan instead of
+   * doing the work. Only genuine reads run (`PolicyContext.planMode`); the plan
+   * arrives as a gated `ExitPlanMode` call, and approving it flips this back to 0
+   * and resumes straight into implementation.
+   *
+   * In-thread only, like `workflow_write`: architect-set with `@Condotto plan
+   * on|off`, never seeded from config or from a repo default. It is a per-TASK
+   * mode, not a posture an operator sets once for a repo.
+   */
+  plan_mode: number;
+  /**
    * Worktree GC: when non-null, this session was explicitly stopped with
    * the `clean` variant and its worktree becomes collectible at this ISO
    * timestamp (the stop time + retention interval). NULL is the resting state —
@@ -369,6 +380,22 @@ function migrateV5(db: Database): void {
   db.run(`ALTER TABLE repos ADD COLUMN default_workflows INTEGER`);
 }
 
+/**
+ * Migration **v6** (plan mode): `sessions.plan_mode`, the per-thread read-only
+ * planning posture set by `@Condotto plan on`.
+ *
+ * `NOT NULL DEFAULT 0`, deliberately unlike the nullable per-repo tri-states
+ * above: plan mode has no "no opinion" state to express. It is in-thread only —
+ * never seeded from `condotto.toml`, never a per-repo default — because it is a
+ * per-TASK mode ("plan this one out first"), not a posture an operator sets once
+ * for a repo. Same reasoning as `workflow_write`, the other setting the codebase
+ * refuses to inherit. Existing sessions upgrade to off, which is what an operator
+ * swapping a binary expects.
+ */
+function migrateV6(db: Database): void {
+  db.run(`ALTER TABLE sessions ADD COLUMN plan_mode INTEGER NOT NULL DEFAULT 0`);
+}
+
 /** Add `column` to `table` only if absent (idempotent ALTER — SQLite has no
  *  `ADD COLUMN IF NOT EXISTS`). Used by the baseline migration to evolve tables
  *  a pre-runner DB already created. */
@@ -411,7 +438,8 @@ export class Store {
       migrateV3, // v3: sessions.workdir for monorepo sub-project sessions.
       migrateV4, // v4: repos.memory for durable agent memory.
       migrateV5, // v5: repos.default_subagents/default_workflows for per-repo posture.
-      // v6+: append new migrations here. They only ever run on a store already
+      migrateV6, // v6: sessions.plan_mode for the per-thread plan-mode posture.
+      // v7+: append new migrations here. They only ever run on a store already
       // at the prior version, so they can be plain forward DDL — no IF NOT EXISTS
       // gymnastics.
     ];
@@ -575,7 +603,7 @@ export class Store {
   createSession(
     s: Omit<
       SessionRow,
-      "created_at" | "last_active_at" | "budget_limit_usd" | "model" | "effort" | "subagents" | "workflows" | "workflow_write" | "auto_approve" | "cleanup_at" | "workdir"
+      "created_at" | "last_active_at" | "budget_limit_usd" | "model" | "effort" | "subagents" | "workflows" | "workflow_write" | "auto_approve" | "plan_mode" | "cleanup_at" | "workdir"
     > & {
       budget_limit_usd?: number | null;
       model?: string | null;
@@ -646,6 +674,8 @@ export class Store {
       workflows,
       workflow_write: 0,
       auto_approve: autoApprove,
+      // Never seeded: plan mode is a per-task decision made in the thread.
+      plan_mode: 0,
       cleanup_at: null,
       created_at: now,
       last_active_at: now,
@@ -763,6 +793,19 @@ export class Store {
   /** Toggle a session's architect self-approve (`@Condotto auto-approve`). */
   setSessionAutoApprove(id: string, on: boolean): void {
     this.db.query(`UPDATE sessions SET auto_approve = $v WHERE id = $id`).run({ id, v: on ? 1 : 0 });
+  }
+
+  /**
+   * Toggle a session's plan mode (`@Condotto plan on|off`).
+   *
+   * Deliberately couples to nothing. Unlike `setSessionWorkflows`/
+   * `setSessionWorkflowWrite`, plan mode implies no other setting and is implied
+   * by none: it pauses workflows for the duration, but that is computed at turn
+   * time from `plan_mode` rather than written here, so `plan off` restores
+   * whatever posture the thread had. Do not add an invariant.
+   */
+  setSessionPlanMode(id: string, on: boolean): void {
+    this.db.query(`UPDATE sessions SET plan_mode = $v WHERE id = $id`).run({ id, v: on ? 1 : 0 });
   }
 
   /**

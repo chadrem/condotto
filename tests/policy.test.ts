@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { evaluate, bashHardDeny, offendingPath, productionDataConcern, parseWorkflowMeta, describeCall } from "../src/core/policy";
+import { evaluate, bashHardDeny, offendingPath, productionDataConcern, parseWorkflowMeta, describeCall, planTextFrom } from "../src/core/policy";
 import type { ToolCall } from "../src/core/types";
 
 const WORKTREE = "/tmp/condotto-wt/session-abc";
@@ -661,5 +661,174 @@ describe("policy: the memory root", () => {
 
   test("subagents keep full access to the worktree — memory is the only carve-out", () => {
     expect(evaluate(sub("s4", "Read", { file_path: "src/index.ts" }), memCtx()).action).toBe("allow");
+  });
+});
+
+describe("policy: plan mode", () => {
+  // The guarantee under test is "only genuine READS run", not "a gate becomes a
+  // deny". Two paths reach `allow` without ever passing through `gate` —
+  // allowlisted bash, and confined writes under the worktree-write opt-in — and
+  // both would execute during a supposedly read-only planning session if the
+  // narrowing were expressed as a gate-tier downgrade. The first draft was.
+  const pctx = (extra: Record<string, unknown> = {}) => ({
+    ...ctx(["bun test", "git status"]),
+    planMode: true,
+    ...extra,
+  });
+  const subCall = (name: string, input: unknown): ToolCall => ({ id: "t1", name, input, agentId: "sub-abc123" });
+  const escapedCall = (name: string, input: unknown): ToolCall => ({ id: "", name, input, escaped: true });
+
+  test("in-worktree reads still run — investigation is the whole point", () => {
+    expect(evaluate(call("Read", { file_path: "src/index.ts" }), pctx()).action).toBe("allow");
+    expect(evaluate(call("Grep", { pattern: "foo", path: "src" }), pctx()).action).toBe("allow");
+    expect(evaluate(call("Glob", { pattern: "**/*.ts" }), pctx()).action).toBe("allow");
+    expect(evaluate(call("TodoWrite", { todos: [] }), pctx()).action).toBe("allow");
+  });
+
+  test("a write is DENIED, not gated — nobody should be asked to approve one mid-plan", () => {
+    const d = evaluate(call("Write", { file_path: "src/x.ts", content: "x" }), pctx());
+    expect(d.action).toBe("deny");
+    expect(d.reason).toContain("plan mode");
+    expect(evaluate(call("Edit", { file_path: "src/x.ts" }), pctx()).action).toBe("deny");
+  });
+
+  test("an ALLOWLISTED bash command is denied — the repo test command is still code execution", () => {
+    // The session manager folds the repo's test_cmd into safeBashAllowlist, so
+    // this is the real shape. evaluateBash returns `allow`, which a gate-tier-only
+    // narrowing would have let straight through.
+    expect(evaluate(bash("bun test"), ctx(["bun test"])).action).toBe("allow"); // control: normal mode
+    const d = evaluate(bash("bun test"), pctx());
+    expect(d.action).toBe("deny");
+    expect(d.reason).toContain("plan mode");
+    expect(evaluate(bash("git status"), pctx()).action).toBe("deny");
+  });
+
+  test("the worktree-write opt-in does NOT survive plan mode, on either confined path", () => {
+    // With workflowWrite on, evaluateConfined returns `allow` for a confined
+    // write. Subagents stay enabled while planning, so without this the fan-out
+    // writes files during a session that claims to be read-only.
+    const w = pctx({ workflowWrite: true, subagentsEnabled: true });
+    expect(evaluate(subCall("Write", { file_path: "src/x.ts", content: "x" }), w).action).toBe("deny");
+    expect(evaluate(escapedCall("Write", { file_path: "src/x.ts", content: "x" }), w).action).toBe("deny");
+    // control: the same calls DO allow once plan mode is off
+    const off = { ...ctx(), workflowWrite: true };
+    expect(evaluate(subCall("Write", { file_path: "src/x.ts", content: "x" }), off).action).toBe("allow");
+  });
+
+  test("a hard boundary keeps its own specific reason — the collapse must not blur it", () => {
+    const d = evaluate(call("Write", { file_path: "/etc/passwd", content: "x" }), pctx());
+    expect(d.action).toBe("deny");
+    expect(d.reason).toContain("outside your worktree");
+    expect(d.reason).not.toContain("plan mode");
+  });
+
+  test("network and workflow launches are denied; subagent delegation still runs", () => {
+    expect(evaluate(call("WebFetch", { url: "https://x.test" }), pctx()).action).toBe("deny");
+    expect(evaluate(call("Workflow", { script: "export const meta = { name: 'x' }" }), pctx()).action).toBe("deny");
+    // Parallel read-only investigation is exactly what planning wants, so the
+    // spawn is checked BEFORE the collapse.
+    expect(evaluate(call("Agent", {}), pctx({ subagentsEnabled: true })).action).toBe("allow");
+  });
+
+  test("a memory write is denied while planning — nothing durable before the plan is agreed", () => {
+    const mctx = { ...pctx(), memoryRoot: "/tmp/condotto-mem/repo-chan" };
+    const c = call("Write", { file_path: "/tmp/condotto-mem/repo-chan/NOTES.md", content: "x" });
+    expect(evaluate(c, mctx).action).toBe("deny");
+  });
+
+  // The plan-file WRITE is the real trigger: headless plan mode has no plan-exit
+  // tool (spike 2026-07-25), and the model presents a plan by writing it, so that
+  // write carries the whole plan as `content`.
+  const PLANS = `${WORKTREE}/.condotto/plans`;
+  const planCtx = (extra: Record<string, unknown> = {}) => pctx({ plansDir: PLANS, ...extra });
+  const planWrite = (file = `${PLANS}/plan-a.md`, content = "1. do a thing") =>
+    call("Write", { file_path: file, content });
+
+  test("the plan-file write GATES with the plan-approval concern — the one gate in plan mode", () => {
+    const d = evaluate(planWrite(), planCtx());
+    expect(d.action).toBe("gate");
+    expect(d.concern).toBe("plan-approval");
+    // No model-authored text in the headline: it is rendered into a Slack section
+    // and into the notification fallback. The plan is posted separately.
+    expect(d.reason).not.toContain("do a thing");
+    expect(planTextFrom(planWrite().input)).toBe("1. do a thing");
+  });
+
+  test("an ordinary worktree write still DENIES while planning — only the plan file gates", () => {
+    expect(evaluate(call("Write", { file_path: "src/x.ts", content: "x" }), planCtx()).action).toBe("deny");
+    // A non-`.md` file in the plans directory is not a plan either.
+    expect(evaluate(planWrite(`${PLANS}/notes.txt`), planCtx()).action).toBe("deny");
+  });
+
+  test("a write cannot pose as a plan by traversing out of the plans directory", () => {
+    // Shape-checked, not prefix-matched: `<plansDir>/../../src/x.ts` is lexically
+    // "under" the directory by prefix but is not a plan file.
+    for (const p of [`${PLANS}/../../src/index.ts`, `${PLANS}/sub/deep.md`, `${PLANS}/.md`, `${PLANS}/../plan.md`]) {
+      const d = evaluate(call("Write", { file_path: p, content: "x" }), planCtx());
+      expect(d.action).not.toBe("gate");
+    }
+  });
+
+  test("only Write/Edit present a plan — MultiEdit and NotebookEdit do not", () => {
+    expect(evaluate(call("Edit", { file_path: `${PLANS}/plan-a.md` }), planCtx()).action).toBe("gate");
+    expect(evaluate(call("MultiEdit", { file_path: `${PLANS}/plan-a.md` }), planCtx()).action).toBe("deny");
+    expect(evaluate(call("NotebookEdit", { notebook_path: `${PLANS}/plan-a.md` }), planCtx()).action).toBe("deny");
+  });
+
+  test("outside plan mode the plans directory is just a directory — an ordinary gated write", () => {
+    const d = evaluate(planWrite(), { ...ctx(), plansDir: PLANS });
+    expect(d.action).toBe("gate");
+    expect(d.concern).toBeUndefined();
+  });
+
+  test("a confined origin cannot present a plan, even with the worktree-write opt-in", () => {
+    expect(evaluate({ ...planWrite(), agentId: "sub-1" }, planCtx({ workflowWrite: true })).action).toBe("deny");
+    expect(evaluate({ ...planWrite(), id: "", escaped: true }, planCtx({ workflowWrite: true })).action).toBe("deny");
+  });
+
+  test("ExitPlanMode gates with the plan-approval concern — that gate IS the feature", () => {
+    const d = evaluate(call("ExitPlanMode", { plan: "1. do a thing" }), pctx());
+    expect(d.action).toBe("gate");
+    expect(d.concern).toBe("plan-approval");
+    // The headline carries no model-authored text: it is rendered into a Slack
+    // section and into the notification fallback.
+    expect(d.reason).toBe(describeCall(call("ExitPlanMode", {})));
+    expect(d.reason).not.toContain("do a thing");
+  });
+
+  test("ExitPlanMode is denied outside plan mode, and from every confined origin", () => {
+    expect(evaluate(call("ExitPlanMode", { plan: "x" }), ctx()).action).toBe("deny");
+    expect(evaluate(subCall("ExitPlanMode", { plan: "x" }), pctx()).action).toBe("deny");
+    expect(evaluate(escapedCall("ExitPlanMode", { plan: "x" }), pctx()).action).toBe("deny");
+    expect(evaluate(subCall("ExitPlanMode", { plan: "x" }), pctx({ workflowWrite: true })).action).toBe("deny");
+  });
+});
+
+describe("planTextFrom", () => {
+  test("prefers the `plan` key", () => {
+    expect(planTextFrom({ plan: "step one\nstep two" })).toBe("step one\nstep two");
+  });
+
+  test("falls back to the longest string, because the SDK type does not name the key", () => {
+    expect(planTextFrom({ allowedPrompts: [], summary: "hi", body: "a much longer plan body" })).toBe(
+      "a much longer plan body",
+    );
+  });
+
+  test("returns null rather than throwing when there is no plan text", () => {
+    expect(planTextFrom({})).toBeNull();
+    expect(planTextFrom(undefined)).toBeNull();
+    expect(planTextFrom({ plan: "   " })).toBeNull();
+    expect(planTextFrom({ allowedPrompts: [{ tool: "Bash", prompt: "x" }] })).toBeNull();
+  });
+
+  test("keeps line structure — a plan is a document a human reads", () => {
+    expect(planTextFrom({ plan: "line one\n\nline two" })).toBe("line one\n\nline two");
+  });
+
+  test("caps a runaway plan rather than passing it on whole", () => {
+    const out = planTextFrom({ plan: "x".repeat(30_000) })!;
+    expect(out.length).toBeLessThan(21_000);
+    expect(out).toContain("plan truncated");
   });
 });

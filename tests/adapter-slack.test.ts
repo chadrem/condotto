@@ -336,6 +336,34 @@ describe("parseMentionCommand — clear", () => {
   });
 });
 
+describe("parseMentionCommand — plan", () => {
+  test("`plan on` / `plan off` parse, case-insensitively", () => {
+    expect(parse("plan on")).toEqual({ name: "plan", args: "on" });
+    expect(parse("plan off")).toEqual({ name: "plan", args: "off" });
+    expect(parse("Plan ON")).toEqual({ name: "plan", args: "ON" });
+  });
+
+  test("`plan` used as an ordinary English verb stays conversation", () => {
+    // The reason this verb needs stricter care than the others: "plan" leads a
+    // perfectly normal sentence, and mis-parsing one would silently put the thread
+    // into a mode where nothing it is asked to do will run.
+    expect(parse("plan the migration with me")).toBeNull();
+    expect(parse("plan out how you'd do this")).toBeNull();
+    expect(parse("plan")).toBeNull();
+    expect(parse("plan on off")).toBeNull();
+  });
+
+  test("`/plan` still belongs to the skill catch-all — no alias", () => {
+    // Unlike `/clear`, the core owns no runtime `/plan`, so there is nothing to
+    // alias to. Pinned so "let's alias them all" meets a red test.
+    expect(parse("/plan")).toEqual({ name: "skill", args: "plan" });
+  });
+
+  test("a mention that does not LEAD the message mints no plan command", () => {
+    expect(parseMentionCommand(`should we ask <@${BOT}> plan on first?`, BOT)).toBeNull();
+  });
+});
+
 describe("parseMentionCommand — skills", () => {
   // The mention-first spelling is not cosmetic. Slack intercepts a message that
   // BEGINS with `/` as one of its own commands, and custom slash commands cannot

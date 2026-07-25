@@ -59,6 +59,25 @@ describe("WorktreeManager.create + remove", () => {
     expect(await branchList()).not.toContain(info.branch.replace("condotto/", ""));
   });
 
+  test("create excludes the daemon's `.condotto/` scratch from git, idempotently", async () => {
+    // Plan files land in `.condotto/plans`. Untracked, they would ride an
+    // operator's `land_cmd` doing `git add -A` straight into a real commit.
+    const wm = new WorktreeManager(root);
+    const info = await wm.create({ repoPath, defaultBranch: "main", sessionId: "sess-cccccccc-9" });
+    mkdirSync(join(info.path, ".condotto", "plans"), { recursive: true });
+    writeFileSync(join(info.path, ".condotto", "plans", "plan-a.md"), "# a plan\n");
+
+    expect(await run(["git", "status", "--porcelain"], info.path)).toBe("");
+
+    // The entry goes in the COMMON git dir — a per-worktree info/exclude is
+    // silently ignored by git — so a second worktree must not duplicate it.
+    const excludePath = join(repoPath, ".git", "info", "exclude");
+    const first = await Bun.file(excludePath).text();
+    await wm.create({ repoPath, defaultBranch: "main", sessionId: "sess-dddddddd-9" });
+    expect(await Bun.file(excludePath).text()).toBe(first);
+    expect(first.match(/\/\.condotto\//g)!.length).toBe(1);
+  });
+
   test("remove force-tears-down a worktree with uncommitted + untracked changes", async () => {
     const wm = new WorktreeManager(root);
     const info = await wm.create({ repoPath, defaultBranch: "main", sessionId: "sess-bbbbbbbb-2" });
