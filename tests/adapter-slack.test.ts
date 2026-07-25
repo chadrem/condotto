@@ -298,3 +298,42 @@ describe("SlackAdapter.handleMessage — sync guards run ahead of the async hop"
     expect(lookups).toBe(0);
   });
 });
+
+describe("parseMentionCommand — skills", () => {
+  // The mention-first spelling is not cosmetic. Slack intercepts a message that
+  // BEGINS with `/` as one of its own commands, and custom slash commands cannot
+  // run inside a thread at all (DECISIONS 2026-07-18) — so the `/` has to sit
+  // behind the mention, where it is ordinary text.
+  test("`/name` becomes a skill command with the slash stripped", () => {
+    expect(parse("/ship")).toEqual({ name: "skill", args: "ship" });
+    expect(parse("/code-review")).toEqual({ name: "skill", args: "code-review" });
+    // Plugin-qualified names carry a colon.
+    expect(parse("/frontend:design")).toEqual({ name: "skill", args: "frontend:design" });
+  });
+
+  test("arguments keep their case and internal spacing", () => {
+    // A commit message and a path are both case-sensitive; lowercasing the whole
+    // line (as the control verbs do) would corrupt them.
+    expect(parse("/ship Fix the Widget sync")).toEqual({ name: "skill", args: "ship Fix the Widget sync" });
+    expect(parse("/review apps/Report/Main.tsx")).toEqual({ name: "skill", args: "review apps/Report/Main.tsx" });
+  });
+
+  test("`skills` lists; a stray arg stays conversation", () => {
+    expect(parse("skills")).toEqual({ name: "skills", args: "" });
+    expect(parse("skills please")).toBeNull();
+  });
+
+  test("a bare slash is not a command", () => {
+    expect(parse("/")).toBeNull();
+    expect(parse("/ ship")).toBeNull(); // the slash must lead the first WORD
+  });
+
+  test("a slash inside prose is still conversation, not a skill", () => {
+    // The rule keys on the first word only, so paths and URLs mentioned in passing
+    // never trigger a dispatch.
+    expect(parse("take a look at /etc/hosts")).toBeNull();
+    expect(parse("what does src/core/policy.ts do?")).toBeNull();
+    // And an existing verb is not shadowed by a slash-shaped argument.
+    expect(parse("stop")).toEqual({ name: "stop", args: "" });
+  });
+});

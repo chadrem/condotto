@@ -2856,3 +2856,129 @@ so the assertion depends on the check.
 updated; the operator status line and boot log now report the posture. `bun test`
 512 pass / 0 fail, `check:ports` clean. An operator who wants the old behaviour
 sets `effort = "high"`, `subagents = false`, `workflows = false` in `[defaults]`.
+
+## 2026-07-25 — Architect-invocable skills, and the preprocessing hole they exposed
+
+**Why.** The agent could already invoke skills (`Skill` is an unknown tool, so it
+gates; DECISIONS 2026-07-20). What it could not reach was a skill marked
+`disable-model-invocation: true` — deliberately withheld from the model, reachable
+only by a human naming it. That is the flag teams put on their *consequential*
+skills: in the motivating repo, `ship`, `ready` and `commit` all carry it, and
+`ship` is the real deploy path. So the most valuable half of a repo's skill library
+was dark to Condotto, with no human path either — every inbound byte is fenced by
+`frameMessage` as *data, not instructions*, which is exactly why a `/ship` typed
+into a thread can never dispatch.
+
+**Decision.** `@Condotto /<name> [args]` runs a skill as a turn of the session;
+`@Condotto skills` lists what is available and which file each one is.
+Architect-only and `verified`-surface-only (a runtime `@Condotto grant` confers it,
+as intended). The mention-first spelling is not cosmetic: Slack intercepts a message
+that *begins* with `/`, and custom slash commands cannot run in a thread at all
+(2026-07-18). The core names a skill (`TurnInput.skill = {name, args}`); the adapter
+owns the `/name` syntax, mirroring how model tokens work.
+
+**Spike first (`scripts/spike-skills.ts`, agent-sdk 0.3.220).** Ten questions,
+answers recorded in the script header so a re-run has something to diff:
+
+- **Q4 YES** — `prompt: "/name args"` dispatches a `disable-model-invocation: true`
+  skill, with `SlashCommand` still in `disallowedTools`. The flag is enforced only
+  on the model-invocation route; a human naming the skill is a different dispatch
+  path and it does not apply.
+- **Q6 YES** — a `Write` inside a skill turn hits `PreToolUse`, defers, and the
+  empty-prompt resume re-drives it. **The gate holds.** This was the ship condition.
+- **Q7 YES / Q7b NO** — `slash_commands` does list user-only skills; the untrusted
+  posture (`settingSources: []`) does not list a repo's own. "Repo skills only on a
+  vouched repo" needed no new switch.
+- **Q3 NO, Q10 NO** — two suspected holes did **not** exist. `additionalDirectories`
+  does not load `.claude/skills` from the added directory, so the untrusted-monorepo
+  path is clean. And a quoted `> /name` in a framed body does not unlock the `Skill`
+  tool: the skill is hidden from the model's listing, so it never reaches the
+  `userTypedThisTurn` escape. Both had been written up as probable; both were wrong.
+  (Residual, narrow: a model that *guessed* a hidden skill's name while it was quoted
+  in-thread would pass that check — it still gates as an unknown tool.)
+- **Q8 YES** — a `context: fork` skill runs as a **subagent**: its `Read` *and* its
+  `Bash` carried an `agent_id`, so `evaluateConfined` would deny the shell and the
+  skill would half-run. Refused at enumeration.
+- **Q5b** — the model's first user message is `<command-message>name</command-message>`,
+  not the `/name` line. A system-prompt clause keyed on "a turn beginning with `/`"
+  would have described a marker the model never sees; the shipped wording instead
+  says *some instructions arrive that nobody in this thread typed*, and that they
+  carry no authority of their own.
+
+**Q1 — the finding that reshaped the feature.** A skill body can embed `` !`cmd` ``
+to run shell and `@path` to inline a file, and both happen during **expansion**:
+before the model, therefore before `PreToolUse`, therefore outside `policy.ts`
+entirely. Verified: an `@path` pointing outside the worktree came back in the reply
+with **no tool call at all**. The 2026-07-20 premise ("a skill is instructions, and
+every tool call it makes still hits the hook") is true of the calls a skill *causes*
+and false of its preprocessing.
+
+`Settings.disableSkillShellExecution` (`sdk.d.ts:5406`) closes the body case, and is
+now pinned true — shipped as its own commit, because it was **already** a live hole:
+a `trusted` repo gets `skills: "all"`, so a model-invoked skill could reach that
+channel today. But it does **not** cover argument text substituted at `$ARGUMENTS`,
+which still executes. That was nearly missed: the first probe used a token that
+appeared in both the command's source and its output, so a literal echo was
+indistinguishable from execution. Re-run with `` !`echo $((21+21))` `` — output `42`,
+absent from the source — it executed. Bare backticks without the bang are inert
+(Q1d), so the mechanism is the skill syntax applied to substituted arguments.
+
+**Consequences.**
+
+1. **Arguments are refused, not sanitized** (`checkSkillArgs`), against a *positive*
+   charset: letters, digits, and ordinary punctuation including `\p{Pd}`/`\p{Pi}`/
+   `\p{Pf}` so an em dash or a smart quote in a commit message is not a papercut.
+   Excluded by construction: `` ` ``, `!`, `@`, `$`, `<>|&\^~*`, every control and
+   line separator, a token starting with `/` (a second command), and the
+   `[condotto:` sentinel. Positive, so a future expansion syntax fails closed. The
+   refusal names the offending character. **This is the boundary** — nothing
+   downstream sees this text: not `evaluateBash`, not `bashHardDeny`, not the audit.
+2. **Allowlist, not denylist.** Condotto enumerates dispatchable skills itself
+   (`enumerateSkills`) from `.claude/skills/**/SKILL.md` and `.claude/commands/*.md`
+   in the worktree and the operator's home. The runtime's ~45 built-ins grow with
+   every CLI release, so a denylist would fail open, silently, on upgrade. Ours also
+   refuses a body still using `` !` `` or `@path`, frontmatter that seizes a control
+   the architect owns (`context: fork`, `model`, `effort`), and a name two sources
+   claim — shadowing is real and the runtime's flat list de-duplicates, so "which
+   `ship` ran?" would otherwise be unanswerable. The runtime list is kept only as a
+   cross-check, logged when it disagrees.
+
+   Two of those refusals were initially too strict, caught by running the real
+   enumerator against the motivating repo: it refused `/ship` itself. (a) The
+   inline-shell detector matched prose — a bang inside a code span (`` `refresh!` ``)
+   sits next to a backtick without meaning anything by it; the construct needs a
+   line-start or whitespace boundary before the bang. (b) Refusing inline shell at
+   all was wrong: `disableSkillShellExecution` already placeholders it, so the
+   safety question is settled, and refusing on top blocked real skills for no added
+   safety. It is now a **warning** carried on `HarnessSkill.warning` and shown before
+   the skill runs. (c) `@path` is refused only when the path ESCAPES the worktree
+   (absolute, `~`, or `..`); an in-repo `@package.json` grants nothing the agent
+   could not already read through the gate.
+3. **Two bugs fixed on the way.** The fresh-session retry guard keys on
+   `input.text.trim().length > 0`; a skill turn also carries `text: ""`, so it could
+   never recover — and "fixing" that naively would re-dispatch a side-effecting
+   command into a new session, running it twice. It now never retries a skill turn.
+   Separately, the `handle_updated` emit was nested inside the session-id-changed
+   check, so on a resume a changed command list would never persist.
+4. **The handle stays `v: 1`**, gaining an optional field. `asHandle` throws on any
+   other version, so a bump would wedge every thread for an operator who rolls a
+   binary back — permanently, since the migration story is forward-only.
+5. **Not done, deliberately.** No extra Approve click for the architect's own
+   invocation — they typed the name; the checkpoint with real content ("is this the
+   `ship` I mean?") is delivered by showing the resolved absolute path and refusing
+   ambiguous names. No member invocation, though the counter-argument is worth
+   recording because it inverts the intuition: a member's skill turn gates *every*
+   tool call while an architect's auto-approves them all, so member invocation is
+   the safer of the two. A per-repo `invocable_skills` vouch remains the future
+   option.
+
+**Tests:** `checkSkillArgs`/`sanitizeSkillText` in `framing.test.ts` (every line
+separator, the proven shell construct, `@`/`$`, second-command tokens, invisible-split
+sentinels, non-Latin scripts and typography accepted, shared-regex `lastIndex`
+hygiene); `enumerateSkills` and dispatch in `adapter-claude-code.test.ts` (prompt is
+exactly `/name args`, refusals never spawn a query, both sides of the retry guard,
+legacy and corrupt handles, `disableSkillShellExecution` pinned in both memory
+postures); parse forms and prose fallthrough in `adapter-slack.test.ts`; authority,
+weak-surface refusal, budget cap, and the defer→approve→resume handshake (asserting
+the resume carries **no** skill) in `session-manager.test.ts`. 559 pass / 0 fail;
+`check:ports` and `tsc --noEmit` clean.

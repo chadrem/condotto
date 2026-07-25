@@ -180,6 +180,26 @@ export function parseMentionCommand(
     const target = resolveUserMention(words[1]!, botUserId) ?? "?";
     return { name: "revoke", args: `${target} ${words.slice(2).map((w) => w.toLowerCase()).join(" ")}`.trim() };
   }
+  // What the harness will dispatch in this thread.
+  if (first === "skills" && words.length === 1) return { name: "skills", args: "" };
+  // `@Condotto /<name> [args…]` — run a skill / slash command.
+  //
+  // A `/`-prefixed first word is its own namespace: no verb above starts with a
+  // slash, so this can never shadow the ladder, and ordinary prose is unaffected
+  // because the slash is not the FIRST CHARACTER of the message. That placement is
+  // the whole reason for the mention-first spelling: Slack intercepts a message
+  // that BEGINS with `/` as one of its own commands, and custom slash commands
+  // cannot run inside a thread at all (DECISIONS 2026-07-18).
+  //
+  // The `/` is stripped here — the core speaks skill NAMES, and only the harness
+  // adapter knows that Claude Code spells an invocation with a leading slash.
+  // Arguments keep their original case and internal spacing (paths, flags, a commit
+  // message); the core validates them, and refuses what it will not pass on.
+  if (first.startsWith("/") && first.length > 1) {
+    const rest = m[1]!.trim().slice(words[0]!.length).trim();
+    const name = words[0]!.slice(1);
+    return { name: "skill", args: rest ? `${name} ${rest}` : name };
+  }
   return null;
 }
 
@@ -384,6 +404,7 @@ export class SlackAdapter implements SurfaceAdapter {
             "`@Condotto status`, `@Condotto land`/`deploy` (gated), `@Condotto budget <usd>`.\n" +
             "Tune the implementer: `@Condotto model <opus|sonnet|fable>`, `@Condotto effort <low…max>`, " +
             "`@Condotto subagents on|off`, `@Condotto workflows on|off`, `@Condotto ultra on|off`.\n" +
+            "Run one of my skills: `@Condotto /<skill> [args]` — `@Condotto skills` lists them.\n" +
             "Approvals & roles: `@Condotto auto-approve on|off` (skip your own Approve clicks), " +
             "`@Condotto grant @user architect [everywhere]`, `@Condotto revoke @user`.\n" +
             "To assign an existing thread: `@Condotto assign <repo>` in that thread.",

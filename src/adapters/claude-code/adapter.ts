@@ -1,12 +1,14 @@
 import { query } from "@anthropic-ai/claude-agent-sdk";
 import { extractFromBunfs } from "@anthropic-ai/claude-agent-sdk/extract";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync } from "node:fs";
+import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import type {
   GateFn,
   HarnessAdapter,
   HarnessCapabilities,
   HarnessSession,
+  HarnessSkill,
   HarnessTurnOptions,
   SessionHandle,
   TurnEvent,
@@ -77,6 +79,18 @@ export type QueryFn = (args: { prompt: unknown; options: Record<string, any> }) 
 interface ClaudeCodeHandle {
   v: 1;
   sessionId: string | null;
+  /**
+   * Command names the runtime reported on this session's last `system`/`init`
+   * message. Kept only as a CROSS-CHECK against our own enumeration (see
+   * `enumerateSkills`), so a name we would dispatch that the runtime does not list
+   * gets logged rather than silently failing.
+   *
+   * `v` deliberately stays 1. `asHandle` throws on any other version, so bumping it
+   * would wedge every thread for an operator who rolls a binary back — permanently,
+   * since the migration story is forward-only. An additive optional field is
+   * compatible in both directions: an older binary reads the row and drops the key.
+   */
+  runtimeCommands?: string[];
 }
 
 // `allowedTools` auto-approves reads (the hook still denies out-of-worktree
@@ -172,6 +186,182 @@ function toolPosture(h: HarnessTurnOptions | undefined): {
   if (!h?.workflows) disallowed.push(WORKFLOW_TOOL);
   const allowedTools = h?.workflows ? [] : ALLOWED_TOOLS;
   return { allowedTools, disallowedTools: disallowed };
+}
+
+// ---------------------------------------------------------------------------
+// Skill enumeration
+//
+// Condotto builds its OWN list of dispatchable skills rather than trusting the
+// runtime's `slash_commands`, for four reasons the spike made concrete:
+//
+//  1. Provenance. `slash_commands` is a flat `string[]`; it cannot say WHICH file
+//     a name resolves to. Since a repo skill and an operator skill may share a
+//     name and the list de-duplicates, "is this the `ship` I mean?" is answerable
+//     only here, at enumeration time.
+//  2. Built-ins stay out. The runtime's list carries ~45 built-ins that grow with
+//     every CLI release — `/clear`, `/model`, `/compact`, `/rewind`, and whatever
+//     ships next. A denylist over that set fails OPEN on upgrade, silently. An
+//     allowlist of files we found ourselves fails closed.
+//  3. Frontmatter is inspectable before dispatch. `context: fork` runs the skill
+//     as a SUBAGENT (verified: its Read and Bash carried an `agent_id`), where
+//     `evaluateConfined` denies bash — so it would half-run. Refuse it up front.
+//  4. `@path` in a skill BODY inlines a file with no tool call at all, outside
+//     worktree confinement (verified live). Refuse bodies that use it.
+//
+// This is a *shape* check over vouched content, not a sandbox: repo skills load
+// only for `trusted` repos and operator skills are the operator's own. It exists
+// so an architect is never surprised by which file ran, not to make hostile skills
+// safe — nothing here would.
+
+/** Where a dispatchable skill may come from, and what it is called there. */
+const SKILL_DIRS = [
+  { rel: join(".claude", "skills"), kind: "skill" as const },
+  { rel: join(".claude", "commands"), kind: "command" as const },
+];
+
+/** Frontmatter keys that change HOW a skill runs in ways Condotto must not lose. */
+const REFUSED_FRONTMATTER: { key: string; value?: string; why: string }[] = [
+  // Runs the skill in a subagent, which re-enables fan-out the architect may have
+  // turned off AND lands its calls in `evaluateConfined`, where bash is denied.
+  { key: "context", value: "fork", why: "it runs in a subagent, where Condotto denies the shell it would need" },
+  // The architect owns model/effort through `@Condotto model` / `effort`.
+  { key: "model", why: "it overrides the model the architect chose for this thread" },
+  { key: "effort", why: "it overrides the reasoning effort the architect chose for this thread" },
+];
+
+// Inline shell in a skill body: a bang IMMEDIATELY followed by a backticked
+// command, at a line start or after whitespace. The leading-boundary requirement is
+// what separates the real construct from prose — a sentence containing `refresh!`
+// in a code span puts a bang next to a backtick without meaning anything by it, and
+// an earlier version of this check refused a real skill over exactly that.
+const INLINE_SHELL_RE = /(?:^|\s)!`[^`\n]*`/m;
+
+// `@path` file inlining. Only an ESCAPING path is a problem: expansion inlines the
+// file with no Read call, so it never meets `policy.ts` confinement — but an
+// in-worktree path grants nothing the agent could not already read through the
+// gate. Absolute, `~`, and `..` are the escapes.
+const INLINE_FILE_RE = /(?:^|\s)@(\S+)/gm;
+function inlinesFileOutsideWorktree(body: string): string | null {
+  INLINE_FILE_RE.lastIndex = 0;
+  for (const m of body.matchAll(INLINE_FILE_RE)) {
+    const path = m[1]!;
+    if (path.startsWith("/") || path.startsWith("~") || path.split("/").includes("..")) return path;
+  }
+  return null;
+}
+
+/** Name shape, mirrored from the core so a malformed name never reaches a prompt. */
+const SKILL_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9_-]{0,62}(?::[A-Za-z0-9][A-Za-z0-9_-]{0,62})?$/;
+
+/** Split a markdown file into frontmatter lines and body. */
+function splitFrontmatter(text: string): { front: Record<string, string>; body: string } {
+  const m = text.match(/^---\r?\n([\s\S]*?)\r?\n---\r?\n?([\s\S]*)$/);
+  if (!m) return { front: {}, body: text };
+  const front: Record<string, string> = {};
+  for (const line of m[1]!.split(/\r?\n/)) {
+    const kv = line.match(/^([A-Za-z0-9_-]+)\s*:\s*(.*)$/);
+    if (kv) front[kv[1]!.toLowerCase()] = kv[2]!.trim().replace(/^["']|["']$/g, "");
+  }
+  return { front, body: m[2] ?? "" };
+}
+
+/**
+ * Every skill Condotto will dispatch for this session, keyed by lowercased name.
+ *
+ * `repoRoot` contributes only when the repo is trusted — untrusted repos do not
+ * load their own `.claude/` at all (`settingSources`), so offering their skills
+ * would promise something the runtime would refuse. A name claimed by more than
+ * one source is dropped with a reason: silently picking one is exactly the
+ * confusion this enumeration exists to prevent.
+ */
+export function enumerateSkills(opts: {
+  /** Worktree (or worktree root) — the dir CONTAINING `.claude/`. */
+  repoRoot?: string;
+  /** The operator's home directory — the dir CONTAINING `.claude/`, not `~/.claude` itself. */
+  operatorHome?: string;
+  log?: (msg: string) => void;
+}): { skills: HarnessSkill[]; refused: Map<string, string> } {
+  const found = new Map<string, HarnessSkill[]>();
+  const refused = new Map<string, string>();
+
+  const sources: { base: string; source: HarnessSkill["source"] }[] = [
+    ...(opts.repoRoot ? [{ base: opts.repoRoot, source: "repo" as const }] : []),
+    ...(opts.operatorHome ? [{ base: opts.operatorHome, source: "operator" as const }] : []),
+  ];
+
+  for (const { base, source } of sources) {
+    for (const { rel, kind } of SKILL_DIRS) {
+      const dir = join(base, rel);
+      let entries: string[];
+      try {
+        entries = readdirSync(dir);
+      } catch {
+        continue; // no such directory is the normal case, not an error
+      }
+      for (const entry of entries) {
+        // A skill is `<name>/SKILL.md`; a legacy command is `<name>.md`.
+        const path = kind === "skill" ? join(dir, entry, "SKILL.md") : join(dir, entry);
+        const nameFromPath = kind === "skill" ? entry : entry.replace(/\.md$/i, "");
+        if (kind === "command" && !/\.md$/i.test(entry)) continue;
+        let text: string;
+        try {
+          text = readFileSync(path, "utf8");
+        } catch {
+          continue;
+        }
+        const { front, body } = splitFrontmatter(text);
+        const name = (front.name || nameFromPath).trim();
+        const key = name.toLowerCase();
+        if (!SKILL_NAME_RE.test(name)) {
+          refused.set(key, "its name isn't a shape Condotto will dispatch");
+          continue;
+        }
+        const badFront = REFUSED_FRONTMATTER.find(
+          (r) => front[r.key] !== undefined && (r.value === undefined || front[r.key]!.toLowerCase() === r.value),
+        );
+        if (badFront) {
+          refused.set(key, badFront.why);
+          continue;
+        }
+        // An escaping `@path` is refused: it inlines a file during expansion, with
+        // no Read call and therefore no confinement check.
+        const escaping = inlinesFileOutsideWorktree(body);
+        if (escaping) {
+          refused.set(key, `it inlines \`${escaping}\` with \`@\`, which reaches outside the worktree`);
+          continue;
+        }
+        // Inline shell is NOT refused. `disableSkillShellExecution` already replaces
+        // it with a placeholder, so the security question is settled — but the skill
+        // then runs without whatever context that command was gathering, and the
+        // architect should hear that from us rather than wonder later.
+        const warning = INLINE_SHELL_RE.test(body)
+          ? "this skill gathers context with inline shell commands, which Condotto disables — it will run without that context"
+          : undefined;
+        const skill: HarnessSkill = {
+          name,
+          source,
+          path,
+          ...(front.description ? { description: front.description } : {}),
+          ...(warning ? { warning } : {}),
+        };
+        found.set(key, [...(found.get(key) ?? []), skill]);
+      }
+    }
+  }
+
+  const skills: HarnessSkill[] = [];
+  for (const [key, matches] of found) {
+    if (refused.has(key)) continue;
+    if (matches.length > 1) {
+      // Which one the runtime would actually pick is unstated, and the architect
+      // typed a name expecting a specific file. Refuse rather than guess.
+      refused.set(key, `two skills claim that name (${matches.map((m) => m.path).join(" and ")})`);
+      continue;
+    }
+    skills.push(matches[0]!);
+  }
+  skills.sort((a, b) => a.name.localeCompare(b.name));
+  return { skills, refused };
 }
 
 /** Deny message for a gated call that arrived batched (defer unavailable). */
@@ -288,12 +478,26 @@ function abortNotice(reason: AbortReason, sawWorkflow: boolean, costUsd: number 
   }
 }
 
+/** Bound what a persisted — or corrupted — handle can carry back into memory. */
+const MAX_RUNTIME_COMMANDS = 500;
+const MAX_COMMAND_NAME_LEN = 64;
+
 function asHandle(handle: SessionHandle): ClaudeCodeHandle {
   const h = handle as Partial<ClaudeCodeHandle> | null;
   if (!h || h.v !== 1 || (h.sessionId !== null && h.sessionId !== undefined && typeof h.sessionId !== "string")) {
     throw new Error("claude-code: unrecognized session handle");
   }
-  return { v: 1, sessionId: h.sessionId ?? null };
+  // A legacy (pre-skills) handle and a corrupted one are treated alike: an unusable
+  // cross-check list degrades to "not known", never to a thrown turn. This list is
+  // advisory — the dispatchable set comes from our own enumeration — so losing it
+  // costs a log line, not a capability.
+  const raw = Array.isArray(h.runtimeCommands) ? h.runtimeCommands : null;
+  const runtimeCommands = raw
+    ? raw
+        .filter((s): s is string => typeof s === "string" && s.length > 0 && s.length <= MAX_COMMAND_NAME_LEN)
+        .slice(0, MAX_RUNTIME_COMMANDS)
+    : undefined;
+  return { v: 1, sessionId: h.sessionId ?? null, ...(runtimeCommands ? { runtimeCommands } : {}) };
 }
 
 /** True when running inside a `bun build --compile` binary: its module URLs live
@@ -388,9 +592,69 @@ class ClaudeCodeSession implements HarnessSession {
     return this._handle;
   }
 
+  /**
+   * Enumerated once per session and cached, because `listSkills()` is synchronous
+   * by contract and answers `@Condotto skills` — a listing must not do filesystem
+   * work on every call, and it must work before any turn has run.
+   */
+  private skillCache: HarnessSkill[] | null = null;
+
+  listSkills(): readonly HarnessSkill[] | null {
+    if (this.skillCache) return this.skillCache;
+    // Both sources are enumerated here, tagged by `source`. Whether the REPO's are
+    // actually reachable depends on repo trust — which is a per-turn option
+    // (`harness.projectConfig`), not session state, so this nullary/synchronous
+    // listing cannot know it. The core filters for display (it owns `repo.trusted`),
+    // and `turn()` below refuses a repo-source dispatch when trust is absent.
+    const { skills, refused } = enumerateSkills({
+      repoRoot: this.root ?? this.cwd,
+      operatorHome: homedir(),
+    });
+    for (const [name, why] of refused) {
+      console.warn(`[claude-code] not offering skill "${name}": ${why}`);
+    }
+    this.skillCache = skills;
+    return skills;
+  }
+
+  /**
+   * The prompt for a turn. A skill is dispatched by putting `/name args` at the
+   * START of the prompt — verified end to end (spike 2026-07-25), including with
+   * `SlashCommand` still in `disallowedTools` and with `resume` set. Minting the
+   * `/` is this adapter's job and only this adapter's; the core passes a bare name.
+   */
+  private buildPrompt(input: TurnInput): string {
+    if (!input.skill) return input.text;
+    const args = input.skill.args?.trim();
+    return `/${input.skill.name}${args ? ` ${args}` : ""}`;
+  }
+
   async *turn(input: TurnInput, gate: GateFn): AsyncIterable<TurnEvent> {
     // Fresh per turn — a stale flag from a prior cancel must not taint this turn.
     this.cancelRequested = false;
+    // Fail closed on a skill name this adapter would not itself offer. The core
+    // already checks membership, but a cold or stale core-side list must never be
+    // a bypass — and refusing HERE means no query is spawned at all.
+    if (input.skill) {
+      const wanted = input.skill.name.toLowerCase();
+      const match = (this.listSkills() ?? []).find((s) => s.name.toLowerCase() === wanted);
+      if (!SKILL_NAME_RE.test(input.skill.name) || !match) {
+        yield { kind: "error", message: `I don't have a skill called \`/${input.skill.name}\` in this session.` };
+        return;
+      }
+      // A repo's own skills load only under `settingSources: ["project"]`, which is
+      // the trusted posture. Dispatching one without it would reach the runtime as
+      // an unknown command; saying why is more useful than letting that happen.
+      if (match.source === "repo" && !input.harness?.projectConfig) {
+        yield {
+          kind: "error",
+          message:
+            `\`/${match.name}\` is one of this repo's own skills, and this repo isn't marked ` +
+            `\`trusted\` — so its \`.claude/\` config isn't loaded and the skill isn't available.`,
+        };
+        return;
+      }
+    }
     yield* this.runQuery(input, gate, /* allowFreshRetry */ true);
   }
 
@@ -494,7 +758,7 @@ class ClaudeCodeSession implements HarnessSession {
     };
 
     const q = this.queryFn({
-      prompt: input.text,
+      prompt: this.buildPrompt(input),
       options: {
         cwd: this.cwd,
         // A monorepo sub-project session starts BELOW the worktree root, but the
@@ -538,23 +802,41 @@ class ClaudeCodeSession implements HarnessSession {
         // .mcp.json, .claude/) from the worktree — repo content is untrusted
         // input and must not register MCP servers or alter permissions (§4).
         settingSources,
-        // Auto-memory. The `settings` tier is the highest user-controlled layer and
-        // applies regardless of `settingSources`, so this PINS the posture in both
-        // directions rather than relying on a default:
-        //   on  — point it at the core's proven per-(repo, channel) directory. The
-        //         SDK default is keyed on the SANITIZED CWD (sdk.d.ts:6378), i.e. a
-        //         worktree that gets destroyed, so without this memory cannot persist.
-        //   off — explicitly false, which also closes the one path by which a
-        //         TRUSTED repo's checked-in settings could switch memory on. (The SDK
-        //         already ignores `autoMemoryDirectory` from project settings "for
-        //         security", but not `autoMemoryEnabled`.)
-        // The agent writes memory with ordinary Write/Edit, so those calls hit the
-        // hook below and the core's memory rules govern them (spike 2026-07-20).
-        // NOTE: deliberately NOT added to `additionalDirectories` — the spike showed
-        // the write lands without it, so widening the SDK's own scope buys nothing.
-        settings: h?.memoryDir
-          ? { autoMemoryEnabled: true, autoMemoryDirectory: h.memoryDir }
-          : { autoMemoryEnabled: false },
+        // The `settings` tier is the highest user-controlled layer and applies
+        // regardless of `settingSources`, so both keys below are PINNED in both
+        // directions rather than left to a default a repo could move.
+        settings: {
+          // A skill / custom slash command body may embed `!`cmd`` to run a shell
+          // command and inline its output. That runs during EXPANSION — before the
+          // model sees anything, and therefore BEFORE our PreToolUse hook — so it is
+          // not gated by `policy.ts` at all: no allowlist check, no prod-data check,
+          // no hard-deny, no audit row. The §4 premise that "a skill is instructions
+          // and every tool call it makes still hits the hook" (DECISIONS 2026-07-20)
+          // holds for the calls a skill CAUSES and fails for its preprocessing.
+          //
+          // Pinned true for user/project/plugin sources (bundled and managed skills
+          // are unaffected, per sdk.d.ts). This matters already, not only for
+          // human-invoked skills: a `trusted` repo gets `skills: "all"` above, so a
+          // model-invoked skill could reach this channel today.
+          disableSkillShellExecution: true,
+          // Auto-memory. The `settings` tier is the highest user-controlled layer and
+          // applies regardless of `settingSources`, so this PINS the posture in both
+          // directions rather than relying on a default:
+          //   on  — point it at the core's proven per-(repo, channel) directory. The
+          //         SDK default is keyed on the SANITIZED CWD (sdk.d.ts:6378), i.e. a
+          //         worktree that gets destroyed, so without this memory cannot persist.
+          //   off — explicitly false, which also closes the one path by which a
+          //         TRUSTED repo's checked-in settings could switch memory on. (The SDK
+          //         already ignores `autoMemoryDirectory` from project settings "for
+          //         security", but not `autoMemoryEnabled`.)
+          // The agent writes memory with ordinary Write/Edit, so those calls hit the
+          // hook below and the core's memory rules govern them (spike 2026-07-20).
+          // NOTE: deliberately NOT added to `additionalDirectories` — the spike showed
+          // the write lands without it, so widening the SDK's own scope buys nothing.
+          ...(h?.memoryDir
+            ? { autoMemoryEnabled: true, autoMemoryDirectory: h.memoryDir }
+            : { autoMemoryEnabled: false }),
+        },
         hooks: { PreToolUse: [{ hooks: [gateHook] }] },
         // Backstop for calls that reach the un-deferrable path (batched gated
         // calls; escaped workflow-agent calls). Runs the core confinement policy
@@ -635,10 +917,52 @@ class ClaudeCodeSession implements HarnessSession {
 
         const m = step.value as Record<string, any>;
         if (m.type === "system" && m.subtype === "init") {
-          if (m.session_id && m.session_id !== this._handle.sessionId) {
-            this._handle = { ...this._handle, sessionId: m.session_id };
+          // The init message carries the session id AND the runtime's own list of
+          // dispatchable commands. Emit once if EITHER changed: on a resume the
+          // session id is unchanged while the command set may have moved, and
+          // nesting the emit inside the id check would drop that update forever.
+          const nextId: string | null = m.session_id ?? this._handle.sessionId;
+          const commands: string[] | undefined = Array.isArray(m.slash_commands)
+            ? m.slash_commands
+                .filter((s: unknown): s is string => typeof s === "string" && s.length > 0 && s.length <= MAX_COMMAND_NAME_LEN)
+                .slice(0, MAX_RUNTIME_COMMANDS)
+            : undefined;
+          const nextCommands = commands ?? this._handle.runtimeCommands;
+          const changed =
+            nextId !== this._handle.sessionId ||
+            JSON.stringify(nextCommands ?? null) !== JSON.stringify(this._handle.runtimeCommands ?? null);
+          if (changed) {
+            this._handle = {
+              ...this._handle,
+              sessionId: nextId,
+              ...(nextCommands ? { runtimeCommands: nextCommands } : {}),
+            };
             yield { kind: "handle_updated", handle: this._handle };
           }
+          // Cross-check: we dispatch from our OWN enumeration, so a name the runtime
+          // does not list would fail as "Unknown command" with no explanation. This
+          // is the only place the two lists can be compared.
+          if (commands && input.skill) {
+            const listed = commands.some((c) => c.replace(/^\//, "").toLowerCase() === input.skill!.name.toLowerCase());
+            if (!listed) {
+              console.warn(
+                `[claude-code] dispatching /${input.skill.name} but the runtime did not list it ` +
+                  `(${commands.length} commands reported) — expect "Unknown command".`,
+              );
+            }
+          }
+          continue;
+        }
+        // A local slash command can answer without running the model loop at all
+        // (/context, /usage). Its output arrives here rather than as an assistant
+        // message, and `terminal_reason` is unset when the loop was bypassed — so
+        // without this the turn could report "produced no result" while the command
+        // had in fact answered. Buffered like any reply: a real `result` later in
+        // the same turn supersedes it, which is what happens for an unknown command
+        // (observed: the text comes back on `result`, not here).
+        if (m.type === "system" && m.subtype === "local_command_output") {
+          const text = typeof m.content === "string" ? m.content.trim() : "";
+          if (text) pendingReply = { text };
           continue;
         }
         // A running workflow emits background-task lifecycle system
@@ -755,10 +1079,17 @@ class ClaudeCodeSession implements HarnessSession {
       // Recover a normal message turn by starting fresh — but NEVER an
       // approval-resume (empty prompt): a fresh session would silently drop the
       // just-approved action and wipe context (#10). Let that surface as error.
+      //
+      // NEVER a skill turn either, and for the opposite reason. A skill turn also
+      // carries `text: ""`, so guarding on `input.text` alone would refuse to
+      // recover it; but "recovering" it means re-dispatching `/ship` into a brand
+      // new session, running a side-effecting command a SECOND time. An error the
+      // architect can see and re-issue is strictly better than a silent double run.
       if (
         allowFreshRetry &&
         // Never retry an interrupted turn — the architect/timeout ended it on purpose.
         !this.cancelRequested &&
+        !input.skill &&
         input.text.trim().length > 0 &&
         this._handle.sessionId &&
         /No conversation found/i.test(message)
@@ -891,6 +1222,11 @@ export class ClaudeCodeAdapter implements HarnessAdapter {
     // The tokens the core validates an architect's model/effort against.
     supportedModels: SUPPORTED_MODELS, // ["opus","sonnet","fable"]
     supportedEfforts: SUPPORTED_EFFORTS, // ["low","medium","high","xhigh","max"]
+    // A human can dispatch a skill by name: `prompt: "/name args"` expands it
+    // inline, which is the ONLY route to a `disable-model-invocation: true` skill
+    // (that flag is enforced on the model-invocation route only). Verified live,
+    // spike 2026-07-25.
+    skillInvocation: true,
   };
 
   async create(opts: { cwd: string; system: string; root?: string }): Promise<HarnessSession> {

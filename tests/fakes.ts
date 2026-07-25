@@ -7,6 +7,7 @@ import type {
   HarnessAdapter,
   HarnessCapabilities,
   HarnessSession,
+  HarnessSkill,
   HarnessTurnOptions,
   InboundEvent,
   OutboundMessage,
@@ -96,9 +97,19 @@ class FakeHarnessSession implements HarnessSession {
     return this._handle;
   }
 
+  listSkills(): readonly HarnessSkill[] | null {
+    return this.parent.skills;
+  }
+
   async *turn(input: TurnInput, gate: GateFn): AsyncIterable<TurnEvent> {
     this.turns.push(input);
-    this.parent.allTurns.push({ cwd: this.cwd, text: input.text, budgetUsd: input.budgetUsd, harness: input.harness });
+    this.parent.allTurns.push({
+      cwd: this.cwd,
+      text: input.text,
+      budgetUsd: input.budgetUsd,
+      harness: input.harness,
+      ...(input.skill ? { skill: input.skill } : {}),
+    });
     if (this.parent.beforeReply) await this.parent.beforeReply();
     // Simulate a turn that ends in an error carrying a cost (e.g. the SDK's
     // error_max_budget_usd), for cost-accounting tests.
@@ -242,12 +253,24 @@ export class FakeHarness implements HarnessAdapter {
     imageInput: false,
     supportedModels: ["opus", "sonnet", "fable"],
     supportedEfforts: ["low", "medium", "high", "xhigh", "max"],
+    skillInvocation: true,
   };
 
   sessionSeq = 0;
   created: { cwd: string; system: string; root?: string }[] = [];
   resumed: { handle: SessionHandle; cwd: string; system: string; root?: string }[] = [];
-  allTurns: { cwd: string; text: string; budgetUsd?: number; harness?: HarnessTurnOptions }[] = [];
+  allTurns: {
+    cwd: string;
+    text: string;
+    budgetUsd?: number;
+    harness?: HarnessTurnOptions;
+    skill?: { name: string; args?: string };
+  }[] = [];
+  /**
+   * What `listSkills()` reports. `null` models a harness that cannot enumerate
+   * (the core must then refuse rather than dispatch an unvetted name).
+   */
+  skills: HarnessSkill[] | null = null;
   /** Tool calls the gate allowed to run (approved or auto-allowed). */
   executed: ToolCall[] = [];
   /** Queue of scripted tool-call lists, one per upcoming fresh turn. */

@@ -465,6 +465,8 @@ sessions themselves, an architect `@Condotto grant`s them architect rights (see
 | `@Condotto workflows on\|off` | architect | Multi-agent Workflow tool, gated + confined (on by default). |
 | `@Condotto workflows write on\|off` | architect | Let confined workflow/subagent calls write **in the worktree** without a per-write click (out-of-worktree/credentials still refused). Off by default, and the only one of these not settable in `condotto.toml`. |
 | `@Condotto ultra on\|off` | architect | Preset: `xhigh` effort + subagents + workflows — the shipped default, so this is mainly how you get back after dialing down. `off` drops subagents/workflows; set effort separately. |
+| `@Condotto /<skill> [args]` | architect | Run one of the harness's skills — including one marked `disable-model-invocation`, which the agent itself cannot invoke. Mention me first: a message that *begins* with `/` is eaten by Slack. |
+| `@Condotto skills` | architect | List the skills this thread can run, and which file each one is. |
 | `@Condotto auto-approve on\|off` | architect | Run an architect's own turns without the Approve click (on by default). |
 | `@Condotto grant @user architect [everywhere]` | architect | Delegate authority (this channel, or `everywhere`). Persists across restarts. |
 | `@Condotto revoke @user [everywhere]` | architect | Remove a runtime grant. |
@@ -547,6 +549,36 @@ Slack. Two features make that practical:
   worktree access, credential/secret exfiltration, and host-escape commands are
   still refused with no button. Dial it off per thread with `@Condotto auto-approve
   off`, or globally with `CONDOTTO_AUTO_APPROVE=off`.
+
+### Running your skills
+
+Claude Code skills work in a thread: `@Condotto /ship`, `@Condotto skills` to see
+what's there. Mention Condotto first — a Slack message that *begins* with `/` gets
+eaten by Slack before it ever reaches the daemon.
+
+This is the only way to reach a skill marked `disable-model-invocation: true`.
+That flag deliberately withholds a skill from the model, so the agent can't invoke
+it no matter how you ask — and it's the flag teams put on exactly the skills that
+matter: `ship`, `ready`, `commit`. Naming one yourself is a different route
+entirely, which is why it's architects-only.
+
+A skill runs as an ordinary turn: same model, same budget, same gate. What it asks
+for still gets approved or refused the usual way.
+
+Two things Condotto refuses, and it's worth knowing why. **Arguments are limited to
+plain text** — letters, digits, and ordinary punctuation. A skill's text is expanded
+*before* the agent runs, so `` !`…` `` in an argument would execute ahead of every
+check Condotto makes; there's no way to gate it after the fact, so it's refused up
+front and you're told which character was the problem. And **Condotto lists only
+skills it found itself**, in your repo (if it's marked `trusted`) or in your own
+`~/.claude/skills` — never the harness's built-in commands, and never a name two
+files both claim. The listing shows you the exact file, because `ship` in your repo
+and `ship` in your home directory are different programs.
+
+One behaviour worth knowing about: a skill can gather context by running shell
+inline (`` !`git status` `` in its own text). Condotto disables that — it would run
+before anything could gate it — so such a skill still works, but without that
+context. You'll see a note saying so before it starts.
 
 > **Residual risk, stated plainly (accepted for the trusted-team model):** under
 > auto-approve, in-worktree shell on an architect's turn runs without a click.

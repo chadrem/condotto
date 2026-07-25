@@ -96,6 +96,15 @@ export type CommandName =
   // architect self-approve toggle ("on"|"off"): an architect-initiated
   // turn's gated actions run without the Approve click (hard-deny floor stays).
   | "auto-approve"
+  // Dispatch a harness skill / slash command on an architect's behalf
+  // (`@Condotto /ship <args>`). Args are "<name> [raw args…]". This is the only
+  // path to a skill the AGENT cannot invoke: a skill marked
+  // `disable-model-invocation` is withheld from the model and reachable only by a
+  // human naming it. The core validates the name and REFUSES unsafe argument text
+  // (see `checkSkillArgs`); the adapter owns the harness's invocation syntax.
+  | "skill"
+  // List what this session's harness will dispatch (architect-only).
+  | "skills"
   // in-thread role delegation (architect-only). `grant` args carry the
   // resolved target principal key + role (+ optional "everywhere"); `revoke`
   // carries the target (+ optional "everywhere"). The adapter resolves the
@@ -331,6 +340,30 @@ export interface HarnessTurnOptions {
 // decision (PolicyContext.workflowWrite, set by the session manager from the
 // session row), so it lives in the core gate, not in HarnessTurnOptions.
 
+/**
+ * A skill / slash command a human may dispatch into a session. DISPLAY DATA ONLY —
+ * `description` is authored by whoever wrote the skill and carries no authority, so
+ * it must be passed through `sanitizeSkillText` before it is rendered anywhere.
+ *
+ * `path` is the resolved absolute source file. It exists because provenance cannot
+ * be recovered later: the harness reports a flat list of names that de-duplicates
+ * shadowed entries, so "which `ship` will run" is answerable only at enumeration
+ * time. The core shows it to the architect; it never interprets it.
+ */
+export interface HarnessSkill {
+  name: string;
+  description?: string;
+  source: "repo" | "operator";
+  path: string;
+  /**
+   * A caveat about how this skill will behave under Condotto, surfaced to the
+   * architect before it runs. Condotto-authored, unlike `description` — it says
+   * something the skill's own text cannot know, e.g. that a capability the skill
+   * assumes has been disabled for safety.
+   */
+  warning?: string;
+}
+
 export interface TurnInput {
   text: string;
   /**
@@ -345,12 +378,35 @@ export interface TurnInput {
    * core policy. Omitted = the adapter's own defaults.
    */
   harness?: HarnessTurnOptions;
+  /**
+   * Dispatch a harness-native skill / slash command on this turn INSTEAD of prose.
+   * The core supplies a bare name (already checked against the adapter's own
+   * enumeration) and argument text already refused-or-accepted by
+   * `checkSkillArgs`; the adapter renders it in whatever form its runtime
+   * dispatches (Claude Code: a leading `/name args` prompt string). The core never
+   * mints that syntax — same split as `model` tokens.
+   *
+   * A skill turn carries `text: ""`: there is no message, so there is no framed
+   * body. Authority was established at the command, where the invoker was proven an
+   * architect on a `verified` surface. Everything the skill then does still passes
+   * the gate — verified end to end (spike 2026-07-25: a Write inside a skill turn
+   * defers and re-drives on the empty-prompt resume).
+   */
+  skill?: { name: string; args?: string };
 }
 
 export interface HarnessSession {
   readonly handle: SessionHandle;
   turn(input: TurnInput, gate: GateFn): AsyncIterable<TurnEvent>;
   interrupt(): Promise<void>;
+  /**
+   * Skills this session will dispatch via `TurnInput.skill`, or `null` when the
+   * harness cannot enumerate them. SYNCHRONOUS and cache-only by contract:
+   * enumerating must never spawn a turn or spend budget, because `@Condotto skills`
+   * is a listing, not work. Names the adapter refuses are already absent, so
+   * membership in this list IS the core's authorization signal.
+   */
+  listSkills(): readonly HarnessSkill[] | null;
 }
 
 export interface HarnessCapabilities {
@@ -366,6 +422,12 @@ export interface HarnessCapabilities {
   supportedModels: string[];
   /** Reasoning-effort levels the architect may select, e.g. ["low",…,"max"]. */
   supportedEfforts: string[];
+  /**
+   * The harness can dispatch a named skill supplied by a human (`TurnInput.skill`).
+   * False ⇒ `@Condotto /<name>` is refused at the command, so the core never emits
+   * a `skill` a harness cannot honour.
+   */
+  skillInvocation: boolean;
 }
 
 export interface HarnessAdapter {

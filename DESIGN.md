@@ -292,6 +292,8 @@ interface HarnessSession {
                                     // daemon restarts (park & resume)
   turn(input: TurnInput, gate: GateFn): AsyncIterable<TurnEvent>;
   interrupt(): Promise<void>;
+  listSkills(): readonly HarnessSkill[] | null;   // sync + cache-only: a listing
+                                    // must never spawn a turn or spend budget
 }
 
 // THE capability. Called for EVERY tool call; the policy engine answers
@@ -312,7 +314,14 @@ interface HarnessCapabilities {
   resumeAfterRestart: boolean;  // park & resume (§2 journey 5) needs this
   costReporting: boolean;       // budget enforcement degrades without it
   imageInput: boolean;          // screenshots from threads
+  skillInvocation: boolean;     // a human can dispatch a named skill (§8)
 }
+
+// A skill a human may dispatch (`TurnInput.skill = {name, args}`). The core names
+// one; the adapter knows its runtime's invocation syntax. `path` is display data
+// the architect sees before it runs — provenance is not recoverable later.
+type HarnessSkill = { name: string; description?: string;
+                      source: "repo" | "operator"; path: string };
 ```
 
 The Claude Code adapter implements this with the Agent SDK: `create`/`resume`
@@ -484,6 +493,35 @@ and a *second* session whose repo has memory off carries no memory floor at all.
 incidental: `roles.scope` is `channel_id | '*'`, so a per-repo store would carry
 content written under one channel's authority into another's. See DECISIONS.md
 2026-07-20.
+
+**A skill is not only instructions, and that revises a premise.** The 2026-07-20
+entry recorded that "a skill is instructions, and every tool call it makes still
+hits the hook." That is true of the calls a skill *causes* and false of its
+**preprocessing**: a skill body can embed `` !`cmd` `` to run a shell command and
+`@path` to inline a file, and both happen during expansion — before the model,
+therefore before `PreToolUse`, therefore outside `policy.ts` entirely. No
+allowlist check, no production-data check, no hard-deny, no audit row. Verified
+live 2026-07-25 (`scripts/spike-skills.ts`): an `@path` pointing outside the
+worktree came back in the reply with **no tool call at all**.
+
+Three things hold the line, and all three are needed:
+
+- `disableSkillShellExecution: true` is pinned in the harness `settings`, which
+  neutralizes `` !`cmd` `` in a skill's own body for user, project and plugin
+  sources.
+- It does **not** cover argument text substituted at `$ARGUMENTS` — that still
+  executes (verified with a construct whose output is absent from its source). So
+  skill arguments are checked against a **positive charset and refused**, not
+  sanitized (`checkSkillArgs`). That refusal is the boundary, not a nicety.
+- Condotto enumerates the skills it will dispatch **itself** rather than trusting
+  the runtime's list. That lets it refuse a body whose `@path` reaches OUTSIDE the
+  worktree (an in-worktree one grants nothing the agent could not already read
+  through the gate), refuse frontmatter that seizes a control the architect owns
+  (`context: fork` would run the skill as a subagent, where `evaluateConfined`
+  denies its shell), and refuse a name two sources claim. Inline shell is *warned*
+  about, not refused: the setting above already neutralizes it, so refusing on top
+  would block real skills for no added safety — but the skill then runs without the
+  context it was gathering, and the architect is told so before it starts.
 
 The mapping from tool call → {allow, gate, deny} is the **policy engine**, and
 it is per-repo and per-thread configurable. Default posture is deny/gate-heavy;
@@ -905,6 +943,29 @@ land/deploy still gate. **Known SDK limitation:** a background workflow sub-agen
 Grep/Bash/Write can be denied by the SDK's task permission UPSTREAM of our gate, so
 those are best-effort (Read/Glob route reliably; the security boundary holds
 regardless).
+
+**Architect-invocable skills.** `@Condotto /<name> [args]` runs one of the
+harness's skills as a turn of the session — with its model, effort, budget and the
+same §4 gate (a gated write inside a skill turn defers and re-drives on the
+approval resume, verified). `@Condotto skills` lists what is available and where
+each one lives. This is the ONLY path to a skill marked
+`disable-model-invocation: true`: that flag withholds a skill from the model, so
+the agent cannot reach it however it is asked, and those are precisely the skills a
+team marks that way — `ship`, `ready`, `commit`. Dispatch is a prompt-position
+`/name args`, which the runtime expands inline; the core names a skill and the
+adapter owns the syntax, so the seam survives a different harness.
+
+Architect-only and `verified`-surface-only, because a skill turn reaches the
+harness **without** the `user=` header that carries authority for every other
+inbound byte — it is attributable to the person who typed the command, never to
+message content. The mention-first spelling is load-bearing too: Slack intercepts a
+message that *begins* with `/`, and custom slash commands cannot run in a thread at
+all. Condotto builds its own allowlist of dispatchable skills rather than trusting
+the runtime's list (see §4): that makes provenance real, keeps the ~45 built-ins
+out, and means a new one shipped by a future CLI release cannot leak in. Repo
+skills need the repo `trusted`, which follows from `settingSources` with no new
+switch; the operator's own `~/.claude` skills reach the agent either way, so the
+listing names the resolved file.
 
 **Durable agent memory.** A repo vouched with `memory = true` gets a Condotto-owned
 memory directory per **(repo, channel)**, outside every worktree, which the SDK's

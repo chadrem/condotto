@@ -146,6 +146,10 @@ max_concurrent_turns = 6    # cap on harness turns running at once across all
 # trusted = false                 # true loads the repo's own CLAUDE.md/skills/.claude
 #                                 #   config — set ONLY for repos you vouch for
 #                                 #   (it also loads that repo's permissions/hooks/MCP).
+#                                 #   It is also what makes the repo's own skills
+#                                 #   runnable in a thread (`@Condotto /<skill>`);
+#                                 #   your own ~/.claude skills are runnable either
+#                                 #   way. There is no separate switch for skills.
 # memory = false                  # true gives the agent durable memory for this repo:
 #                                 #   markdown notes it keeps about the codebase and
 #                                 #   picks up again in LATER threads. Scoped per

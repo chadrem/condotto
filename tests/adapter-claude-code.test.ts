@@ -1,5 +1,13 @@
-import { describe, expect, test } from "bun:test";
-import { ClaudeCodeAdapter, scrubDaemonEnv, type QueryFn } from "../src/adapters/claude-code/adapter";
+import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
+import {
+  ClaudeCodeAdapter,
+  enumerateSkills,
+  scrubDaemonEnv,
+  type QueryFn,
+} from "../src/adapters/claude-code/adapter";
 import type { GateFn, TurnEvent } from "../src/core/types";
 
 // Drive the REAL claude-code adapter loop with a scripted SDK message stream (via
@@ -404,6 +412,40 @@ describe("claude-code adapter: tool posture", () => {
   });
 });
 
+describe("claude-code adapter: skill shell execution is pinned off", () => {
+  async function captureSettings(harness?: Record<string, unknown>): Promise<any> {
+    let captured: any;
+    const q = fakeQuery(async function* (opts) {
+      captured = opts;
+      yield { type: "result", subtype: "success", result: "ok", total_cost_usd: 0 };
+    });
+    await collect(new ClaudeCodeAdapter(q), allowGate, harness);
+    return captured.settings;
+  }
+
+  // A skill body's `!`cmd`` runs during EXPANSION — before the model, and so before
+  // the PreToolUse hook — which puts it outside policy.ts entirely: no allowlist,
+  // no hard-deny, no audit. It must be off, and it must be off in BOTH memory
+  // postures, because `settings` is rebuilt per turn from `h.memoryDir` and an
+  // early version of that ternary would have dropped this key on one branch.
+  test("memory off ⇒ shell execution disabled, auto-memory pinned false", async () => {
+    const s = await captureSettings({ subagents: true, workflows: false });
+    expect(s.disableSkillShellExecution).toBe(true);
+    expect(s.autoMemoryEnabled).toBe(false);
+  });
+
+  test("memory on ⇒ shell execution still disabled, memory dir still pinned", async () => {
+    const s = await captureSettings({ subagents: true, memoryDir: "/mem/repo/chan" });
+    expect(s.disableSkillShellExecution).toBe(true);
+    expect(s.autoMemoryEnabled).toBe(true);
+    expect(s.autoMemoryDirectory).toBe("/mem/repo/chan");
+  });
+
+  test("no harness options at all ⇒ still disabled (the default posture is not a hole)", async () => {
+    expect((await captureSettings()).disableSkillShellExecution).toBe(true);
+  });
+});
+
 describe("claude-code adapter: model + effort resolution", () => {
   async function captureOpts(harness: Record<string, unknown>): Promise<any> {
     let captured: any;
@@ -430,5 +472,283 @@ describe("claude-code adapter: model + effort resolution", () => {
     expect((await captureOpts({ model: "opus", effort: "xhigh" })).effort).toBe("xhigh");
     expect((await captureOpts({ model: "opus", effort: "max" })).effort).toBe("max");
     expect((await captureOpts({ model: "opus", effort: "bogus" })).effort).toBeUndefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Human skill dispatch.
+//
+// `scripts/spike-skills.ts` established live (2026-07-25) that putting `/name args`
+// at the start of the prompt expands a `disable-model-invocation: true` skill — the
+// only route to one, since that flag is enforced on the model-invocation path only —
+// and that a tool call inside such a turn still defers and re-drives normally.
+// These tests pin the adapter half: what prompt gets built, what is refused before
+// a query is ever spawned, and the two handle behaviours a restart depends on.
+
+describe("claude-code adapter: skill dispatch", () => {
+
+  /** A session whose enumeration is stubbed, so tests don't depend on the disk. */
+  function sessionWith(skills: any[], q: QueryFn) {
+    const adapter = new ClaudeCodeAdapter(q);
+    return adapter.create({ cwd: "/wt/session-abc", system: "sys" }).then((s) => {
+      (s as any).skillCache = skills;
+      return s;
+    });
+  }
+  const repoSkill = { name: "ship", source: "repo", path: "/wt/session-abc/.claude/skills/ship/SKILL.md" };
+  const opSkill = { name: "simplify", source: "operator", path: "/home/op/.claude/skills/simplify/SKILL.md" };
+
+  async function run(session: any, input: any): Promise<TurnEvent[]> {
+    const events: TurnEvent[] = [];
+    for await (const ev of session.turn(input, allowGate)) events.push(ev);
+    return events;
+  }
+
+  test("a skill turn sends the invocation and nothing else; args are optional", async () => {
+    const prompts: unknown[] = [];
+    const q = ((args: { prompt: unknown; options: Record<string, any> }) => {
+      prompts.push(args.prompt);
+      const gen = (async function* () {
+        yield { type: "result", subtype: "success", result: "ok", total_cost_usd: 0 };
+      })();
+      return Object.assign(gen, { interrupt: async () => {} });
+    }) as unknown as QueryFn;
+
+    const s = await sessionWith([repoSkill, opSkill], q);
+    await run(s, { text: "", skill: { name: "ship", args: "fix the sync" }, harness: { projectConfig: true } });
+    await run(s, { text: "", skill: { name: "simplify" }, harness: { projectConfig: true } });
+    await run(s, { text: "an ordinary message" });
+    expect(prompts).toEqual(["/ship fix the sync", "/simplify", "an ordinary message"]);
+  });
+
+  test("refuses an unknown name WITHOUT spawning a query", async () => {
+    let calls = 0;
+    const q = fakeQuery(async function* () {
+      calls++;
+      yield { type: "result", subtype: "success", result: "ok", total_cost_usd: 0 };
+    });
+    const s = await sessionWith([repoSkill], q);
+    const events = await run(s, { text: "", skill: { name: "nope" }, harness: { projectConfig: true } });
+    expect(calls).toBe(0); // fail closed BEFORE any spend
+    expect(events.filter((e) => e.kind === "error").length).toBe(1);
+    expect((events[0] as any).message).toContain("/nope");
+  });
+
+  test("refuses a malformed name even if something claims to offer it", async () => {
+    let calls = 0;
+    const q = fakeQuery(async function* () {
+      calls++;
+      yield { type: "result", subtype: "success", result: "ok", total_cost_usd: 0 };
+    });
+    // A name that would open a second command / traverse a path must never reach
+    // prompt position 0, regardless of what enumeration returned.
+    const s = await sessionWith([{ name: "../../etc/passwd", source: "repo", path: "x" }], q);
+    const events = await run(s, { text: "", skill: { name: "../../etc/passwd" }, harness: { projectConfig: true } });
+    expect(calls).toBe(0);
+    expect(events.filter((e) => e.kind === "error").length).toBe(1);
+  });
+
+  test("refuses a repo skill when the repo is not trusted, and says why", async () => {
+    let calls = 0;
+    const q = fakeQuery(async function* () {
+      calls++;
+      yield { type: "result", subtype: "success", result: "ok", total_cost_usd: 0 };
+    });
+    const s = await sessionWith([repoSkill, opSkill], q);
+    // Untrusted repos never load their own .claude/, so dispatching would reach the
+    // runtime as "Unknown command". Refuse with the actual reason instead.
+    const events = await run(s, { text: "", skill: { name: "ship" }, harness: { projectConfig: false } });
+    expect(calls).toBe(0);
+    expect((events[0] as any).message).toContain("trusted");
+    // An OPERATOR skill in the same session is unaffected — it loads either way.
+    const ok = await run(s, { text: "", skill: { name: "simplify" }, harness: { projectConfig: false } });
+    expect(ok.filter((e) => e.kind === "error").length).toBe(0);
+  });
+
+  test("a skill turn never retries into a fresh session (that would run it twice)", async () => {
+    // A skill turn carries text:"" like an approval-resume, so a guard keyed on
+    // `input.text` alone would refuse to recover it — but "recovering" a /ship means
+    // dispatching a side-effecting command a SECOND time. Erroring is correct.
+    let attempts = 0;
+    const q = fakeQuery(async function* () {
+      attempts++;
+      yield { type: "system", subtype: "init", session_id: "s1" };
+      throw new Error("No conversation found for session s1");
+    });
+    const s = await sessionWith([opSkill], q);
+    await expect(
+      (async () => {
+        for await (const _ of s.turn({ text: "", skill: { name: "simplify" } } as any, allowGate));
+      })(),
+    ).rejects.toThrow(/No conversation found/);
+    expect(attempts).toBe(1); // one attempt, no silent re-dispatch
+  });
+
+  test("an ordinary turn still retries fresh — the recovery path is unchanged", async () => {
+    let attempts = 0;
+    const q = fakeQuery(async function* () {
+      attempts++;
+      if (attempts === 1) {
+        yield { type: "system", subtype: "init", session_id: "s1" };
+        throw new Error("No conversation found for session s1");
+      }
+      yield { type: "result", subtype: "success", result: "recovered", total_cost_usd: 0 };
+    });
+    const s = await sessionWith([], q);
+    const events = await run(s, { text: "hello again" });
+    expect(attempts).toBe(2);
+    expect(events.some((e) => e.kind === "reply" && (e as any).text === "recovered")).toBe(true);
+  });
+});
+
+describe("claude-code adapter: handle carries the runtime command list", () => {
+  test("emits handle_updated when only the command list changed on a resume", async () => {
+    // The session id is unchanged on a resume; nesting the emit inside the id check
+    // (as the original did) would drop a changed command set forever.
+    const q = fakeQuery(async function* () {
+      yield { type: "system", subtype: "init", session_id: "s1", slash_commands: ["ship", "compact"] };
+      yield { type: "result", subtype: "success", result: "ok", total_cost_usd: 0 };
+    });
+    const adapter = new ClaudeCodeAdapter(q);
+    const session = await adapter.resume({ v: 1, sessionId: "s1", runtimeCommands: ["compact"] }, "/wt/a", "sys");
+    const events: TurnEvent[] = [];
+    for await (const ev of session.turn({ text: "hi" }, allowGate)) events.push(ev);
+    const updated = events.filter((e) => e.kind === "handle_updated");
+    expect(updated.length).toBe(1);
+    expect((updated[0] as any).handle.runtimeCommands).toEqual(["ship", "compact"]);
+    expect((updated[0] as any).handle.v).toBe(1); // never bumped — a rollback must still read it
+  });
+
+  test("tolerates a legacy handle and a corrupt list rather than throwing", async () => {
+    const q = fakeQuery(async function* () {
+      yield { type: "result", subtype: "success", result: "ok", total_cost_usd: 0 };
+    });
+    const adapter = new ClaudeCodeAdapter(q);
+    // Pre-skills handle: resumes, simply carries no cross-check list.
+    const legacy = await adapter.resume({ v: 1, sessionId: "s1" }, "/wt/a", "sys");
+    expect((legacy.handle as any).runtimeCommands).toBeUndefined();
+    // Garbage in the persisted blob degrades to "not known", never a thrown turn.
+    for (const bad of ["nope", [1, 2, {}], { a: 1 }]) {
+      const s = await adapter.resume({ v: 1, sessionId: "s1", runtimeCommands: bad as any }, "/wt/a", "sys");
+      expect((s.handle as any).runtimeCommands ?? []).toEqual([]);
+    }
+  });
+
+  test("still rejects a handle whose version it does not know", async () => {
+    const adapter = new ClaudeCodeAdapter(fakeQuery(async function* () {}));
+    await expect(adapter.resume({ v: 2, sessionId: "s1" } as any, "/wt/a", "sys")).rejects.toThrow(/unrecognized/);
+  });
+});
+
+describe("claude-code adapter: skill enumeration is an allowlist", () => {
+  // Condotto builds its own list rather than trusting the runtime's flat
+  // `slash_commands`, so that provenance is real, built-ins stay out, and
+  // frontmatter can be inspected BEFORE a dispatch. These tests are that contract.
+  const tmp = join(tmpdir(), `condotto-skills-${crypto.randomUUID()}`);
+  const repo = join(tmp, "repo");
+  const home = join(tmp, "home");
+
+  function writeSkill(base: string, name: string, front: string[], body = "Do the thing.") {
+    const p = join(base, ".claude", "skills", name, "SKILL.md");
+    mkdirSync(dirname(p), { recursive: true });
+    writeFileSync(p, ["---", `name: ${name}`, ...front, "---", "", body, ""].join("\n"));
+  }
+
+  beforeAll(() => {
+    writeSkill(repo, "ship", ["description: Ship it."]);
+    writeSkill(repo, "forky", ["context: fork"]);
+    writeSkill(repo, "shelly", [], "Status: !`git status`");
+    // Prose, NOT the inline-shell construct: the bang sits inside a code span and
+    // happens to touch a backtick. An earlier check refused a real skill over this.
+    writeSkill(repo, "prosey", [], "Note that `refresh!` can exceed 30s.");
+    writeSkill(repo, "filey", [], "Creds: @~/.aws/credentials");
+    writeSkill(repo, "localfile", [], "Config: @package.json");
+    writeSkill(repo, "modely", ["model: claude-opus-5"]);
+    writeSkill(repo, "clash", ["description: repo copy"]);
+    writeSkill(home, "clash", ["description: operator copy"]);
+    writeSkill(home, "simplify", ["description: Tidy up."]);
+    // Legacy `.claude/commands/<name>.md` is still a supported source.
+    const legacy = join(home, ".claude", "commands", "refactor.md");
+    mkdirSync(dirname(legacy), { recursive: true });
+    writeFileSync(legacy, "Refactor the selected code.\n");
+  });
+  afterAll(() => rmSync(tmp, { recursive: true, force: true }));
+
+  const run = () => enumerateSkills({ repoRoot: repo, operatorHome: home });
+
+  test("offers repo and operator skills, with a resolved source path", () => {
+    const { skills } = run();
+    const ship = skills.find((s) => s.name === "ship")!;
+    expect(ship.source).toBe("repo");
+    expect(ship.path).toBe(join(repo, ".claude", "skills", "ship", "SKILL.md"));
+    expect(ship.description).toBe("Ship it.");
+    expect(skills.find((s) => s.name === "simplify")!.source).toBe("operator");
+    // Legacy .claude/commands/<name>.md still counts.
+    expect(skills.find((s) => s.name === "refactor")!.source).toBe("operator");
+  });
+
+  test("refuses `context: fork` — it would run as a subagent, where bash is denied", () => {
+    const { skills, refused } = run();
+    expect(skills.find((s) => s.name === "forky")).toBeUndefined();
+    expect(refused.get("forky")).toContain("subagent");
+  });
+
+  test("refuses an `@path` that reaches outside the worktree, but not one inside it", () => {
+    // `@path` inlines during expansion — no Read call, so no confinement check. Only
+    // an ESCAPING path is a problem: an in-repo one grants nothing the agent could
+    // not already read through the gate.
+    const { skills, refused } = run();
+    expect(skills.find((s) => s.name === "filey")).toBeUndefined();
+    expect(refused.get("filey")).toContain("outside the worktree");
+    expect(skills.find((s) => s.name === "localfile")).toBeDefined();
+  });
+
+  test("warns about inline shell rather than refusing the skill", () => {
+    // disableSkillShellExecution already replaces `!`cmd`` with a placeholder, so
+    // the safety question is settled. Refusing on top of it would block real skills
+    // for no extra safety — but the skill runs without the context that command was
+    // gathering, and the architect should hear it from us.
+    const { skills } = run();
+    const shelly = skills.find((s) => s.name === "shelly")!;
+    expect(shelly).toBeDefined();
+    expect(shelly.warning).toContain("inline shell");
+  });
+
+  test("does not mistake prose for the inline-shell construct", () => {
+    // A bang inside a code span (`refresh!`) sits next to a backtick without meaning
+    // anything by it. Requiring a leading boundary is what tells them apart — and
+    // getting this wrong refused the real `/ship` skill this feature was built for.
+    const prosey = run().skills.find((s) => s.name === "prosey")!;
+    expect(prosey).toBeDefined();
+    expect(prosey.warning).toBeUndefined();
+  });
+
+  test("refuses frontmatter that seizes a control the architect owns", () => {
+    const { skills, refused } = run();
+    expect(skills.find((s) => s.name === "modely")).toBeUndefined();
+    expect(refused.get("modely")).toContain("model");
+  });
+
+  test("refuses an ambiguous name rather than silently picking one file", () => {
+    // Shadowing is real and the runtime's flat list de-duplicates, so "which ship
+    // ran?" would be unanswerable. The architect typed a name meaning a file.
+    const { skills, refused } = run();
+    expect(skills.find((s) => s.name === "clash")).toBeUndefined();
+    expect(refused.get("clash")).toContain("two skills claim that name");
+  });
+
+  test("offers no built-ins at all", () => {
+    // The whole point of enumerating ourselves: /clear, /model, /compact and the
+    // ~45 others the runtime reports never become dispatchable, and a new one
+    // shipped by a future CLI release cannot leak in.
+    const names = run().skills.map((s) => s.name);
+    for (const builtin of ["clear", "model", "compact", "config", "permissions", "resume"]) {
+      expect(names).not.toContain(builtin);
+    }
+  });
+
+  test("a missing directory is the normal case, not an error", () => {
+    expect(enumerateSkills({ repoRoot: join(tmp, "nope") }).skills).toEqual([]);
+    expect(enumerateSkills({}).skills).toEqual([]);
   });
 });
