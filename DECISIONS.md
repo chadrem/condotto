@@ -2753,3 +2753,106 @@ identity change: a green suite reports that the cases someone thought of still
 hold, and says nothing about a case that did not exist until this diff created it.
 Adding a parameter with a default is exactly that shape — the default silently
 becomes the behaviour of every existing call site.
+
+## 2026-07-25 — The shipped default becomes the agentic posture (Opus 5, xhigh, subagents, workflows)
+
+**Decision:** a new session now starts at **Opus 5 + `xhigh` effort with subagents
+and workflows on** — which is exactly the `ultra` preset — and every part of that
+is settable in `condotto.toml`, daemon-wide under `[defaults]` and per repo. The
+per-thread runaway brake moves **$10 → $50** to match. Two things deliberately did
+NOT change: the worktree-write opt-in stays off, session-only, and absent from
+config; and an existing session keeps the posture it was created with.
+
+The old default (Opus 4.8, `high`, subagents and workflows off, upgraded only by an
+architect typing `@Condotto ultra on` in each new thread) was right while the gate
+was being proven and wrong for the product's actual job. It meant every thread
+started underpowered until a human remembered to raise it.
+
+### Verified before building on it (per the §6 process rule)
+
+- **The SDK bump is load-bearing, not cosmetic.** `@anthropic-ai/claude-agent-sdk`
+  ships the `claude` runtime as a platform sidecar binary, and the pinned 0.3.214
+  sidecar's model table stopped at `claude-opus-4-8` — `grep` over its strings
+  found no `claude-opus-5` at all. Claude Code **2.1.220** is the release that
+  "Added Claude Opus 5 (`claude-opus-5`), now the default Opus model — 1M context",
+  and SDK **0.3.220** is documented as parity with it. After bumping, the same grep
+  finds `claude-opus-5` 47 times. Had the model id been remapped without the bump,
+  `resolveModel` would have passed an id the sidecar did not know.
+- **Effort needed no bump.** 0.3.214 already typed
+  `EffortLevel = 'low'|'medium'|'high'|'xhigh'|'max'` and `Options.effort`. Opus 5
+  supports all five; Anthropic's guidance is to step up to `xhigh` for demanding
+  coding and agentic work.
+- **Two Opus 5 behaviours to respect at `xhigh`.** Thinking cannot be DISABLED at
+  `xhigh`/`max` — such a request 400s. Condotto sets no thinking option, so this is
+  a "do not start" note, now recorded in the adapter comment. The docs also advise
+  a large `max_tokens` at those levels; the CLI manages that for us today.
+- **Changing effort mid-thread invalidates the prompt cache.** `@Condotto effort`
+  on a long thread has a real cost consequence — noted in the README command table.
+- **SDK 0.3.217 tightened subagents in our favour**, capping nested spawns at depth
+  1 (we already deny nesting in `policy.ts`) and concurrent subagents at 20.
+
+### The security argument for defaulting these ON
+
+Turning subagents and workflows on by default changes the STARTING posture, not
+what a confined agent may do. A subagent-, workflow-, or escaped-origin call is
+still routed to `evaluateConfined`: read-only, no shell, no network, no memory,
+nested spawns denied, and every mutation still going back through the main agent's
+defer→approve→resume loop. `permissionMode:"bypassPermissions"` is still set only
+when workflows are on, and hooks still outrank it.
+
+The evidence is that the whole security suite — the confined-subagent policy, the
+hard-deny floor, the credential denies, the out-of-worktree denies, the escaped
+`canUseTool` backstop, the SEV-1 "all bash stays denied even under the write
+opt-in" guard — passed **unmodified** across this change. Not one of those files
+needed an edit. That is the property that made the flip defensible: if the default
+had been carrying any of the safety, those tests would have moved.
+
+The worktree-write opt-in is the one toggle that genuinely widens what an
+unattended agent can do to files without a human click, so it keeps its mandatory
+warning and stays a per-thread, architect-only decision. Putting it in a config
+file would turn an informed consent step into a line someone copies.
+
+### Shape of the change
+
+- Config gained `DEFAULT_SUBAGENTS`/`DEFAULT_WORKFLOWS`, the `[defaults]` keys
+  `subagents`/`workflows` (env `CONDOTTO_SUBAGENTS`/`CONDOTTO_WORKFLOWS`), and
+  per-repo `subagents`/`workflows`. A shared `resolveBoolDefault` helper now backs
+  all three boolean defaults so they cannot drift in how they parse `off|false|0|no`.
+- Migration **v5** adds `repos.default_subagents`/`default_workflows` as NULLABLE
+  columns with no DEFAULT, mirroring `default_auto_approve`. Null means "no
+  per-repo opinion", a distinct state from an explicit `false` — so every existing
+  repo migrates to being governed by `[defaults]` rather than pinned to whatever it
+  happened to have.
+- `sessions.subagents`/`workflows` keep their `NOT NULL DEFAULT 0` DDL. Two
+  reasons: `ensureColumn` never re-runs on an existing database, so a changed DDL
+  default would migrate nothing anyway; and leaving the store floor conservative
+  means an insert path that forgets to pass a value cannot silently escalate a
+  session. The real mechanism is explicit seeding in `assign`, which also asserts
+  `workflows ⟹ subagents` so the seed is not the one path able to write a row
+  violating that invariant.
+- `session-manager.ts` had its own second copy of the default literals (`?? "opus"`,
+  `?? "high"`, `?? 10`) that was never linked to `config.ts`. It now imports the
+  constants. That duplication is exactly how a "default" quietly becomes two
+  different defaults.
+
+### Two things the test suite taught, both worth keeping
+
+**A test's sentinel can be poisoned by a default flip.** The resume test proved the
+core re-supplies the current system prompt by stuffing a stale handle with
+`"OLD — you are READ-ONLY"` and asserting the resumed prompt lacked `READ-ONLY`.
+With subagents on by default, the real prompt now legitimately contains "delegate
+READ-ONLY exploration" — so the test failed while testing nothing wrong. The
+sentinel is now a string the real prompt can never contain. A sentinel that
+overlaps production vocabulary is a latent false failure waiting for a wording
+change.
+
+**A denial test should push against the default, not with it.** Several tests
+asserted "a member cannot toggle X" by having the member turn X *on* when the
+default was already off — which passes whether or not the authz check exists.
+Flipping the default exposed them. They now have the member try to turn X *off*,
+so the assertion depends on the check.
+
+**Consequences:** README, DESIGN §1/§8, CLAUDE.md, and `condotto.example.toml`
+updated; the operator status line and boot log now report the posture. `bun test`
+512 pass / 0 fail, `check:ports` clean. An operator who wants the old behaviour
+sets `effort = "high"`, `subagents = false`, `workflows = false` in `[defaults]`.

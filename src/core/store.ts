@@ -88,6 +88,13 @@ export interface RepoRow {
    * session. 1 = on, 0 = off, null = fall back to the daemon-wide default.
    */
   default_auto_approve: number | null;
+  /**
+   * Per-repo default harness posture, seeded onto each new session. 1 = on,
+   * 0 = off, null = fall back to the daemon-wide default. `workflows` implies
+   * `subagents`; the seed in the session manager asserts that.
+   */
+  default_subagents: number | null;
+  default_workflows: number | null;
 }
 
 interface RawRepoRow extends Omit<RepoRow, "safe_bash_allowlist"> {
@@ -277,8 +284,11 @@ function migrateBaselineV1(db: Database): void {
   ensureColumn(db, "sessions", "budget_limit_usd", "REAL");
 
   // Per-session harness capability state + per-repo defaults/trust. NOT
-  // NULL flags carry a DEFAULT so older rows migrate cleanly (subagents/
-  // workflows/trusted default off — the conservative posture).
+  // NULL flags carry a DEFAULT so older rows migrate cleanly. These DDL defaults
+  // are the conservative STORE FLOOR, not the product default: the shipped
+  // posture is subagents/workflows ON, which `assign` seeds explicitly from
+  // config. Keeping the floor at 0 means an insert path that forgets to pass a
+  // value can never silently escalate a session.
   ensureColumn(db, "sessions", "model", "TEXT");
   ensureColumn(db, "sessions", "effort", "TEXT");
   ensureColumn(db, "sessions", "subagents", "INTEGER NOT NULL DEFAULT 0");
@@ -342,6 +352,23 @@ function migrateV4(db: Database): void {
   db.run(`ALTER TABLE repos ADD COLUMN memory INTEGER NOT NULL DEFAULT 0`);
 }
 
+/**
+ * Migration **v5** (per-repo harness posture): `subagents`/`workflows` become
+ * configurable per repo, so a sandbox repo can run the full multi-agent posture
+ * while a repo you care about stays quieter.
+ *
+ * NULLABLE with no DEFAULT, exactly like `default_auto_approve`: null means "no
+ * per-repo opinion — use the daemon-wide default", which is a distinct state
+ * from an explicit `false`. Existing repos migrate to null and are therefore
+ * governed by `[defaults]`, which is what an operator upgrading a binary
+ * expects. Note this seeds NEW sessions only; a session already in the store
+ * keeps whatever posture it was created with.
+ */
+function migrateV5(db: Database): void {
+  db.run(`ALTER TABLE repos ADD COLUMN default_subagents INTEGER`);
+  db.run(`ALTER TABLE repos ADD COLUMN default_workflows INTEGER`);
+}
+
 /** Add `column` to `table` only if absent (idempotent ALTER — SQLite has no
  *  `ADD COLUMN IF NOT EXISTS`). Used by the baseline migration to evolve tables
  *  a pre-runner DB already created. */
@@ -383,7 +410,8 @@ export class Store {
       migrateV2, // v2: sessions.cleanup_at for the worktree GC.
       migrateV3, // v3: sessions.workdir for monorepo sub-project sessions.
       migrateV4, // v4: repos.memory for durable agent memory.
-      // v5+: append new migrations here. They only ever run on a store already
+      migrateV5, // v5: repos.default_subagents/default_workflows for per-repo posture.
+      // v6+: append new migrations here. They only ever run on a store already
       // at the prior version, so they can be plain forward DDL — no IF NOT EXISTS
       // gymnastics.
     ];
@@ -430,6 +458,8 @@ export class Store {
     defaultEffort?: string;
     trusted?: boolean;
     autoApprove?: boolean;
+    subagents?: boolean;
+    workflows?: boolean;
     memory?: boolean;
   }): void {
     this.db
@@ -437,14 +467,17 @@ export class Store {
         `INSERT INTO repos
            (id, name, path, default_branch, safe_bash_allowlist,
             test_cmd, land_cmd, deploy_cmd, cost_cap_usd,
-            default_model, default_effort, trusted, default_auto_approve, memory)
+            default_model, default_effort, trusted, default_auto_approve, memory,
+            default_subagents, default_workflows)
          VALUES ($id, $name, $path, $branch, $allow, $test, $land, $deploy, $cap,
-                 $model, $effort, $trusted, $autoApprove, $memory)
+                 $model, $effort, $trusted, $autoApprove, $memory,
+                 $subagents, $workflows)
          ON CONFLICT(name) DO UPDATE SET
            path = $path, default_branch = $branch, safe_bash_allowlist = $allow,
            test_cmd = $test, land_cmd = $land, deploy_cmd = $deploy, cost_cap_usd = $cap,
            default_model = $model, default_effort = $effort, trusted = $trusted,
-           default_auto_approve = $autoApprove, memory = $memory`,
+           default_auto_approve = $autoApprove, memory = $memory,
+           default_subagents = $subagents, default_workflows = $workflows`,
       )
       .run({
         id: repo.name,
@@ -462,6 +495,8 @@ export class Store {
         // undefined = leave to the daemon default; only an explicit bool pins it.
         autoApprove: repo.autoApprove === undefined ? null : repo.autoApprove ? 1 : 0,
         memory: repo.memory ? 1 : 0,
+        subagents: repo.subagents === undefined ? null : repo.subagents ? 1 : 0,
+        workflows: repo.workflows === undefined ? null : repo.workflows ? 1 : 0,
       });
   }
 
@@ -501,7 +536,8 @@ export class Store {
       .query<RawRepoRow, { name: string }>(
         `SELECT id, name, path, default_branch, safe_bash_allowlist,
                 test_cmd, land_cmd, deploy_cmd, cost_cap_usd,
-                default_model, default_effort, trusted, default_auto_approve, memory
+                default_model, default_effort, trusted, default_auto_approve, memory,
+                default_subagents, default_workflows
          FROM repos WHERE name = $name`,
       )
       .get({ name });
@@ -521,6 +557,8 @@ export class Store {
       trusted: row.trusted,
       default_auto_approve: row.default_auto_approve,
       memory: row.memory,
+      default_subagents: row.default_subagents,
+      default_workflows: row.default_workflows,
     };
   }
 

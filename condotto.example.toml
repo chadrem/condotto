@@ -82,15 +82,37 @@ memory_root = "~/.condotto/memory"          # durable agent memory, per (repo, c
 
 # ---------------------------------------------------------------------------
 # Daemon-wide defaults. Each is used when a repo (below) doesn't set its own.
+#
+# The shipped values below are the "ultra" posture: xhigh effort + subagents +
+# workflows. That combination is exactly what `@Condotto ultra on` sets, which is
+# why there is no separate `ultra` key — set the three parts. A new thread starts
+# at full strength; dial any of it down here, per-repo, or per-thread in Slack.
 [defaults]
 model = "opus"              # implementer model token: opus | sonnet | fable.
+                            #   `opus` is Claude Opus 5.
                             #   Env override: CONDOTTO_DEFAULT_MODEL
-effort = "high"             # reasoning effort: low | medium | high | xhigh | max.
+effort = "xhigh"            # reasoning effort: low | medium | high | xhigh | max.
+                            #   xhigh is Anthropic's recommendation for demanding
+                            #   coding and agentic work. Costs meaningfully more
+                            #   than high; step down if your threads don't need it.
                             #   Env override: CONDOTTO_DEFAULT_EFFORT
+subagents = true            # the agent can fan out to parallel READ-ONLY subagents.
+                            #   They cannot write, run shell, or reach the network —
+                            #   every mutation still comes back through the main
+                            #   agent and the gate.
+                            #   Env override: CONDOTTO_SUBAGENTS=off|false|0|no
+workflows = true            # the agent can launch multi-agent workflows for big
+                            #   cross-cutting jobs. Each LAUNCH is gated (an
+                            #   architect approves it), and workflow agents are
+                            #   confined to the worktree and read-only.
+                            #   Env override: CONDOTTO_WORKFLOWS=off|false|0|no
 auto_approve = true         # architect-initiated turns skip the Approve
                             #   click (the mechanical hard-deny floor still holds).
                             #   Env override: CONDOTTO_AUTO_APPROVE=off|false|0|no
-cost_cap_usd = 10           # per-thread cost ceiling; a runaway thread pauses here.
+cost_cap_usd = 50           # per-thread cost ceiling; a runaway thread pauses here.
+                            #   Sized for the posture above — xhigh with subagents
+                            #   and workflows spends real money per thread. This is
+                            #   a runaway brake, not a budget.
                             #   Env override: CONDOTTO_COST_CAP_USD
 max_concurrent_turns = 6    # cap on harness turns running at once across all
                             #   sessions. Env override: CONDOTTO_MAX_CONCURRENT_TURNS
@@ -144,6 +166,14 @@ max_concurrent_turns = 6    # cap on harness turns running at once across all
 # cost_cap_usd = 25               # per-thread cost ceiling for this repo
 #                                 #   (overrides [defaults].cost_cap_usd).
 # default_model = "sonnet"        # per-repo default model token (overrides [defaults]).
-# default_effort = "xhigh"        # per-repo default effort (overrides [defaults]).
+# default_effort = "high"         # per-repo default effort (overrides [defaults]).
 # auto_approve = true             # per-repo default for architect self-approve
 #                                 #   (overrides [defaults].auto_approve).
+# subagents = false               # per-repo harness posture (overrides [defaults]).
+# workflows = false               #   Omit both to inherit the daemon default —
+#                                 #   omitted is NOT the same as `false`. Use these
+#                                 #   to run a sandbox repo at full multi-agent
+#                                 #   strength while a repo you care about stays
+#                                 #   quieter and cheaper. `workflows` implies
+#                                 #   `subagents`, so asking for workflows alone
+#                                 #   still starts the session with subagents on.

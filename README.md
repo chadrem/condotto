@@ -319,10 +319,12 @@ worktrees_root = "~/tmp/condotto-worktrees"  # per-session git worktrees   (env:
 memory_root = "~/.condotto/memory"           # durable agent memory        (env: CONDOTTO_MEMORY_ROOT)
 
 [defaults]                 # used when a repo below sets none
-model = "opus"             # opus | sonnet | fable          (env: CONDOTTO_DEFAULT_MODEL)
-effort = "high"            # low | medium | high | xhigh | max  (env: CONDOTTO_DEFAULT_EFFORT)
+model = "opus"             # opus (= Opus 5) | sonnet | fable  (env: CONDOTTO_DEFAULT_MODEL)
+effort = "xhigh"           # low | medium | high | xhigh | max  (env: CONDOTTO_DEFAULT_EFFORT)
+subagents = true           # parallel read-only subagents    (env: CONDOTTO_SUBAGENTS=off)
+workflows = true           # multi-agent workflows, gated    (env: CONDOTTO_WORKFLOWS=off)
 auto_approve = true        # architects skip their own Approve click (env: CONDOTTO_AUTO_APPROVE=off)
-cost_cap_usd = 10          # per-thread runaway brake       (env: CONDOTTO_COST_CAP_USD)
+cost_cap_usd = 50          # per-thread runaway brake       (env: CONDOTTO_COST_CAP_USD)
 max_concurrent_turns = 6   # box-wide cap on live turns     (env: CONDOTTO_MAX_CONCURRENT_TURNS)
 
 # A repo Condotto can be pointed at. Assign it with `/condotto assign webapp`.
@@ -336,8 +338,16 @@ safe_bash_allowlist = ["git status", "bun test"]  # auto-allowed without approva
 test_cmd = "bun test"             # auto-run so the agent verifies its own work
 land_cmd = "make land"            # architect-ordered `@Condotto land`, run by the daemon (not the agent)
 deploy_cmd = "make deploy"        # architect-ordered `@Condotto deploy`, same handling
-# cost_cap_usd / default_model / default_effort / auto_approve  # per-repo overrides
+# cost_cap_usd / default_model / default_effort / auto_approve / subagents / workflows  # per-repo overrides
 ```
+
+Those `[defaults]` are the **ultra** posture — `xhigh` effort plus subagents plus
+workflows is exactly what `@Condotto ultra on` sets, so a new thread starts at full
+strength instead of waiting for someone to raise it. That is the expensive end of the
+dial: `xhigh` spends meaningfully more than `high`, which is why the runaway brake sits
+at $50 rather than $10. Dial it down daemon-wide here, per-repo below, or per-thread in
+Slack. Omitting `subagents`/`workflows` on a repo inherits the daemon default — which is
+not the same as setting them to `false`.
 
 **At least one `[[repos]]` entry is required.** There is no default repo: Condotto
 only works in repos you name, and it refuses to start with none configured.
@@ -387,7 +397,7 @@ A clean boot logs something like:
 
 ```
 … [daemon] seeded 1 role mapping(s), 1 architect(s)
-… [daemon] cost cap $10/thread (default), max 6 concurrent turns, default model opus @ high effort, architect auto-approve ON by default
+… [daemon] cost cap $50/thread (default), max 6 concurrent turns, default model opus @ xhigh effort, subagents ON / workflows ON, architect auto-approve ON by default
 … [daemon] ready — db=…/condotto.sqlite, sessions on record: 0
 ```
 
@@ -449,12 +459,12 @@ sessions themselves, an architect `@Condotto grant`s them architect rights (see
 | `@Condotto cancel` | architect | Interrupt the running turn (e.g. a runaway workflow); the session lives on. |
 | `@Condotto land` / `@Condotto deploy` | architect | Run the repo's ship path (gated; daemon-run). |
 | `@Condotto budget <usd>` | architect | Raise this thread's cost ceiling. |
-| `@Condotto model <opus\|sonnet\|fable>` | architect | Set the implementer model. |
-| `@Condotto effort <low…max>` | architect | Set reasoning effort. |
-| `@Condotto subagents on\|off` | architect | Read-only parallel exploration fan-out. |
-| `@Condotto workflows on\|off` | architect | Multi-agent Workflow tool (gated + confined). |
-| `@Condotto workflows write on\|off` | architect | Let confined workflow/subagent calls write **in the worktree** without a per-write click (out-of-worktree/credentials still refused). |
-| `@Condotto ultra on\|off` | architect | Preset: `xhigh` effort + subagents + workflows. |
+| `@Condotto model <opus\|sonnet\|fable>` | architect | Set the implementer model (`opus` = Opus 5). |
+| `@Condotto effort <low…max>` | architect | Set reasoning effort. Changing it mid-thread drops the prompt cache, so prefer setting it early. |
+| `@Condotto subagents on\|off` | architect | Read-only parallel exploration fan-out (on by default). |
+| `@Condotto workflows on\|off` | architect | Multi-agent Workflow tool, gated + confined (on by default). |
+| `@Condotto workflows write on\|off` | architect | Let confined workflow/subagent calls write **in the worktree** without a per-write click (out-of-worktree/credentials still refused). Off by default, and the only one of these not settable in `condotto.toml`. |
+| `@Condotto ultra on\|off` | architect | Preset: `xhigh` effort + subagents + workflows — the shipped default, so this is mainly how you get back after dialing down. `off` drops subagents/workflows; set effort separately. |
 | `@Condotto auto-approve on\|off` | architect | Run an architect's own turns without the Approve click (on by default). |
 | `@Condotto grant @user architect [everywhere]` | architect | Delegate authority (this channel, or `everywhere`). Persists across restarts. |
 | `@Condotto revoke @user [everywhere]` | architect | Remove a runtime grant. |

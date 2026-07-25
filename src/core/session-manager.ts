@@ -26,6 +26,14 @@ import { CommandRunner, type CommandRunnerLike } from "./command-runner";
 import { MemoryManager, verifyMemoryTarget } from "./memory";
 import { frameMessage } from "./framing";
 import { evaluate, describeCall, memoryTargets, type PolicyContext, type PolicyConcern } from "./policy";
+import {
+  DEFAULT_COST_CAP_USD,
+  DEFAULT_EFFORT,
+  DEFAULT_MAX_CONCURRENT_TURNS,
+  DEFAULT_MODEL,
+  DEFAULT_SUBAGENTS,
+  DEFAULT_WORKFLOWS,
+} from "./config";
 
 /**
  * A surface-qualified principal key, e.g. "slack:U0123ABC" (grant/revoke).
@@ -230,7 +238,7 @@ function threadCommandHelp(): string {
   return [
     `Architect commands — mention me in this thread:`,
     `• \`@Condotto model <opus|sonnet|fable>\` / \`@Condotto effort <low…max>\` — tune the implementer`,
-    `• \`@Condotto subagents on|off\` · \`@Condotto workflows on|off\` · \`@Condotto ultra on|off\` — multi-agent power (opt-in, gated)`,
+    `• \`@Condotto subagents on|off\` · \`@Condotto workflows on|off\` · \`@Condotto ultra on|off\` — multi-agent power (on by default, gated)`,
     `• \`@Condotto auto-approve on|off\` — run an architect's own turns without the Approve click (on by default)`,
     `• \`@Condotto grant @user architect [everywhere]\` · \`@Condotto revoke @user\` — delegate authority (this channel, or everywhere)`,
     `• \`@Condotto land\` / \`@Condotto deploy\` — run the repo's ship path (gated)`,
@@ -261,7 +269,7 @@ export interface SessionManagerOptions {
   /**
    * Daemon-wide default model/effort tokens, used when a session
    * (and its repo) sets none. Opaque — validated against the harness adapter's
-   * capabilities. Default Opus + high (DESIGN §1 north-star: a first-class agent).
+   * capabilities. Default Opus 5 + xhigh (DESIGN §1 north-star: a first-class agent).
    */
   defaultModel?: string;
   defaultEffort?: string;
@@ -270,6 +278,14 @@ export interface SessionManagerOptions {
    * repo sets no `default_auto_approve`. On by default (DESIGN §4).
    */
   defaultAutoApprove?: boolean;
+  /**
+   * Daemon-wide default harness posture, used when a session's repo sets no
+   * `default_subagents`/`default_workflows`. Both on by default: with the `xhigh`
+   * effort default that is the `ultra` preset, so a thread starts at full
+   * strength. Seeds NEW sessions only — an existing session keeps its own row.
+   */
+  defaultSubagents?: boolean;
+  defaultWorkflows?: boolean;
   /**
    * How long after an explicit `@Condotto stop clean` the GC keeps the worktree
    * before collecting it. A grace window: the clean-stopped session stays
@@ -361,6 +377,8 @@ export class SessionManager {
   private readonly defaultModel: string;
   private readonly defaultEffort: string;
   private readonly defaultAutoApprove: boolean;
+  private readonly defaultSubagents: boolean;
+  private readonly defaultWorkflows: boolean;
   private readonly worktreeRetentionMs: number;
   private readonly orphanMinAgeMs: number;
   private readonly turnSlots: Semaphore;
@@ -377,15 +395,21 @@ export class SessionManager {
     private log: (msg: string) => void = console.log,
     opts: SessionManagerOptions = {},
   ) {
-    this.defaultCostCapUsd = opts.defaultCostCapUsd ?? 10;
-    this.defaultModel = opts.defaultModel ?? "opus";
-    this.defaultEffort = opts.defaultEffort ?? "high";
+    // These fall back to the SAME constants `loadConfig` uses, imported rather
+    // than re-typed: the daemon always passes resolved config values, so these
+    // only fire for a directly-constructed manager (tests) — which is exactly
+    // where a silently-drifting second copy of the defaults would hide.
+    this.defaultCostCapUsd = opts.defaultCostCapUsd ?? DEFAULT_COST_CAP_USD;
+    this.defaultModel = opts.defaultModel ?? DEFAULT_MODEL;
+    this.defaultEffort = opts.defaultEffort ?? DEFAULT_EFFORT;
     this.defaultAutoApprove = opts.defaultAutoApprove ?? true;
+    this.defaultSubagents = opts.defaultSubagents ?? DEFAULT_SUBAGENTS;
+    this.defaultWorkflows = opts.defaultWorkflows ?? DEFAULT_WORKFLOWS;
     // 24h default: long enough that a hasty `stop clean` can still be recovered
     // (re-assign the thread), short enough to reclaim disk on a real cadence.
     this.worktreeRetentionMs = opts.worktreeRetentionMs ?? 24 * 60 * 60 * 1000;
     this.orphanMinAgeMs = opts.orphanMinAgeMs ?? 10 * 60 * 1000;
-    this.turnSlots = new Semaphore(Math.max(1, opts.maxConcurrentTurns ?? 6));
+    this.turnSlots = new Semaphore(Math.max(1, opts.maxConcurrentTurns ?? DEFAULT_MAX_CONCURRENT_TURNS));
     this.commandRunner = opts.commandRunner ?? new CommandRunner();
     this.memory = opts.memory;
     this.startedAt = opts.startedAt ?? Date.now();
@@ -798,6 +822,13 @@ export class SessionManager {
     }
     // Seed architect self-approve: repo override (0/1), else daemon default.
     const seedAutoApprove = repo.default_auto_approve ?? (this.defaultAutoApprove ? 1 : 0);
+    // Seed the harness posture the same way. `workflows ⟹ subagents` is a DB-level
+    // invariant the setters maintain (store.ts); assert it here too so a repo
+    // configured `workflows = true, subagents = false` can't be the one path that
+    // creates a row violating it.
+    const seedWorkflows = repo.default_workflows ?? (this.defaultWorkflows ? 1 : 0);
+    const seedSubagents =
+      seedWorkflows === 1 ? 1 : (repo.default_subagents ?? (this.defaultSubagents ? 1 : 0));
 
     let session: SessionRow;
     try {
@@ -822,6 +853,11 @@ export class SessionManager {
         effort: seedEffort,
         // Seed architect self-approve.
         auto_approve: seedAutoApprove,
+        // Seed the harness posture (subagents/workflows). The worktree-write
+        // opt-in is deliberately NOT seedable — it stays an in-thread, warned,
+        // architect-only decision.
+        subagents: seedSubagents,
+        workflows: seedWorkflows,
       });
     } catch (err) {
       if (err instanceof ConflictError) {
@@ -1010,6 +1046,7 @@ export class SessionManager {
       `• pending approvals: *${pending}*`,
       `• config: default model \`${this.defaultModel}\` · effort \`${this.defaultEffort}\` · ` +
         `cost cap $${this.defaultCostCapUsd.toFixed(2)}/thread · ` +
+        `subagents ${this.defaultSubagents ? "on" : "off"} · workflows ${this.defaultWorkflows ? "on" : "off"} · ` +
         `auto-approve ${this.defaultAutoApprove ? "on" : "off"} · ` +
         `${repos} repo${repos === 1 ? "" : "s"} · ${architects} architect${architects === 1 ? "" : "s"}`,
     ].join("\n");
@@ -1341,7 +1378,7 @@ export class SessionManager {
   }
 
   /**
-   * `@Condotto subagents on|off`. Architect opt-in, default off.
+   * `@Condotto subagents on|off`. Architect-only; ON by default (`[defaults].subagents`).
    * On: the implementer may fan out READ-ONLY exploration to subagents; it still
    * makes edits itself (gated). Turning it off also turns workflows off (a
    * workflow orchestrates subagents, so it needs the base capability).
@@ -1379,7 +1416,7 @@ export class SessionManager {
   }
 
   /**
-   * `@Condotto workflows on|off` (architect opt-in, default off). On: the
+   * `@Condotto workflows on|off` (architect-only; ON by default, `[defaults].workflows`). On: the
    * implementer may launch multi-agent WORKFLOWS for parallel read-only
    * research/analysis. Their sub-agents are gated read-only and worktree-confined
    * (via the PreToolUse hook under bypassPermissions — spike 2026-07-18); the main
@@ -1479,9 +1516,12 @@ export class SessionManager {
 
   /**
    * `@Condotto ultra on|off`. The power preset: `xhigh` effort +
-   * subagents + the Workflow tool — the SDK analogue of CLI "ultracode". Off
-   * restores subagents/workflows off and effort to the daemon default. Burns the
-   * plan's rate limit fastest (§4), so it's an explicit, architect-only opt-in.
+   * subagents + the Workflow tool — the SDK analogue of CLI "ultracode".
+   *
+   * This is now the SHIPPED default posture, not an opt-in: a new session already
+   * arrives with all three on (`[defaults]` in `condotto.toml`), so `ultra on` is
+   * mainly how you get back after dialing something down. It burns the plan's
+   * rate limit fastest (§4), which is why it stays architect-only.
    */
   private async setUltra(conv: ConversationRef, author: Principal, args: string): Promise<void> {
     const surface = this.surfaceFor(conv);
@@ -1513,7 +1553,11 @@ export class SessionManager {
     } else {
       this.store.setSessionSubagents(session.id, false);
       this.store.setSessionWorkflows(session.id, false);
-      this.store.setSessionEffort(session.id, null); // back to the daemon default
+      // Back to the daemon default — which now IS `xhigh`. So `ultra off` drops
+      // the multi-agent half of the preset and leaves reasoning effort where the
+      // operator configured it; `isUltra` is false either way (it requires all
+      // three). Use `@Condotto effort <level>` to actually lower the effort.
+      this.store.setSessionEffort(session.id, null);
     }
     this.store.audit({ sessionId: session.id, actor: principalKey(author), event: "ultra_set", detail: { on } });
     const fresh = this.store.getSession(session.id)!;
@@ -1521,7 +1565,7 @@ export class SessionManager {
       text:
         (on
           ? "⚡ Ultra on — max reasoning (`xhigh`) + parallel read-only subagents + multi-agent workflows. This burns the rate limit fastest; dial down with `@Condotto ultra off`. "
-          : "Ultra off. ") +
+          : "Ultra off — subagents and workflows are off. Reasoning effort goes back to the daemon default; set it explicitly with `@Condotto effort <level>`. ") +
         `(${this.capabilitySummary(fresh)}) Takes effect on your next message.`,
     });
   }

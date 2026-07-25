@@ -34,7 +34,7 @@ vision-level facts the rest of the design builds on.
 **The implementer must be first-class.** The north star is a person with
 domain expertise but limited coding skill — a product manager first — shipping
 real work. That is only real if the implementer is a full-strength Claude Code
-agent: best model, high reasoning effort, subagents/workflows, the team's
+agent: best model, high reasoning effort, subagents/workflows on by default, the team's
 skills — not a toy. Exposing those capabilities to the thread (behind the
 gate) is a product requirement, not an optimization; it is what turns "a
 chatbot that edits files" into "a PM shipping a feature with an engineer
@@ -869,21 +869,27 @@ an unforgeable random-nonce fence + protocol-sentinel defang (Appendix A).
 **Harness controls** (architect-only, in-thread, all behind the §4 gate).
 Per-session **model + effort** — opaque tokens the core validates by membership
 against `HarnessCapabilities.supportedModels/supportedEfforts` and forwards via
-`TurnInput.harness`; the adapter maps to SDK ids; default Opus + high.
-**Subagents** (opt-in, default off): they fan out READ-ONLY — a subagent-initiated
+`TurnInput.harness`; the adapter maps to SDK ids; default Opus 5 + `xhigh`.
+**Subagents** (default ON): they fan out READ-ONLY — a subagent-initiated
 gated call or nested spawn is denied in the policy engine (`ToolCall.agentId` marks
 origin); the main agent does mutations via the defer→approve→resume path.
 **Trust-scoped project config**: a repo marked `trusted: true` enables
 `settingSources:["project"]` + `skills` so its `CLAUDE.md`/skills/`.claude/agents`
 load (daemon-configured MCP via `mcpServers`); untrusted repos stay isolated, and
 the gate still applies. An **`ultra`** preset bundles `xhigh` effort + subagents +
-workflows. Dial-down is built in (cheaper model / lower effort / capabilities off),
-because model×effort×subagents burn either real Console spend (api_key) or the
-plan's **rate limit** — the real constraint on subscription auth, where cost
-budgets are notional (§4, §6).
+workflows — which is the SHIPPED default posture, so `ultra` is now the label for
+what a session already is rather than an upgrade to reach for. `[defaults].model`,
+`.effort`, `.subagents`, `.workflows` set it daemon-wide and each repo can override
+(`subagents`/`workflows` are tri-state: omitted inherits, which differs from
+`false`); the worktree-write opt-in deliberately stays out of config. Dial-down is
+built in (cheaper model / lower effort / capabilities off), because
+model×effort×subagents burn either real Console spend (api_key) or the plan's
+**rate limit** — the real constraint on subscription auth, where cost budgets are
+notional (§4, §6). Shipping this posture is why the default per-thread runaway
+brake is **$50**, not $10.
 
 **Workflows.** Claude Code's multi-agent **Workflow** tool, gated + confined
-(`@Condotto workflows on|off`, folded into `ultra`). Workflow-enabled sessions run
+(`@Condotto workflows on|off`, folded into `ultra`, default ON). Workflow-enabled sessions run
 under **`permissionMode:"bypassPermissions"`**, so the background workflow's
 sub-agent tool calls route THROUGH the PreToolUse hook with an `agent_id` where the
 read-only subagent policy confines them; the main agent's defer→approve→resume and
@@ -941,8 +947,9 @@ shape crosses the port.
 1. **A single `condotto.toml`** (TOML via Bun's built-in `Bun.TOML.parse`, zero
    deps) — the **single source of truth**, replacing the earlier scattered `.env` +
    `condotto.repos.json` + `condotto.roles.json` + `CONDOTTO_*`. It carries
-   `[slack]` tokens, `architects`, `[defaults]` (model/effort/auto-approve/cost
-   cap), a `[paths]` block (worktree root, SQLite DB), and `[[repos]]` entries
+   `[slack]` tokens, `architects`, `[defaults]`
+   (model/effort/subagents/workflows/auto-approve/cost cap), a `[paths]` block
+   (worktree root, SQLite DB), and `[[repos]]` entries
    enumerating the §5 repo fields (`name`, `path`, `default_branch`, `trusted`,
    `safe_bash_allowlist`, `land_cmd`, `deploy_cmd`, `policy_overrides`); env vars
    override any value. Secrets live in the file, so the repo tracks a commented

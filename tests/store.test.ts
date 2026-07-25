@@ -116,9 +116,13 @@ describe("store sessions", () => {
     expect(store.pruneReposNotIn(["declared"])).toEqual({ deleted: [], keptInUse: ["testrepo"] });
   });
 
-  test("session model/effort/subagents/workflows seed on create and default off", () => {
+  test("session model/effort/subagents/workflows seed on create; the store floor is off", () => {
     const store = memoryStore();
-    // Omitted → model/effort null (daemon default), flags 0 (opt-in, off).
+    // Omitted → model/effort null (daemon default), flags 0. That 0 is the STORE
+    // floor, not the product default: the shipped posture is subagents/workflows
+    // ON, and `assign` supplies it explicitly (session-manager `seedSubagents`).
+    // Keeping the floor conservative means an insert path that forgets to pass a
+    // value can never silently escalate a session.
     store.createSession({ ...baseSession, id: "s1", conversation_id: "1.1" });
     const bare = store.getSession("s1")!;
     expect(bare.model).toBeNull();
@@ -193,6 +197,26 @@ describe("store sessions", () => {
     expect(r2.default_model).toBeNull();
     expect(r2.default_effort).toBeNull();
     expect(r2.trusted).toBe(0);
+  });
+
+  test("repo default_subagents/default_workflows round-trip; undefined = null (v5)", () => {
+    const store = memoryStore();
+    store.upsertRepo({ name: "r", path: "/tmp/r", defaultBranch: "main", subagents: false, workflows: false });
+    const off = store.getRepo("r")!;
+    expect(off.default_subagents).toBe(0);
+    expect(off.default_workflows).toBe(0);
+
+    store.upsertRepo({ name: "r", path: "/tmp/r", defaultBranch: "main", subagents: true, workflows: true });
+    const on = store.getRepo("r")!;
+    expect(on.default_subagents).toBe(1);
+    expect(on.default_workflows).toBe(1);
+
+    // Dropping the keys resets to null — "no per-repo opinion", which is a
+    // DISTINCT state from an explicit 0. Config stays authoritative on reboot.
+    store.upsertRepo({ name: "r", path: "/tmp/r", defaultBranch: "main" });
+    const bare = store.getRepo("r")!;
+    expect(bare.default_subagents).toBeNull();
+    expect(bare.default_workflows).toBeNull();
   });
 
   test("repo default_auto_approve round-trips; undefined = null", () => {
@@ -499,7 +523,7 @@ describe("store schema migrations", () => {
   // The current schema version == the number of migrations in the runner. Bump
   // this constant in lockstep whenever a migration is appended — the tests below
   // pin the runner's behavior to it.
-  const CURRENT_SCHEMA_VERSION = 4;
+  const CURRENT_SCHEMA_VERSION = 5;
 
   const migPath = (name: string): string => join(mkdtempSync(join(tmpdir(), "condotto-mig-")), name);
   const userVersion = (path: string): number => {
@@ -548,6 +572,8 @@ describe("store schema migrations", () => {
     raw.run("ALTER TABLE sessions DROP COLUMN cleanup_at"); // v2
     raw.run("ALTER TABLE sessions DROP COLUMN workdir"); // v3
     raw.run("ALTER TABLE repos DROP COLUMN memory"); // v4
+    raw.run("ALTER TABLE repos DROP COLUMN default_subagents"); // v5
+    raw.run("ALTER TABLE repos DROP COLUMN default_workflows"); // v5
     raw.run("PRAGMA user_version = 0"); // rewind the stamp to the pre-runner state
     raw.close();
     expect(userVersion(path)).toBe(0);

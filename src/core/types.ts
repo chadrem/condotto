@@ -299,10 +299,10 @@ export interface HarnessTurnOptions {
   model?: string;
   /** Reasoning effort (e.g. "high"|"xhigh"|"max"); passed through. Omit = default. */
   effort?: string;
-  /** Enable subagent tools (Agent/Task). Default off — architect opt-in. */
+  /** Enable subagent tools (Agent/Task). On by default; architect-toggleable. */
   subagents?: boolean;
   /**
-   * Enable the multi-agent Workflow tool (architect opt-in, default off).
+   * Enable the multi-agent Workflow tool (on by default; architect-toggleable).
    * When on, the adapter re-enables the `Workflow` tool AND switches the query to
    * `permissionMode: "bypassPermissions"` — which, contrary to its name, routes the
    * background workflow's sub-agent tool calls THROUGH our PreToolUse hook (with an
@@ -422,7 +422,7 @@ export interface RepoConfig {
    * Per-repo default model/effort tokens. Seeded onto each new
    * session (the architect can then change them per thread); opaque tokens
    * validated by the harness adapter. `undefined` = fall back to the daemon-wide
-   * default (Opus + high).
+   * default (Opus 5 + xhigh).
    */
   defaultModel?: string;
   defaultEffort?: string;
@@ -442,6 +442,20 @@ export interface RepoConfig {
    * default (`SessionManagerOptions.defaultAutoApprove`, on by default).
    */
   autoApprove?: boolean;
+  /**
+   * Per-repo harness posture, seeded onto each new session (the architect can
+   * then toggle either per thread). `undefined` = fall back to the daemon-wide
+   * default (`SessionManagerOptions.defaultSubagents`/`defaultWorkflows`, both
+   * on). `workflows` implies `subagents` — the seed asserts that invariant, so
+   * `workflows = true, subagents = false` still starts with subagents on.
+   *
+   * NOT a vouch like `trusted` or `memory`: these widen how much work a session
+   * can do in parallel, not what authority it carries. Confined (subagent-,
+   * workflow-, and escaped-origin) calls stay read-only under `evaluateConfined`
+   * either way.
+   */
+  subagents?: boolean;
+  workflows?: boolean;
   /**
    * Durable agent memory for this repo. When on, the session gets a
    * Condotto-owned memory directory (scoped per repo AND channel) that the SDK's

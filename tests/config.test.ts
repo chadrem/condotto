@@ -151,6 +151,39 @@ path = "/srv/bare"
     expect(bare.trusted).toBe(false);
   });
 
+  test("per-repo subagents/workflows are TRI-STATE: absent ≠ false", () => {
+    // A repo that says nothing must fall through to the daemon default, which is
+    // a different state from one that explicitly opts out — otherwise every
+    // existing repo would silently pin the posture it happened to have.
+    const path = tomlFile(`
+[[repos]]
+name = "quiet"
+path = "/srv/quiet"
+subagents = false
+workflows = false
+
+[[repos]]
+name = "hot"
+path = "/srv/hot"
+subagents = true
+workflows = true
+
+[[repos]]
+name = "bare"
+path = "/srv/bare"
+`);
+    const cfg = loadConfig({}, path);
+    const quiet = cfg.repos.find((r) => r.name === "quiet")!;
+    expect(quiet.subagents).toBe(false);
+    expect(quiet.workflows).toBe(false);
+    const hot = cfg.repos.find((r) => r.name === "hot")!;
+    expect(hot.subagents).toBe(true);
+    expect(hot.workflows).toBe(true);
+    const bare = cfg.repos.find((r) => r.name === "bare")!;
+    expect(bare.subagents).toBeUndefined();
+    expect(bare.workflows).toBeUndefined();
+  });
+
   test("a non-boolean trusted fails fast rather than silently disabling trust", () => {
     // trusted opens repo config/MCP, so a typo like trusted = "true" (quoted)
     // must be surfaced, not coerced to a silent false.
@@ -207,7 +240,9 @@ path = "/srv/unset"
 describe("loadConfig defaults + env overrides", () => {
   test("cost cap and concurrency: defaults, file values, and env override", () => {
     const def = loadConfig({}, cfgFile(""));
-    expect(def.defaultCostCapUsd).toBe(10);
+    // $50, not $10: the shipped posture (xhigh + subagents + workflows) spends
+    // real money per thread, and this is a runaway brake rather than a budget.
+    expect(def.defaultCostCapUsd).toBe(50);
     expect(def.maxConcurrentTurns).toBe(6);
 
     const fromFile = loadConfig({}, cfgFile(`[defaults]\ncost_cap_usd = 20\nmax_concurrent_turns = 4\n`));
@@ -239,10 +274,11 @@ describe("loadConfig defaults + env overrides", () => {
     ).toBe(true);
   });
 
-  test("default model/effort defaults to Opus + high, settable in-file, env overrides", () => {
+  test("default model/effort defaults to Opus + xhigh, settable in-file, env overrides", () => {
     const def = loadConfig({}, cfgFile(""));
     expect(def.defaultModel).toBe("opus");
-    expect(def.defaultEffort).toBe("high");
+    // xhigh, not high — Anthropic's guidance for demanding coding/agentic work.
+    expect(def.defaultEffort).toBe("xhigh");
 
     const fromFile = loadConfig({}, cfgFile(`[defaults]\nmodel = "sonnet"\neffort = "max"\n`));
     expect(fromFile.defaultModel).toBe("sonnet");
@@ -254,6 +290,34 @@ describe("loadConfig defaults + env overrides", () => {
     );
     expect(over.defaultModel).toBe("fable");
     expect(over.defaultEffort).toBe("xhigh");
+  });
+
+  test("subagents/workflows default ON, are settable in-file, and env overrides them", () => {
+    // The shipped posture: with `effort = "xhigh"` above, these two ARE `ultra`,
+    // which is why there is no separate `[defaults].ultra` key.
+    const def = loadConfig({}, cfgFile(""));
+    expect(def.defaultSubagents).toBe(true);
+    expect(def.defaultWorkflows).toBe(true);
+
+    const fromFile = loadConfig({}, cfgFile(`[defaults]\nsubagents = false\nworkflows = false\n`));
+    expect(fromFile.defaultSubagents).toBe(false);
+    expect(fromFile.defaultWorkflows).toBe(false);
+
+    // Same falsey spellings the auto-approve override accepts — one shared helper.
+    for (const off of ["off", "false", "0", "no", "OFF"]) {
+      expect(loadConfig({ CONDOTTO_SUBAGENTS: off }, cfgFile("")).defaultSubagents).toBe(false);
+      expect(loadConfig({ CONDOTTO_WORKFLOWS: off }, cfgFile("")).defaultWorkflows).toBe(false);
+    }
+    // Env "on" beats a file `false`.
+    const over = loadConfig(
+      { CONDOTTO_SUBAGENTS: "on", CONDOTTO_WORKFLOWS: "on" },
+      cfgFile(`[defaults]\nsubagents = false\nworkflows = false\n`),
+    );
+    expect(over.defaultSubagents).toBe(true);
+    expect(over.defaultWorkflows).toBe(true);
+
+    // A non-boolean in the file is a hard config error, not a silent truthy.
+    expect(() => loadConfig({}, cfgFile(`[defaults]\nworkflows = "true"\n`))).toThrow();
   });
 
   test("paths: db + worktrees_root come from [paths] and env overrides", () => {

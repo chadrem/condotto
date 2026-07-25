@@ -1,8 +1,10 @@
 // model/effort smoke: prove the REAL claude-code adapter applies `model` + `effort`
-// via query() options on live subscription auth. Runs two trivial read-only turns
-// on one session — Opus/high, then a mid-session switch to Fable/low — and confirms
-// each completes with a reply and no error. This exercises the exact SDK model IDs
-// the adapter maps to (claude-opus-4-8 / claude-fable-5) and the effort levels.
+// via query() options on live auth. Runs two trivial read-only turns on one session
+// — the shipped default (Opus 5 / xhigh), then a mid-session switch to Fable/low —
+// and confirms each completes with a reply and no error. This exercises the exact
+// SDK model IDs the adapter maps to (claude-opus-5 / claude-fable-5) and the effort
+// levels, so it is also the check that the sidecar KNOWS `claude-opus-5`: an
+// agent-sdk older than 0.3.220 does not, and this turn is where that surfaces.
 //   Run: bun run smoke:model   (needs CONDOTTO_SMOKE_REPO + subscription auth)
 import { smokeEnv } from "./smoke-fixture";
 import { WorktreeManager } from "../src/core/worktrees";
@@ -30,7 +32,7 @@ const session = await adapter.create({
 });
 
 const cases: { model: string; effort: string }[] = [
-  { model: "opus", effort: "high" },
+  { model: "opus", effort: "xhigh" }, // the shipped default posture
   { model: "fable", effort: "low" },
 ];
 

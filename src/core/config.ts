@@ -42,10 +42,20 @@ export interface CondottoConfig {
   /**
    * Daemon-wide default model/effort tokens, used when a repo sets
    * none. Opaque tokens the harness adapter validates; the north-star wants the
-   * implementer to be first-class, so the default is Opus + high (DESIGN §1, §8).
+   * implementer to be first-class, so the default is Opus 5 + xhigh (DESIGN §1, §8).
    */
   defaultModel: string;
   defaultEffort: string;
+  /**
+   * Daemon-wide default harness posture for a new session, used when a repo sets
+   * no `subagents`/`workflows`. Both on by default: together with the `xhigh`
+   * effort default they are exactly the `ultra` preset, so a thread arrives at
+   * full strength instead of waiting for an architect to remember to raise it.
+   * Override with `[defaults].subagents = false` / `CONDOTTO_SUBAGENTS=off`
+   * (same for workflows). Confinement is unchanged — see DEFAULT_SUBAGENTS.
+   */
+  defaultSubagents: boolean;
+  defaultWorkflows: boolean;
   /**
    * Daemon-wide default for the architect self-approve setting, used when a
    * repo sets no `auto_approve`. On by default (DESIGN §4 sanctions
@@ -84,17 +94,36 @@ export interface AuthConfig {
   apiKey?: string;
 }
 
-/** Fallback per-thread cost ceiling in USD when neither repo nor config sets one. */
-export const DEFAULT_COST_CAP_USD = 10;
+/**
+ * Fallback per-thread cost ceiling in USD when neither repo nor config sets one.
+ * Sized for the shipped posture below: xhigh effort with subagents and workflows
+ * on spends real money per thread, and a cap that pauses healthy work is worse
+ * than no cap at all — this is a runaway brake, not a budget.
+ */
+export const DEFAULT_COST_CAP_USD = 50;
 /** Default cap on concurrently-executing harness turns (protects the box). */
 export const DEFAULT_MAX_CONCURRENT_TURNS = 6;
 /**
- * Default implementer model/effort. Opus + high: the implementer
- * must be first-class for a PM to build a real feature (DESIGN §1 north-star).
- * Opaque tokens — the harness adapter maps/validates them.
+ * Default implementer model/effort. Opus 5 + xhigh: the implementer must be
+ * first-class for a PM to build a real feature (DESIGN §1 north-star), and
+ * Anthropic's own guidance is to step up to xhigh for demanding coding and
+ * agentic work. Opaque tokens — the harness adapter maps/validates them.
  */
 export const DEFAULT_MODEL = "opus";
-export const DEFAULT_EFFORT = "high";
+export const DEFAULT_EFFORT = "xhigh";
+/**
+ * Default harness posture for a NEW session: subagents and workflows both on.
+ *
+ * These are on-by-default because the product's job is a thread that works
+ * itself, not because the confinement around them relaxed — it did not. A
+ * subagent-, workflow-, or escaped-origin call is still evaluated by
+ * `evaluateConfined`: read-only, no shell, no network, no memory, and every
+ * gated mutation still routes through the main agent's approval loop. The one
+ * toggle that genuinely widens what an unattended agent can do to files —
+ * the worktree-write opt-in — stays off, session-only, and un-configurable.
+ */
+export const DEFAULT_SUBAGENTS = true;
+export const DEFAULT_WORKFLOWS = true;
 
 /** Default location and env override for the single config file. */
 export const DEFAULT_CONFIG_PATH = "condotto.toml";
@@ -267,6 +296,8 @@ const REPO_KEYS = [
   "default_effort",
   "trusted",
   "auto_approve",
+  "subagents",
+  "workflows",
   "memory",
 ] as const;
 
@@ -300,6 +331,11 @@ function parseRepoEntry(entry: unknown, where: string): RepoConfig {
     // Per-repo default for architect self-approve. Only an explicit boolean
     // pins it; anything else (absent) = fall back to the daemon-wide default.
     autoApprove: optBool(e.auto_approve, `${where}.auto_approve`),
+    // Per-repo harness posture, same tri-state rule: an explicit boolean pins
+    // it, absent falls through to the daemon default. Lets a sandbox repo run
+    // the full multi-agent posture while a repo you care about stays quieter.
+    subagents: optBool(e.subagents, `${where}.subagents`),
+    workflows: optBool(e.workflows, `${where}.workflows`),
     // Durable agent memory for this repo (DECISIONS 2026-07-20). Like `trusted`
     // this is an operator VOUCH, not a session toggle: memory a member's turn
     // writes lands in the system prompt of every later session in that channel,
@@ -418,7 +454,33 @@ function parseRoles(toml: Record<string, unknown>, env: Record<string, string | 
 const TOP_LEVEL_KEYS = ["slack", "auth", "architects", "roles", "repos", "paths", "defaults"] as const;
 const AUTH_KEYS = ["mode", "api_key"] as const;
 const PATHS_KEYS = ["db", "worktrees_root", "memory_root"] as const;
-const DEFAULTS_KEYS = ["model", "effort", "auto_approve", "cost_cap_usd", "max_concurrent_turns"] as const;
+const DEFAULTS_KEYS = [
+  "model",
+  "effort",
+  "auto_approve",
+  "subagents",
+  "workflows",
+  "cost_cap_usd",
+  "max_concurrent_turns",
+] as const;
+
+/**
+ * Resolve a daemon-wide boolean default: env override wins, then the file, then
+ * the built-in. The env form accepts the usual falsey spellings (`off|false|0|no`,
+ * any case) so `CONDOTTO_WORKFLOWS=off` reads the way an operator expects; any
+ * other non-empty value is true. Shared by every `[defaults]` toggle so they
+ * cannot drift apart in how they parse.
+ */
+function resolveBoolDefault(
+  envRaw: string | undefined,
+  fileValue: unknown,
+  where: string,
+  builtIn: boolean,
+): boolean {
+  const fromEnv = envStr(envRaw)?.toLowerCase();
+  if (fromEnv !== undefined) return !/^(off|false|0|no)$/.test(fromEnv);
+  return optBool(fileValue, where) ?? builtIn;
+}
 
 /**
  * Load and validate the core configuration from `condotto.toml`. `env`
@@ -438,14 +500,29 @@ export function loadConfig(
   const defaults = toml.defaults === undefined ? {} : asTable(toml.defaults, "[defaults]");
   warnUnknownKeys(defaults, DEFAULTS_KEYS, "[defaults]");
 
-  // Architect self-approve, on unless explicitly disabled. Accept the usual
-  // falsey spellings so `CONDOTTO_AUTO_APPROVE=off|false|0|no` all turn it off.
-  const autoApproveEnv = envStr(env.CONDOTTO_AUTO_APPROVE)?.toLowerCase();
-  const autoApproveFile = optBool(defaults.auto_approve, "[defaults].auto_approve");
-  const defaultAutoApprove =
-    autoApproveEnv !== undefined
-      ? !/^(off|false|0|no)$/.test(autoApproveEnv)
-      : (autoApproveFile ?? true);
+  // The three daemon-wide toggles, all on unless explicitly disabled: architect
+  // self-approve, and the subagents/workflows harness posture. Together with
+  // `[defaults].effort = "xhigh"` the latter two ARE the `ultra` preset, which is
+  // why there is no separate `ultra` key — it would need a conflict rule against
+  // an `effort` set alongside it.
+  const defaultAutoApprove = resolveBoolDefault(
+    env.CONDOTTO_AUTO_APPROVE,
+    defaults.auto_approve,
+    "[defaults].auto_approve",
+    true,
+  );
+  const defaultSubagents = resolveBoolDefault(
+    env.CONDOTTO_SUBAGENTS,
+    defaults.subagents,
+    "[defaults].subagents",
+    DEFAULT_SUBAGENTS,
+  );
+  const defaultWorkflows = resolveBoolDefault(
+    env.CONDOTTO_WORKFLOWS,
+    defaults.workflows,
+    "[defaults].workflows",
+    DEFAULT_WORKFLOWS,
+  );
 
   return {
     dbPath: expandHome(envStr(env.CONDOTTO_DB_PATH) ?? optString(paths.db, "[paths].db") ?? "condotto.sqlite"),
@@ -470,6 +547,8 @@ export function loadConfig(
     defaultEffort:
       envStr(env.CONDOTTO_DEFAULT_EFFORT) ?? optString(defaults.effort, "[defaults].effort") ?? DEFAULT_EFFORT,
     defaultAutoApprove,
+    defaultSubagents,
+    defaultWorkflows,
   };
 }
 
