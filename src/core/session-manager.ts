@@ -262,6 +262,7 @@ function threadCommandHelp(): string {
     `• \`@Condotto grant @user architect [everywhere]\` · \`@Condotto revoke @user\` — delegate authority (this channel, or everywhere)`,
     `• \`@Condotto land\` / \`@Condotto deploy\` — run the repo's ship path (gated)`,
     `• \`@Condotto budget <usd>\` — raise this thread's cost budget · \`@Condotto cancel\` — stop the running turn (e.g. a runaway workflow)`,
+    `• \`@Condotto clear\` — forget the conversation and start fresh (the worktree, your uncommitted work, and these settings all stay)`,
     `• \`@Condotto /<skill> [args]\` — run one of my skills · \`@Condotto skills\` — list what's available`,
     `• \`@Condotto status\` — list sessions · \`@Condotto stop\` — end this session (keeps the worktree; \`stop clean\` discards it)`,
   ].join("\n");
@@ -649,6 +650,9 @@ export class SessionManager {
       case "cancel":
         await this.cancelSession(event.conv, event.author);
         break;
+      case "clear":
+        await this.clearContext(event.conv, event.author);
+        break;
       case "budget":
         await this.setBudget(event.conv, event.author, event.args);
         break;
@@ -768,7 +772,12 @@ export class SessionManager {
           text:
             `Session reactivated — ${describeTarget(existing.repo_id, existing.workdir)}, ` +
             `branch \`${existing.branch}\`. ` +
-            `I still have the prior context.\n` +
+            // Conditional, because it isn't always true: a `clear` NULLs the handle,
+            // and so does the adapter's own self-heal when a session can't be resumed.
+            // Claiming context we don't have is the one thing this line must not do.
+            (cur.harness_session_handle !== null
+              ? `I still have the prior context.\n`
+              : `I don't have the prior conversation, so re-state what you need.\n`) +
             this.settingsBlock(existing, this.store.getRepo(existing.repo_id)) +
             `\n\n` +
             threadCommandHelp(),
@@ -1204,6 +1213,154 @@ export class SessionManager {
     // A no-op if the query finished between the status read and here; otherwise the
     // in-flight turn drains the aborted result's cost and delivers its own notice.
     await this.live.get(session.id)?.harness?.interrupt().catch(() => {});
+  }
+
+  /**
+   * `@Condotto clear` — architect-only. Forget this thread's conversation WITHOUT
+   * ending the session: the worktree, branch, uncommitted work, settings, roles,
+   * memory and cost ledger all survive, and the next message starts the agent fresh
+   * in the same cwd. Claude Code's `/clear`, for a Slack thread.
+   *
+   * The mechanism is the core's own two-branch attach (getOrAttachHarness): NULL the
+   * opaque handle and the next attach takes `create()` instead of `resume()`. No
+   * harness feature is involved and no model turn is spent — so nothing here depends
+   * on the runtime's own `/clear` or its version floor, and the result is
+   * mechanically checkable rather than inferred from what the agent says back. The
+   * Claude Code adapter has been doing exactly this involuntarily on an unresumable
+   * session ("starting fresh — prior context lost"); this makes it deliberate.
+   */
+  private async clearContext(conv: ConversationRef, author: Principal): Promise<void> {
+    const surface = this.surfaceFor(conv);
+    const session = this.store.getSessionByConversation(conv.surfaceId, conv.conversationId);
+    if (!session || session.status === "stopped") {
+      await surface.post(conv, { text: "No active session in this thread." });
+      return;
+    }
+    // Clearing is command authority (DESIGN §2) — architects only, like stop/cancel.
+    // It is also the one command that deletes the human-stated half of the control
+    // surface: an architect's constraints ("don't touch the migrations", "prod is
+    // frozen until Thursday") live ONLY in the agent's context — not in policy, roles
+    // or memory — so whoever can clear can make the agent forget them and then ask for
+    // the thing they forbade. The gate never reads the conversation, so this grants
+    // nothing THROUGH it; the gate was never the only control.
+    if (!this.store.isArchitect(principalKey(author), conv.channelId)) {
+      this.store.audit({ sessionId: session.id, actor: principalKey(author), event: "authz_denied", detail: { action: "clear" } });
+      await surface.post(conv, { text: "Only architects can clear the thread's context." });
+      return;
+    }
+    // Refuse while a turn is in flight. The FIFO below makes a mid-turn clear
+    // CORRECT, but not sensible: it would land behind every queued turn (minutes of
+    // silence, and the queued messages still run on the old context), and nulling the
+    // cached harness is exactly how `cancel` reaches the running query — so clearing
+    // during a runaway workflow would take away the brake. Cancel's idle check, inverted.
+    if (session.status === "active") {
+      await surface.post(conv, {
+        text:
+          "Something's running right now, so there's nothing safe to clear yet. " +
+          "`@Condotto cancel` it first, then clear — cancelling won't end the session.",
+      });
+      return;
+    }
+    // Every mutation runs inside the per-session FIFO. `executeTurn`'s whole body is
+    // one chain link and it ENDS with an unconditional
+    // `updateSessionHandle(id, harnessSession.handle)` — an out-of-band clear racing
+    // that line gets silently written back, and the architect is told the context is
+    // gone while the next turn resumes it intact. Serializing is the correctness
+    // guarantee; the status check above is only the UX layer.
+    const entry = this.entryFor(session.id);
+    entry.chain = entry.chain
+      .then(async () => {
+        // Re-read under the FIFO: a stop, or the GC discarding a clean-stopped
+        // session, can land between the checks above and here.
+        const s = this.store.getSession(session.id);
+        if (!s || s.status === "stopped") return;
+        const hadContext = s.harness_session_handle !== null;
+        // A pending approval names a tool_use_id that exists only inside the
+        // transcript we're abandoning. Left pending, a later Approve click would
+        // transition the row, audit an approval, and then re-drive an EMPTY prompt
+        // into a brand-new session with no such call — spend recorded, action never
+        // run, nobody told. Expire them, as stop and reactivation already do.
+        const expiredApprovals = this.store.expirePendingApprovals(s.id);
+        // Durable write first: a crash between the two leaves a cleared session
+        // rather than a resurrectable one.
+        this.store.clearSessionHandle(s.id);
+        // Then the cache — getOrAttachHarness returns `entry.harness` before it ever
+        // looks at the handle, so the row alone would not clear a warm session. Null
+        // the harness but KEEP the entry: deleting it drops the FIFO chain.
+        const live = this.live.get(s.id);
+        if (live) live.harness = null;
+        // The worktree-write opt-in does not survive. It is the one setting the
+        // codebase already refuses to inherit — never seedable from config, gated
+        // behind a mandatory warning, and auto-cleared by three other paths so a stale
+        // enable can't silently resurrect. The consent was "this agent, which has
+        // spent an hour on this and knows what it's doing, may write across the
+        // worktree unattended"; clearing destroys the knowing half and would leave the
+        // writing half attached to an agent with no task context at all.
+        const workflowWriteRevoked = s.workflow_write === 1;
+        if (workflowWriteRevoked) this.store.setSessionWorkflowWrite(s.id, false);
+
+        const spentUsd = this.store.sessionCostUsd(s.id);
+        const budgetUsd = s.budget_limit_usd ?? this.defaultCostCapUsd;
+        this.store.audit({
+          sessionId: s.id,
+          actor: principalKey(author),
+          event: "context_cleared",
+          // Never the handle itself (opaque to the core) and never message text: the
+          // row records who erased what capability, when, and against what spend.
+          detail: { hadContext, expiredApprovals, workflowWriteRevoked, spentUsd, budgetUsd },
+        });
+
+        if (!hadContext) {
+          await surface.post(conv, {
+            text: "Nothing to clear — I don't have any context in this thread yet. Just tell me what you need.",
+          });
+          return;
+        }
+        const repo = this.store.getRepo(s.repo_id);
+        const lines = [
+          `🧹 *Context cleared* by ${mentionToken(author)}. I've forgotten this conversation. ` +
+            `I'm still on ${describeTarget(s.repo_id, s.workdir)} at branch \`${s.branch}\`, ` +
+            `and your files and uncommitted work are untouched.`,
+          // The mitigation, not decoration: nothing re-injects thread history, so the
+          // humans keep reading a thread the agent cannot see. Every "ship it" / "the
+          // same fix" / "as we discussed" now breaks, and the agent will reconstruct
+          // confidently rather than say it doesn't know.
+          `• *Re-state what you want in your next message — don't refer back to anything above.* You can still read this thread; I can't.`,
+        ];
+        if (expiredApprovals > 0) {
+          lines.push(
+            `• Discarded ${expiredApprovals} pending approval${expiredApprovals === 1 ? "" : "s"} — ` +
+              `the action${expiredApprovals === 1 ? " it referred to" : "s they referred to"} lived in the context I just dropped. Ask again and I'll re-propose.`,
+          );
+        }
+        if (workflowWriteRevoked) {
+          lines.push("• Workflow worktree-write is back *off* — `@Condotto workflows write on` again if you still want it.");
+        }
+        if (repo?.memory === 1) {
+          lines.push("• Notes I've saved to memory for this repo aren't affected — they'll load again on my next turn.");
+        }
+        lines.push(
+          `• Spend still counts: $${spentUsd.toFixed(2)} of $${budgetUsd.toFixed(2)} used in this thread. ` +
+            `Clearing my context doesn't refund it — \`@Condotto budget <usd>\` to raise the cap.`,
+        );
+        if (s.auto_approve === 1) {
+          lines.push(
+            "• ⚡ auto-approve is on, so my gated actions run without an Approve click — and I have no memory of anything you told me earlier.",
+          );
+        }
+        await surface.post(conv, { text: lines.join("\n") });
+      })
+      // Catch so a failure can't leave the chain rejected and poison every later
+      // turn — but SAY so. Silence after a clear is the one outcome this whole
+      // handler exists to prevent: the architect would assume the context is gone.
+      .catch(async (err) => {
+        this.log(`[session ${session.id}] clear failed: ${err}`);
+        this.store.audit({ sessionId: session.id, actor: "system", event: "error", detail: { action: "clear", message: String(err) } });
+        await surface
+          .post(conv, { text: `⚠️ I couldn't clear the context: ${err instanceof Error ? err.message : String(err)}. Assume I still remember this thread.` })
+          .catch(() => {});
+      });
+    await entry.chain;
   }
 
   /** Human label for the worktree retention window (stop-clean messaging). */
@@ -2204,6 +2361,26 @@ export class SessionManager {
     // returns false and must not resume the session again.
     if (!this.store.decideApproval(event.requestId, decider, outcome)) {
       this.log(`[approval] request ${event.requestId} was already decided — ignoring`);
+      // An EXPIRED request needs a word back. The surface has already rewritten the
+      // message to "Approved by @you" and stripped the buttons before the core saw
+      // the click, so staying silent leaves Slack claiming an approval for an action
+      // that cannot run — an audit trail nobody can trust. A clear (or a stop) makes
+      // this routine rather than rare. A genuine double-click stays silent: its row
+      // is approved/denied, not expired, and the first click already replied.
+      const current = this.store.getApproval(event.requestId);
+      if (current?.decision === "expired") {
+        this.store.audit({
+          sessionId: session.id,
+          actor: decider,
+          event: "approval_rejected",
+          detail: { requestId: event.requestId, reason: "expired_before_decision" },
+        });
+        await surface
+          ?.post(conv, {
+            text: `That request expired before you decided it — the turn it belonged to is gone. Nothing ran.`,
+          })
+          .catch(() => {});
+      }
       return;
     }
     this.log(`[approval] ${outcome} by ${decider} for ${approval.tool_name} on session ${session.id}`);

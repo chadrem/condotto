@@ -2982,3 +2982,162 @@ postures); parse forms and prose fallthrough in `adapter-slack.test.ts`; authori
 weak-surface refusal, budget cap, and the defer→approve→resume handshake (asserting
 the resume carries **no** skill) in `session-manager.test.ts`. 559 pass / 0 fail;
 `check:ports` and `tsc --noEmit` clean.
+
+## 2026-07-25 — `/clear` needs no harness feature: drop the handle, take the create branch
+
+**Why.** A session is pinned to its thread forever — `(surface_id,
+conversation_id)` → one session, one worktree, one handle — so a thread's context
+only ever grows. §7 has flagged this since the start ("a week-long thread will
+still strain context"). The only escape was `stop clean` plus a new thread, which
+throws away the worktree, the branch, the uncommitted work and every session
+setting just to get a fresh context. Claude Code answers this with `/clear`; a
+Slack thread deserves the same.
+
+**Decision.** `@Condotto clear` (architect-only, `/clear` aliased) NULLs
+`sessions.harness_session_handle` and evicts the cached harness. `getOrAttachHarness`
+already branches `handle !== null ? resume(...) : create(...)`, so the next attach
+mints a fresh SDK session in the same cwd. The mechanism was already in the
+codebase three times over — at session birth, on turn error, and in the adapter's
+involuntary self-heal on an unresumable session ("starting fresh — prior context
+lost"). This makes that path deliberate.
+
+**The three-way comparison, and why the SDK's own `/clear` lost.** Research against
+the live docs (2026-07-25) confirmed `/clear` is dispatchable as a prompt through
+the SDK and is listed in `system/init`'s `slash_commands`, reportedly wiping the
+transcript while keeping the session id. We did not build on it:
+
+1. **Version risk.** It claims a Claude Code ≥ 2.1.117 floor, and the
+   "keeps the session id" half was unverified. The handle drop uses no harness
+   feature at all, so there is nothing to keep in step.
+2. **It costs a real turn** — tokens, latency, and a `turns` row against the very
+   ledger the feature promises to preserve.
+3. **It is only observable by watching output.** CLAUDE.md's harness-port rule is
+   "never simulate gating by watching output"; the same instinct applies here. The
+   handle drop is checkable against counters: `created` goes up, `resumed` does not.
+4. **The skill allowlist would have had to be reversed.** `enumerateSkills` is an
+   allowlist precisely because a denylist over ~45 growing built-ins fails OPEN on
+   upgrade, and its comment names `/clear` as an example. Routing `/clear` through
+   it means arguing against that reasoning; the parser alias does not.
+
+`deleteSession()` also lost: it destroys the on-disk `.jsonl`, a forensic artifact
+that survives `stop` and the worktree GC today.
+
+**It needed no migration.** `harness_session_handle` was already nullable and
+`createSession` already writes SQL NULL. Schema stays at v5. That is the signal the
+seam was the right one.
+
+**`clearSessionHandle` exists because `updateSessionHandle(id, null)` is a trap.**
+`SessionHandle = unknown`, so that call compiles with no cast and then
+`JSON.stringify(null)` writes the four-character TEXT `'null'`. It round-trips
+(`inflate` JSON-parses it back), so the caller cannot tell — but the column is no
+longer NULL, and `WHERE harness_session_handle IS NULL`, a future partial index, and
+anyone reading the DB by hand would all disagree. The store test asserts
+`typeof(harness_session_handle)` on the raw column, not the inflated value, because
+the inflated view cannot distinguish the two. The core also must NOT write an
+adapter-shaped `{v:1, sessionId:null}`: SQL NULL is its only legal vocabulary for
+"no context" (handles are persisted verbatim, never parsed).
+
+**The race that would have made this worse than not shipping.** `daemon.ts`
+dispatches `void manager.handleEvent(event)`, so a command handler runs
+*concurrently* with an in-flight turn — `stopSession` and `cancelSession` both rely
+on that. But `executeTurn` ends with an unconditional
+`updateSessionHandle(id, harnessSession.handle)` ("belt-and-braces in case the
+adapter didn't emit `handle_updated`"), and it holds the harness in a **local**
+const, not `entry.harness`. An out-of-band clear would therefore be silently written
+back seconds later, and the architect would have been told the context was gone
+while the next turn resumed it intact. A command whose failure mode is false
+assurance is a security defect in a product whose value is mechanical guarantees.
+**Fix: every mutation runs inside the per-session FIFO chain**, where `executeTurn`'s
+whole body is one link. Pinned by a test that holds a turn open.
+
+On top of that, a **refusal while `status === 'active'`**. The FIFO alone is correct
+but not sensible: the clear would land behind every queued turn, and nulling
+`entry.harness` mid-turn is exactly what disarms `@Condotto cancel`, whose only
+route to the running query is `this.live.get(id)?.harness?.interrupt()`. Clearing
+during a runaway workflow would take away the brake. The status check is the UX
+layer; the FIFO is the correctness layer; neither substitutes for the other.
+
+**Pending approvals are expired, not refused.** A pending approval names a
+`tool_use_id` that exists only inside the abandoned transcript. Left pending, a later
+Approve click transitions the row, audits an approval, and re-drives an EMPTY prompt
+into a brand-new session with no such call: spend recorded, action never run, nobody
+told. Expiring matches `stop` and reactivation, and it makes `clear` a third way to
+unwedge a thread stuck behind `hasPendingApproval`.
+
+**Fixed in the same change (pre-existing, made routine by clear):** when
+`decideApproval` returned false the core only logged, while the Slack adapter had
+already rewritten the message to "Approved by @you" and stripped the buttons. An
+expired request now posts "That request expired before you decided it — nothing ran"
+and audits `approval_rejected` with `reason: "expired_before_decision"`. A genuine
+double-click stays silent (its row is approved/denied, not expired). Also made the
+reactivation line "I still have the prior context." conditional on the handle being
+non-null — it was already untrue after the adapter's self-heal.
+
+**What survives, and the rule behind it.** A setting survives if the gate re-derives
+its authority from live state on every call; it is revoked if its authorization was
+one-time informed consent bound to a context that no longer exists. So `model`,
+`effort`, `subagents`, `workflows`, `auto_approve`, `budget_limit_usd`, `status` and
+`cleanup_at` all stay — and **`workflow_write` is revoked**. It is the one setting
+the codebase already refuses to inherit: never seedable from repo or daemon config,
+gated behind a mandatory warning, and already auto-cleared by three other paths so a
+stale enable cannot silently resurrect. The consent was "this agent, which has spent
+an hour on this and knows what it's doing, may write across the worktree
+unattended"; a clear destroys the knowing half and would leave the writing half
+attached to an agent with no task context at all.
+
+**Spend is never reset.** Cost is derived (`SUM(turns.cost_usd)`), so resetting it
+would mean deleting turn rows. The cap brakes real dollars and real rate limits,
+consumed by work already done. The codebase already refuses every softer version:
+error turns record their cost so the cap "can't be evaded by turns that end in
+error", and a cancelled turn drains its aborted cost into the ledger. A clear that
+zeroed spend would be a free, unlimited, one-line-of-chat evasion. The reply states
+the numbers and points at `@Condotto budget <usd>`, which is the sanctioned,
+audited, attributable way to buy headroom.
+
+**Architect-only.** Consistent with all 14 other session-mutating commands, but the
+real argument is constraint amnesia: an architect's stated constraints ("don't touch
+the migrations", "prod is frozen until Thursday") live ONLY in the agent's context —
+not in policy, roles, or memory. Clear is the single command that deletes the
+human-stated half of the control surface while leaving tool authority, auto-approve
+and the worktree untouched. It grants nothing *through* the gate (the gate never
+reads the conversation), but the gate was never the only control. Injection angle
+confirmed closed: commands are minted only by `parseMentionCommand` from a message
+that BEGINS with the bot mention, bot-authored events return early, and repo
+content, tool output and model output never traverse `InboundEvent` at all. Pinned
+by a parser test.
+
+**Memory is deliberately untouched**, and the reply says so. The directory is per
+(repo, channel), shared by every thread on that repo in that channel, so a
+thread-scoped command deleting it would let one thread destroy another's accumulated
+knowledge. Consequence worth naming: memory auto-loads into the fresh session, so a
+clear is **not** a security remediation — if content genuinely must not persist, the
+honest answer is `stop clean` plus a fresh thread, and an operator removing the
+memory directory.
+
+**Consequences.**
+
+1. The reply leads with the mitigation, not the reassurance: *"Re-state what you
+   want in your next message — don't refer back to anything above."* Nothing
+   re-injects thread history (verified by exhaustion: `frameMessage` frames exactly
+   one message, `condottoSystemPrompt` carries no conversation, `framedText` is a
+   single inbound message). The humans keep reading a thread the agent cannot see,
+   every anaphoric reference breaks, and the agent will confidently reconstruct
+   rather than admit it doesn't know. With auto-approve on by default, that
+   reconstruction's writes and bash run without a click — so the reply names that too.
+2. The `/clear` alias sits ABOVE the `/`-prefix skill catch-all. `/compact` and
+   `/rewind` deliberately still answer "I don't have a skill called that": `/clear`
+   earned an alias because the core owns a mechanism for it, and they do not.
+   A test pins that boundary so "let's alias them all" has to face a red assertion.
+3. Accepted residual: each clear orphans a transcript under
+   `~/.claude/projects/<encoded-cwd>/`. Already true of every `stop` and every
+   GC'd worktree. Not engineered around.
+4. Audit event `context_cleared`, detail `{hadContext, expiredApprovals,
+   workflowWriteRevoked, spentUsd, budgetUsd}` — never the handle (opaque to the
+   core) and never message text.
+5. Tests (+16): `store.test.ts` (raw-column SQL NULL); `adapter-slack.test.ts`
+   (alias, arity, the `/compact` boundary, the leading-mention rule);
+   `session-manager.test.ts` (create-not-resume, SQL NULL + audit, the active-turn
+   refusal, same cwd on a sub-project session, survivors incl. the ledger,
+   `workflow_write` revocation, approval expiry + the late-click notice + unwedging,
+   over-budget still refused, member refusal, no-session, nothing-to-clear, memory
+   untouched). 578 pass / 0 fail; `check:ports` and `tsc --noEmit` clean.

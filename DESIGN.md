@@ -837,7 +837,11 @@ so a batched gated call can never slip through.
 - **Long threads vs. context window.** The SDK compacts, but a week-long thread
   will still strain context. Have each session keep a running `DECISIONS.md` in
   its worktree — a durable summary the agent re-reads, independent of transcript
-  compaction.
+  compaction. *Partly answered (2026-07-25):* `@Condotto clear` (§8) gives an
+  architect a manual reset that costs neither the worktree nor the thread, and
+  durable memory is the durable-summary half. Still open: nothing re-injects thread
+  history after a clear, so the humans keep reading a thread the agent cannot see —
+  the reply says so, prescriptively, and that is the whole mitigation today.
 - **Concurrency & the SDK.** Confirm behavior of many concurrent `query()`
   calls in one process under load; don't assume it's free.
 - **Edits & deletes in Slack.** A human editing a message after the agent read
@@ -881,7 +885,21 @@ assign` to root a thread, or `@Condotto assign` to claim one — Slack forbids s
 commands inside threads). Everything is built against the two ports (§3): Bolt
 lives in `adapters/slack/`, the Agent SDK in `adapters/claude-code/`, and the core
 routes on `(surface, conversation_id)` and `Principal` — a Slack or SDK type
-outside its adapter directory is a review-blocking bug.
+outside its adapter directory is a review-blocking bug. **`@Condotto clear`**
+(architect-only, `/clear` aliased) resets a thread's agent context in place: the
+core NULLs the opaque `harness_session_handle` and evicts the cached harness, so
+the next attach takes `getOrAttachHarness`'s `create()` branch instead of
+`resume()`. No harness capability is involved and no model turn is spent, which
+keeps the result mechanically checkable rather than inferred from what the agent
+says back — the same instinct as the harness port's "never simulate gating by
+watching output". Everything but the conversation survives (worktree, branch,
+uncommitted work, settings, roles, memory, and the cost ledger — clearing must
+never be a way to evade the runaway cap). Two consequences are load-bearing: the
+mutation runs inside the session's FIFO chain, because `executeTurn` ends with an
+unconditional handle write-back that would otherwise silently undo it, and pending
+approvals are expired, because their `tool_use_id` lives only in the abandoned
+transcript. The worktree-write opt-in is revoked: its consent was bound to a
+context that no longer exists.
 
 **Gating, roles & real work.** The policy engine (`core/policy.ts`) classifies
 every tool call allow/gate/deny (hard-deny first, then auto-allow read-only +

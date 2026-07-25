@@ -80,6 +80,13 @@ export type CommandName =
   // thread-scoped shape. The detached background task is halted via q.interrupt()
   // and its spend is drained into the ledger (spike 2026-07-19, DECISIONS.md).
   | "cancel"
+  // wipe the agent's conversation context WITHOUT ending the session: the thread,
+  // worktree, branch, uncommitted work, settings, roles, memory and cost ledger all
+  // survive. The core drops the opaque harness handle so the next attach takes
+  // getOrAttachHarness's create() branch — no harness feature is required and no
+  // model turn is spent. The worktree-write opt-in is revoked (its consent was bound
+  // to the context that just went away).
+  | "clear"
   | "land"
   | "deploy"
   | "budget"

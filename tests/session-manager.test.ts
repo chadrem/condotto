@@ -1168,6 +1168,240 @@ describe("cancel a running turn", () => {
   });
 });
 
+// `@Condotto clear` — Claude Code's /clear for a Slack thread. The conversation
+// goes; the session, worktree, settings, memory and ledger stay.
+describe("clear — resetting the agent's context", () => {
+  const clear = (w: World, id: string, author: Principal = architect) =>
+    w.manager.handleEvent({ kind: "command", conv: conv(id), author, name: "clear", args: "" });
+  const say = (w: World, id: string, text: string, author: Principal = architect) =>
+    w.manager.handleEvent({ kind: "message", conv: conv(id), author, text, attachments: [] });
+  const assign = (w: World, id: string, args = "testrepo") =>
+    w.manager.handleEvent({ kind: "command", conv: conv(id), author: architect, name: "assign", args });
+
+  test("clear drops the handle, so the next message CREATES a fresh harness session instead of resuming", async () => {
+    const w = makeWorld();
+    await assign(w, "cl1.000001");
+    await say(w, "cl1.000001", "remember 47");
+    expect(w.harness.created.length).toBe(1);
+
+    await clear(w, "cl1.000001");
+    await say(w, "cl1.000001", "what number?");
+
+    // The whole design in two counters: a second create, and never a resume. Note
+    // this also proves the LiveEntry cache was evicted — getOrAttachHarness returns
+    // the cached harness before it ever looks at the handle, so a DB-only clear
+    // would have left created at 1.
+    expect(w.harness.created.length).toBe(2);
+    expect(w.harness.resumed.length).toBe(0);
+  });
+
+  test("the session row's handle is SQL NULL after a clear, and the session is not stopped", async () => {
+    const w = makeWorld();
+    await assign(w, "cl2.000001");
+    await say(w, "cl2.000001", "hi");
+    const sid = w.store.getSessionByConversation("fake", "cl2.000001")!.id;
+    expect(w.store.getSession(sid)!.harness_session_handle).not.toBeNull();
+
+    await clear(w, "cl2.000001");
+
+    expect(w.store.getSession(sid)!.harness_session_handle).toBeNull();
+    expect(w.store.getSession(sid)!.status).toBe("parked");
+    expect(w.store.listAudit(sid).some((a) => a.event === "context_cleared")).toBe(true);
+  });
+
+  test("a clear typed while a turn is in flight is refused, and the handle survives it", async () => {
+    // The race this pins: executeTurn ENDS with an unconditional
+    // updateSessionHandle(id, harnessSession.handle). An out-of-band clear would be
+    // silently written back a moment later, leaving the architect told the context
+    // was gone while the next turn resumed it intact.
+    const w = makeWorld();
+    await assign(w, "cl3.000001");
+    await say(w, "cl3.000001", "first"); // establish a handle to protect
+    const sid = w.store.getSessionByConversation("fake", "cl3.000001")!.id;
+
+    let release: () => void = () => {};
+    const held = new Promise<void>((r) => { release = r; });
+    w.harness.beforeReply = () => held;
+    const turnP = say(w, "cl3.000001", "long one");
+    for (let i = 0; i < 200 && w.store.getSession(sid)!.status !== "active"; i++) {
+      await Bun.sleep(5);
+    }
+    expect(w.store.getSession(sid)!.status).toBe("active");
+
+    await clear(w, "cl3.000001");
+    expect(w.surface.posts.at(-1)!.text).toContain("Something's running right now");
+    expect(w.store.getSession(sid)!.harness_session_handle).not.toBeNull();
+
+    release();
+    await turnP;
+    w.harness.beforeReply = null;
+    // Once the turn has parked, the same command works — the refusal is about
+    // timing, not authority.
+    await clear(w, "cl3.000001");
+    expect(w.store.getSession(sid)!.harness_session_handle).toBeNull();
+  });
+
+  test("a cleared session starts fresh in the SAME working directory, with the worktree root still the boundary", async () => {
+    const w = makeWorld();
+    await assign(w, "cl4.000001", "testrepo/apps/report");
+    await say(w, "cl4.000001", "hi");
+    await clear(w, "cl4.000001");
+    await say(w, "cl4.000001", "again");
+
+    expect(w.harness.created.length).toBe(2);
+    expect(w.harness.created[1]!.cwd).toBe(w.harness.created[0]!.cwd);
+    expect(w.harness.created[1]!.cwd).toEndWith(join("apps", "report"));
+    expect(w.harness.created[1]!.root).toBe(w.harness.created[0]!.root!);
+  });
+
+  test("the worktree, branch, settings and cost ledger all survive a clear", async () => {
+    const w = makeWorld();
+    await assign(w, "cl5.000001");
+    await w.manager.handleEvent({ kind: "command", conv: conv("cl5.000001"), author: architect, name: "model", args: "sonnet" });
+    await w.manager.handleEvent({ kind: "command", conv: conv("cl5.000001"), author: architect, name: "budget", args: "25" });
+    await say(w, "cl5.000001", "spend something");
+    const before = w.store.getSessionByConversation("fake", "cl5.000001")!;
+    const spentBefore = w.store.sessionCostUsd(before.id);
+    expect(spentBefore).toBeGreaterThan(0);
+
+    await clear(w, "cl5.000001");
+
+    const after = w.store.getSession(before.id)!;
+    expect(after.worktree_path).toBe(before.worktree_path);
+    expect(after.branch).toBe(before.branch);
+    expect(after.workdir).toBe(before.workdir);
+    expect(after.model).toBe("sonnet");
+    expect(after.budget_limit_usd).toBe(25);
+    expect(after.auto_approve).toBe(before.auto_approve);
+    expect(after.subagents).toBe(before.subagents);
+    expect(after.workflows).toBe(before.workflows);
+    expect(existsSync(join(after.worktree_path, "README.md"))).toBe(true);
+    // Forgetting the conversation does not un-spend the money.
+    expect(w.store.sessionCostUsd(before.id)).toBe(spentBefore);
+  });
+
+  test("the worktree-write opt-in does NOT survive a clear — its consent was bound to the context", async () => {
+    const w = makeWorld();
+    await assign(w, "cl6.000001");
+    await w.manager.handleEvent({ kind: "command", conv: conv("cl6.000001"), author: architect, name: "workflows", args: "write on" });
+    const sid = w.store.getSessionByConversation("fake", "cl6.000001")!.id;
+    expect(w.store.getSession(sid)!.workflow_write).toBe(1);
+    await say(w, "cl6.000001", "hi");
+
+    await clear(w, "cl6.000001");
+
+    const after = w.store.getSession(sid)!;
+    expect(after.workflow_write).toBe(0);
+    // ...but the capabilities it rode on are posture, not consent, so they stay.
+    expect(after.workflows).toBe(1);
+    expect(after.subagents).toBe(1);
+    // A silent capability downgrade would be its own kind of lie.
+    expect(w.surface.posts.at(-1)!.text).toContain("worktree-write is back");
+    const cleared = w.store.listAudit(sid).find((a) => a.event === "context_cleared")!;
+    expect((cleared.detail as { workflowWriteRevoked: boolean }).workflowWriteRevoked).toBe(true);
+  });
+
+  test("clear voids a pending approval, and a late Approve click says so instead of silently running nothing", async () => {
+    const w = makeWorld();
+    await assign(w, "cl7.000001");
+    // A member-initiated gated write defers (an architect's own turn auto-approves).
+    w.harness.scriptTurn([{ id: "tu-w", name: "Write", input: { file_path: "x.txt", content: "hi" } }]);
+    await say(w, "cl7.000001", "add x", member);
+    const sid = w.store.getSessionByConversation("fake", "cl7.000001")!.id;
+    const requestId = w.surface.lastApprovalRequestId()!;
+    expect(w.store.hasPendingApproval(sid)).toBe(true);
+
+    await clear(w, "cl7.000001");
+    expect(w.store.hasPendingApproval(sid)).toBe(false);
+    expect(w.store.getApproval(requestId)!.decision).toBe("expired");
+    expect(w.surface.posts.at(-1)!.text).toContain("Discarded 1 pending approval");
+
+    // The click arrives after the clear. Slack has already rewritten its message to
+    // "Approved by …", so silence would leave the audit trail claiming an approval
+    // for an action that could never run.
+    await w.manager.handleEvent({ kind: "approval_decision", requestId, decider: architect, decision: "approved" });
+    expect(w.harness.executed.length).toBe(0);
+    expect(w.surface.posts.at(-1)!.text).toContain("expired before you decided it");
+    expect(w.store.listAudit(sid).some((a) => a.event === "approval_rejected")).toBe(true);
+
+    // And the thread is not wedged: hasPendingApproval no longer blocks new turns.
+    const before = w.harness.allTurns.length;
+    await say(w, "cl7.000001", "never mind, start over");
+    expect(w.harness.allTurns.length).toBe(before + 1);
+    expect(w.harness.created.length).toBe(2);
+  });
+
+  test("spend survives, so a cleared over-budget session still refuses new turns", async () => {
+    const w = makeWorld(undefined, { costCap: 5 });
+    await assign(w, "cl8.000001");
+    await say(w, "cl8.000001", "hi"); // a real turn, so there is a context to clear
+    const sid = w.store.getSessionByConversation("fake", "cl8.000001")!.id;
+    const spentBefore = w.store.sessionCostUsd(sid);
+    w.store.insertTurn({ sessionId: sid, direction: "out", text: "prior", costUsd: 6 });
+
+    await clear(w, "cl8.000001");
+    expect(w.store.sessionCostUsd(sid)).toBe(spentBefore + 6);
+    expect(w.surface.posts.at(-1)!.text).toContain(`$${(spentBefore + 6).toFixed(2)} of $5.00`);
+
+    const before = w.harness.allTurns.length;
+    await say(w, "cl8.000001", "do more", member);
+    expect(w.harness.allTurns.length).toBe(before); // clearing is not a way to buy headroom
+    expect(w.store.listAudit(sid).some((a) => a.event === "budget_exceeded")).toBe(true);
+  });
+
+  test("a member cannot clear", async () => {
+    const w = makeWorld();
+    await assign(w, "cl9.000001");
+    await say(w, "cl9.000001", "hi");
+    const sid = w.store.getSessionByConversation("fake", "cl9.000001")!.id;
+
+    await clear(w, "cl9.000001", member);
+
+    expect(w.surface.posts.at(-1)!.text).toContain("Only architects");
+    expect(w.store.getSession(sid)!.harness_session_handle).not.toBeNull();
+    expect(w.store.listAudit(sid).some((a) => a.event === "authz_denied")).toBe(true);
+  });
+
+  test("clear on an unassigned or stopped thread says there's no session", async () => {
+    const w = makeWorld();
+    await clear(w, "cla.000001");
+    expect(w.surface.posts.at(-1)!.text).toContain("No active session in this thread");
+
+    await assign(w, "clb.000001");
+    await w.manager.handleEvent({ kind: "command", conv: conv("clb.000001"), author: architect, name: "stop", args: "" });
+    await clear(w, "clb.000001");
+    expect(w.surface.posts.at(-1)!.text).toContain("No active session in this thread");
+  });
+
+  test("clearing a thread that never had a turn says there was nothing to clear", async () => {
+    const w = makeWorld();
+    await assign(w, "clc.000001"); // assigned, but no turn yet — the handle is still null
+    await clear(w, "clc.000001");
+    expect(w.surface.posts.at(-1)!.text).toContain("Nothing to clear");
+  });
+
+  test("clear does not touch durable memory — that's what carries across a cleared context", async () => {
+    const w = makeWorld(undefined, {
+      memoryRoot: mkdtempSync(join(tmpdir(), "condotto-mem-")),
+      repoMemory: true,
+    });
+    await assign(w, "cld.000001");
+    await say(w, "cld.000001", "hello");
+    const dir = w.harness.allTurns.at(-1)!.harness!.memoryDir!;
+    expect(existsSync(dir)).toBe(true);
+
+    await clear(w, "cld.000001");
+    await say(w, "cld.000001", "hello again");
+
+    // Same directory, still on disk, still handed to the fresh session: memory is
+    // per (repo, channel) and lives outside the worktree, so a thread-scoped clear
+    // must not reach it.
+    expect(existsSync(dir)).toBe(true);
+    expect(w.harness.allTurns.at(-1)!.harness!.memoryDir).toBe(dir);
+    expect(w.surface.posts.some((p) => p.text.includes("memory for this repo aren't affected"))).toBe(true);
+  });
+});
+
 describe("streaming progress", () => {
   test("a burst of progress events is coalesced into the one status message and never clobbers the reply", async () => {
     const w = makeWorld();

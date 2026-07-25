@@ -299,6 +299,43 @@ describe("SlackAdapter.handleMessage — sync guards run ahead of the async hop"
   });
 });
 
+describe("parseMentionCommand — clear", () => {
+  test("`clear` and `/clear` are the same command, and case doesn't matter", () => {
+    // `/clear` is accepted because that is how Claude Code spells it, and it is what
+    // an operator's fingers will type.
+    expect(parse("clear")).toEqual({ name: "clear", args: "" });
+    expect(parse("/clear")).toEqual({ name: "clear", args: "" });
+    expect(parse("Clear")).toEqual({ name: "clear", args: "" });
+    expect(parse("/CLEAR")).toEqual({ name: "clear", args: "" });
+  });
+
+  test("the `/`-prefix skill catch-all no longer swallows `/clear` — but still owns every other built-in", () => {
+    // The alias sits ABOVE the catch-all. Everything else slash-prefixed keeps
+    // routing to the skill dispatcher, whose allowlist deliberately excludes the
+    // runtime's built-ins. That boundary is deliberate: `/clear` earned an alias
+    // because the core owns a mechanism for it, and `/compact` and `/rewind` do not.
+    expect(parse("/clear")).toEqual({ name: "clear", args: "" });
+    expect(parse("/compact")).toEqual({ name: "skill", args: "compact" });
+    expect(parse("/rewind")).toEqual({ name: "skill", args: "rewind" });
+  });
+
+  test("a stray argument keeps `clear` as conversation, not a command", () => {
+    // Strict arity, like every other verb in the ladder — otherwise an ordinary
+    // instruction would silently wipe the thread's context.
+    expect(parse("clear the cache in foo.ts")).toBeNull();
+    expect(parse("clear all")).toBeNull();
+    expect(parse("/clear everything")).toEqual({ name: "skill", args: "clear everything" });
+  });
+
+  test("a mention that does not LEAD the message mints no command", () => {
+    // Authority attaches to a verified leading mention only. Repo content, tool
+    // output and agent replies never traverse InboundEvent at all, but this pins the
+    // position rule that makes quoting the command inside a sentence inert.
+    expect(parseMentionCommand(`please ask <@${BOT}> clear when you're done`, BOT)).toBeNull();
+    expect(parseMentionCommand(`> <@${BOT}> clear`, BOT)).toBeNull();
+  });
+});
+
 describe("parseMentionCommand — skills", () => {
   // The mention-first spelling is not cosmetic. Slack intercepts a message that
   // BEGINS with `/` as one of its own commands, and custom slash commands cannot

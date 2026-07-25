@@ -690,6 +690,23 @@ export class Store {
       .run({ id, handle: JSON.stringify(handle) });
   }
 
+  /**
+   * Forget the agent's conversation context (`@Condotto clear`): the next attach
+   * takes getOrAttachHarness's `create()` branch and the harness mints a fresh
+   * session in the same cwd. The session row, worktree, settings and cost ledger
+   * are untouched — only the context is gone.
+   *
+   * Writes SQL NULL, deliberately, and NOT `updateSessionHandle(id, null)`.
+   * `SessionHandle` is `unknown`, so that call compiles with no cast and then
+   * stringifies to the four-character TEXT `'null'`. It round-trips (inflate
+   * JSON.parses it back to null) so the caller can't tell, but the column is no
+   * longer NULL: `WHERE harness_session_handle IS NULL`, a future partial index or
+   * migration, and anyone reading the DB by hand would all disagree with it.
+   */
+  clearSessionHandle(id: string): void {
+    this.db.query(`UPDATE sessions SET harness_session_handle = NULL WHERE id = $id`).run({ id });
+  }
+
   updateSessionStatus(id: string, status: SessionStatus): void {
     this.db.query(`UPDATE sessions SET status = $status WHERE id = $id`).run({ id, status });
   }

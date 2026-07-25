@@ -156,6 +156,15 @@ export function parseMentionCommand(
   if (first === "stop" && second === "clean" && words.length === 2) return { name: "stop", args: "clean" };
   // Interrupt the in-flight turn (e.g. a runaway workflow); the session lives on.
   if (first === "cancel" && words.length === 1) return { name: "cancel", args: "" };
+  // Forget the thread's conversation; the session, worktree and settings live on.
+  // `/clear` is an accepted alias because that is how Claude Code spells it and it is
+  // what an operator's fingers will type. It MUST sit above the `/`-prefix branch at
+  // the bottom: that branch routes anything slash-prefixed to the skill dispatcher,
+  // whose allowlist deliberately excludes the runtime's built-ins (a denylist over
+  // ~45 growing built-ins fails OPEN on upgrade) — so `@Condotto /clear` would
+  // otherwise answer "I don't have a skill called `/clear` here". The alias belongs
+  // here, not in that allowlist.
+  if ((first === "clear" || first === "/clear") && words.length === 1) return { name: "clear", args: "" };
   if (first === "status" && words.length === 1) return { name: "status", args: "" };
   if (first === "land" && words.length === 1) return { name: "land", args: "" };
   if (first === "deploy" && words.length === 1) return { name: "deploy", args: "" };
@@ -401,6 +410,7 @@ export class SlackAdapter implements SurfaceAdapter {
             "`/condotto status` (operator dashboard — architects), " +
             "`/condotto stop` (list this channel's sessions).\n" +
             "Inside a session thread (mention me): `@Condotto stop`, `@Condotto cancel` (stop the running turn), " +
+            "`@Condotto clear` (forget the conversation, keep the worktree), " +
             "`@Condotto status`, `@Condotto land`/`deploy` (gated), `@Condotto budget <usd>`.\n" +
             "Tune the implementer: `@Condotto model <opus|sonnet|fable>`, `@Condotto effort <low…max>`, " +
             "`@Condotto subagents on|off`, `@Condotto workflows on|off`, `@Condotto ultra on|off`.\n" +

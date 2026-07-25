@@ -68,6 +68,25 @@ describe("store sessions", () => {
     expect(store.getSession("s1")?.harness_session_handle).toEqual(handle);
   });
 
+  test("clearSessionHandle writes SQL NULL, not the JSON string 'null'", () => {
+    // File-backed: the raw column has to be readable from a second connection,
+    // and that raw read is the whole point — inflate() maps SQL NULL and the TEXT
+    // 'null' to the same `null`, so the public API cannot tell them apart.
+    const dir = mkdtempSync(join(tmpdir(), "condotto-clear-"));
+    const path = join(dir, "condotto.sqlite");
+    const store = new Store(path);
+    store.createSession({ ...baseSession, id: "s1", conversation_id: "1.2" });
+    store.updateSessionHandle("s1", { v: 1, sessionId: "abc-123" });
+
+    store.clearSessionHandle("s1");
+
+    expect(store.getSession("s1")!.harness_session_handle).toBeNull();
+    const raw = new Database(path, { readonly: true })
+      .query<{ t: string }, []>(`SELECT typeof(harness_session_handle) AS t FROM sessions WHERE id = 's1'`)
+      .get()!;
+    expect(raw.t).toBe("null"); // the SQLite type, not the four characters n-u-l-l
+  });
+
   test("status transitions and listing", () => {
     const store = memoryStore();
     store.createSession({ ...baseSession, id: "s1", conversation_id: "1.1" });

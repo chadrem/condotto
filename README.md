@@ -427,7 +427,11 @@ you can assign):
    on, an architect's own turn just proceeds). Members can watch but can't decide.
 4. **Ship it:** `@Condotto land` (and `@Condotto deploy`) run the repo's configured
    command **through the gate** — no-ops until you wire them to something real.
-5. **End it:** `@Condotto stop` keeps the worktree for later; `@Condotto stop clean`
+5. **Start over without losing the work:** `@Condotto clear` forgets the
+   conversation and nothing else. Same worktree, same branch, same uncommitted
+   changes, same settings. Reach for it when a long thread has drifted, or when
+   the agent is stuck on an idea it won't let go of.
+6. **End it:** `@Condotto stop` keeps the worktree for later; `@Condotto stop clean`
    schedules it for teardown.
 
 ---
@@ -457,6 +461,7 @@ sessions themselves, an architect `@Condotto grant`s them architect rights (see
 | `@Condotto status` | anyone | This channel's sessions + their settings. |
 | `@Condotto stop [clean]` | architect | End the session; `clean` also discards the worktree. |
 | `@Condotto cancel` | architect | Interrupt the running turn (e.g. a runaway workflow); the session lives on. |
+| `@Condotto clear` (or `/clear`) | architect | Forget the thread's conversation and start the agent fresh. The worktree, branch, uncommitted work, settings, memory and spend all survive. Pending approvals are discarded, and worktree-write goes back off. Refused while a turn is running — `cancel` first. |
 | `@Condotto land` / `@Condotto deploy` | architect | Run the repo's ship path (gated; daemon-run). |
 | `@Condotto budget <usd>` | architect | Raise this thread's cost ceiling. |
 | `@Condotto model <opus\|sonnet\|fable>` | architect | Set the implementer model (`opus` = Opus 5). |
