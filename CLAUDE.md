@@ -1,55 +1,206 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+Orientation for working in this codebase.
+
+This file and `README.md` are the only documents. This one is for whoever is
+editing the code; `README.md` is the product overview, install and runbook. Keep
+each fact in exactly one of them.
+
+`DESIGN.md`, `PLAN.md` and `DECISIONS.md` were deleted on 2026-07-26. One fact
+lived in four places, so every correction cost four edits and the copies drifted
+apart faster than they helped. Do not recreate them. A new fact goes in the code
+comment nearest the thing it explains, or here if a future session would trip
+without it.
 
 ## What this repo is
 
-Condotto turns Slack threads into tickets that work themselves: each assigned thread gets a persistent Claude Code session running on a real dev machine, with humans (product + architect) and the AI implementer conversing in the thread. It is an installable open-source daemon with a ports-and-adapters core in `src/core/` (types, `bun:sqlite` store, session manager, policy engine, worktrees, framing, `command-runner` for land/deploy) plus Slack (`src/adapters/slack/`) and Claude Code (`src/adapters/claude-code/`) adapters.
+Condotto turns Slack threads into tickets that work themselves. Each assigned
+thread gets a persistent Claude Code session running on a real dev machine, and
+the humans and the AI implementer converse in the thread.
 
-What it does: gating + the defer-based approval loop; per-repo test/land/deploy (land/deploy daemon-run through the gate; `echo` no-ops until an operator wires a real path); cost budgets + a runaway cap; a daemon-wide concurrency semaphore; the production-data gate; and red-teamed injection framing. **Harness controls** (architect-only, in-thread): per-session model + effort (`@Condotto model`/`effort`, default **Opus 5 + xhigh**), subagents + an `ultra` preset, and trust-scoped project config (`trusted: true` repos load their `CLAUDE.md`/skills/`.claude/`). **Workflows:** the multi-agent **Workflow** tool, gated + confined (`@Condotto workflows on|off`, folded into `ultra`). **The shipped default posture IS `ultra`** — xhigh + subagents + workflows all on for a new session (2026-07-25), set daemon-wide in `[defaults]` (`model`/`effort`/`subagents`/`workflows`) and overridable per repo (tri-state: omitted inherits, which differs from `false`); the runaway brake is $50/thread to match. Turning them on by default changed the STARTING posture, not the confinement: a subagent/workflow/escaped call is still read-only under `evaluateConfined`, and the worktree-write opt-in stays off, session-only, and un-configurable. Requires agent-sdk **≥ 0.3.220** — that is the release at parity with Claude Code 2.1.220, which added `claude-opus-5`; an older sidecar has no such model id. Workflows run under **`permissionMode:"bypassPermissions"`** (set only when workflows are on), so the background workflow's sub-agent calls route THROUGH the PreToolUse hook with an `agent_id` and the read-only subagent policy confines them (main-agent defer + the `canUseTool` backstop still hold — hooks outrank permission mode). The workflow **launch** is gated (Approve/Deny with the workflow's name/desc + a fan-out concern), live status streams the background-task lifecycle, and the synthesized reply carries a cost footer. An **informed worktree-write opt-in** (`@Condotto workflows write on|off`, mandatory warning) lets confined subagent/workflow/escaped calls write in the worktree without per-write approval (out-of-worktree/credential/prod-data stay hard-denied). **Known SDK limit:** a background workflow sub-agent's tool calls are sometimes refused by the runtime upstream of our gate, so a workflow's COVERAGE is best-effort — tool-agnostically, re-measured 2026-07-26 (`scripts/spike-workflow-grep.ts`), which retired the older "Read/Glob reliable, Grep unreliable" split; workflow agents have the full confined read set (Read/Glob/Grep), shell is denied to them by `evaluateConfined` rather than by the SDK, and the security boundary always holds. **Role delegation + architect auto-approve:** `@Condotto grant @user architect [everywhere]` / `revoke` delegates authority at runtime (channel-scoped default; a `roles.source` column persists grants across the boot reseed while config stays authoritative), and `@Condotto auto-approve on|off` (on by default) runs a gate-tier call on an architect-*initiated* verified-surface turn without the Approve click. Auto-approve covers everything that would prompt (writes/bash/network/prod-data/workflow launches) EXCEPT the mechanical hard-deny floor (out-of-worktree/credential/daemon-secret/`rm -rf` escapes); member turns still gate; a resume is governed by the ORIGINAL initiator, never the approving decider (no laundering). It lives in the session-manager gate closure — `policy.ts` stays pure. **Architect-invocable skills:** `@Condotto /<name> [args]` runs a harness skill as a turn (same model/budget/gate; a gated call inside one defers and re-drives normally), `@Condotto skills` lists them with their resolved source file. It is the ONLY path to a `disable-model-invocation: true` skill — the flag withholds it from the model, and those are the ones teams mark (`ship`, `ready`, `commit`). Architect-only + `verified` surface, because a skill turn arrives WITHOUT the `user=` header. Mention-first is load-bearing (Slack eats a leading `/`). **The finding that shaped it (spike 2026-07-25, `scripts/spike-skills.ts`):** skill text is PREPROCESSED before the model — `` !`cmd` `` runs shell and `@path` inlines a file, both before `PreToolUse`, so `policy.ts` never sees them. This partially reverses the 2026-07-20 premise. Three controls: `disableSkillShellExecution: true` is pinned in `settings` (closes the body case — it was already a live hole for trusted repos); it does NOT cover `$ARGUMENTS`, so args are REFUSED against a positive charset (`checkSkillArgs`) rather than sanitized; and Condotto enumerates dispatchable skills ITSELF (`enumerateSkills` — allowlist, so the runtime's ~45 growing built-ins stay out), refusing an escaping `@path`, `context: fork`, and any name two sources claim. Inline shell is warned about, not refused. **Durable agent memory:** a repo vouched with `memory = true` gets a Condotto-owned memory directory per **(repo, channel)** outside the worktree, wired to the SDK's auto-memory via `settings.autoMemoryDirectory` — the ONE named exception to worktree confinement, with its own narrower rules (a `.md` file DIRECTLY in the root, `Write`/`Edit` only, gated, floored to Bash, unreachable from subagents/workflows/escaped calls). `policy.ts` stays pure and decides SHAPE only; the session-manager gate re-proves every memory target against the filesystem (`verifyMemoryTarget` — no symlinks, no hard links) before the call runs and before the prior-approval short-circuit. That per-call proof is the boundary; `prepare`'s sweep is hygiene and the Bash floor is best-effort. Memory is framed as *notes, not authority* — it reaches a later session via the system prompt, above `framing.ts`. **Plan mode:** `@Condotto plan on|off` (architect-only both ways, in-thread only — deliberately no config knob and no repo default, like `workflow_write`) turns the thread read-only so the agent proposes a plan an architect approves as a unit. The guarantee is **"only genuine reads run"**, NOT "a gate becomes a deny" — allowlisted bash (incl. the repo `test_cmd`) and a `workflow_write` confined write both return `allow` without passing through `gate`, and the second is only closable in `evaluateConfined`, since `evaluate` dispatches confined calls before the collapse. The runtime exposes **no plan-exit tool headless** (spike 2026-07-25), so the plan arrives as the plan-FILE write carrying it as `content`; `plansDirectory` must be ABSOLUTE and inside the worktree (the default `~/.claude/plans/` is hard-denied; a relative value resolves against `cwd`). **The plan is the one gate architect auto-approve never covers** — the second exemption after the hard-deny floor, and without it the feature is a silent no-op. Plan mode is read live above the prior-approval short-circuit, the approval resume is budget-capped like a workflow launch, `land`/`deploy` and skills are refused while planning, workflows are paused (not cleared), and `clear` leaves it ON (posture, not consent). **Context reset:** `@Condotto clear` (architect-only, `/clear` aliased above the skill catch-all) forgets a thread's conversation without ending the session — the core NULLs the opaque handle and evicts the cached harness so the next attach takes `getOrAttachHarness`'s `create()` branch. No harness feature, no model turn, no migration. Worktree/branch/uncommitted work/settings/roles/memory/**ledger** all survive (clearing must never evade the runaway cap); pending approvals are expired (their `tool_use_id` lived in the abandoned transcript) and `workflow_write` is revoked (consent bound to a context that's gone). Two guards are load-bearing: the mutation runs inside the session FIFO, because `executeTurn` ends with an unconditional handle write-back that would silently undo an out-of-band clear, and it is REFUSED while a turn is active, because nulling the cached harness is what `cancel` uses to reach the running query. Nothing re-injects thread history, so the reply's "re-state what you want, don't refer back" IS the mitigation. **Identity rendering:** the core names a person with `mentionToken(key)` (`@[[slack:U0ABBY]]`) and the adapter's `linkifyMentions` is the ONE site that mints mention markup from message text (the approval/choice footers also emit one, but from the verified click payload, never content) — `check-ports` fails on `<@` outside `adapters/`. A `users:read`-backed `DisplayNameCache` fills `authorDisplayName` so the agent has a name rather than a raw id. `frameMessage` defangs `@[[` in body content; a token from repo content is a deliberately accepted ping vector (DECISIONS 2026-07-20). **Packaging:** a single `condotto.toml` (all config; secrets in-file, env override), `bun build --compile` binaries (the native `claude` runtime rides alongside as a sidecar) with ordered `user_version` schema migrations, real worktree teardown/GC, a daemon-wide operator `/condotto status`, agent-shell env-scrub + background-task cost/cancellation, and a README/runbook + sample launchd/systemd units (`deploy/`).
+It is an installable open-source daemon: a ports-and-adapters core in `src/core/`
+(types, `bun:sqlite` store, session manager, policy engine, worktrees, framing)
+plus a Slack adapter (`src/adapters/slack/`) and a Claude Code adapter
+(`src/adapters/claude-code/`).
 
-`DESIGN.md` is the authoritative design document (architecture, security model, data model, verified SDK/Slack facts) — read it before doing anything. `README.md` owns the product overview, install, and runbook; the two deliberately do not repeat each other, so keep each fact in exactly one of them. This file only orients you.
+## In flight: the 2026-07-26 simplification
 
-## Process rules (from DESIGN.md)
+The security model was built for an untrusted, multi-tenant world. This install
+is a trusted team on a dedicated server, so most of it is friction rather than
+safety. Architects get god mode. Delete this whole section when the phases are
+done.
 
-- **The build is complete.** `DESIGN.md` is the authoritative spec of the system's design (§8 is the current-capabilities summary); `README.md` is the authoritative overview + install/runbook; `DECISIONS.md` is the chronological log of decisions and verified facts. Keep appending to `DECISIONS.md`; update `DESIGN.md` when reality disagrees with it — and don't duplicate content between README and DESIGN (decision 2026-07-20).
-- The Agent SDK facts in DESIGN.md §6/Appendix B were verified at writing time but **re-confirm any exact field name against the live docs** (URLs in Appendix B) before building on it. The core gate handshake — `defer` and its resume — re-drives the deferred call through `PreToolUse` with the same `tool_use_id`. See DESIGN.md §6 and DECISIONS.md.
-- **Build-time safety:** point the system only at a throwaway git repo — never a real repo or deploy path while developing Condotto itself — and wire deploy/land commands as no-ops/`echo` first. (The gate is proven, so an *operating* team pointing its install at a real repo/deploy is their call.) Slack development runs in the **real company workspace** (Acme) by explicit architect decision (2026-07-18, DECISIONS.md) — do not flag this as a violation; prefer a dedicated test channel.
+- [x] **Phase 0 — docs.** Delete DESIGN/PLAN/DECISIONS, fold the load-bearing SDK
+      facts in here, make README self-contained.
+- [ ] **Phase 1 — test/land/deploy.** Delete `core/command-runner.ts`, the
+      `test_cmd`/`land_cmd`/`deploy_cmd` config keys, `@Condotto land`/`deploy`,
+      `runShip`, their approval cards and store columns. That path exists only
+      because shell was gated; the agent can just run the tests itself.
+      `safeBashAllowlist` dies with it.
+- [ ] **Phase 2 — collapse `policy.ts`.** Two answers, allow or deny. Deny is the
+      floor and nothing else. Delete the gate tier, `PolicyConcern`, production
+      data detection, the bash allowlist, `workflowWrite`, and
+      `evaluateConfined`'s separate rules (subagents and workflow agents get the
+      same answer the main agent gets). Widen the floor tests while doing it:
+      after this they are the only security tests in the repo.
+- [ ] **Phase 3 — delete the approval loop.** The defer/resume handshake, the
+      approvals table and its store methods, Approve/Deny blocks, the
+      prior-approval short-circuit, `@Condotto auto-approve`, the budget-capped
+      approval resume, the `canUseTool` batching backstop. A turn becomes one
+      query that runs to completion.
+- [ ] **Phase 4 — only architects drive.** A non-architect's message is recorded
+      and framed as context for the next architect turn, but never starts one.
+      `@Condotto grant @user architect` is how you hand someone the keys.
+- [ ] **Phase 5 — trust stops being per-repo ceremony.** Drop the `trusted` flag;
+      every repo loads its own `CLAUDE.md`, skills and `.claude/`. Drop
+      `checkSkillArgs`. Keep `disableAllHooks` and `disableSkillShellExecution`
+      pinned: a repo's checked-in shell runs before any hook, which is the one
+      path that walks straight past the floor.
+- [ ] **Phase 6 — tests, smokes, and this file.** Delete the gate, approval,
+      prod-data, allowlist and confined-tier tests. Drop `smoke:gate` and
+      `smoke:approve`. Clean up the ~48 stale `DESIGN.md`/`DECISIONS.md`
+      references in code comments. Trim the section above.
 
-## Toolchain
+**Still in the tree until those phases land:** the defer-based approval loop,
+Approve/Deny cards, auto-approve, the production-data gate, the safe bash
+allowlist, per-repo `trusted`, and daemon-run test/land/deploy. Expect to meet
+them in the code; they are on the way out, not load-bearing.
 
-Runtime is **Bun 1.2+** — TypeScript run directly, no build step, no transpile.
+## What survives, and why
 
-- Run: `bun run <file>` — daemon and scripts run directly from source
-- Test: `bun test` (built-in runner); single file: `bun test <path>`
-- Deps: `bun add @anthropic-ai/claude-agent-sdk`, `bun add '@slack/bolt@^4'`. SQLite is built in via `bun:sqlite` — no package. **Bolt is pinned to v4 and must stay there** — Bolt 5 pulls `@slack/socket-mode@^3`, which Bun cannot run (see DECISIONS.md 2026-07-20). On an existing clone always `bun install --frozen-lockfile`, never a bare `bun add @slack/bolt`.
-- Auth: **two modes**, chosen by `[auth].mode` (`core/config.ts` `loadAuthConfig`). `api_key` — an Anthropic API key from Claude Console, resolved `[auth].api_key` → env `ANTHROPIC_API_KEY`; this is the **default** and the required posture for any multi-person install (Anthropic documents API-key auth for Agent SDK developers, and Pro/Max limits assume ordinary *individual* use). `subscription` — keychain OAuth, or `claude setup-token` → `CLAUDE_CODE_OAUTH_TOKEN` headless (verified 2026-07-16); supported, not deprecated, and scoped to a **single operator driving their own sessions**. **Do not reintroduce the old "no `ANTHROPIC_API_KEY` in this deployment" rule** — it was true of the original single-operator deployment and was deliberately reversed on 2026-07-20 (DECISIONS.md; DESIGN.md §6 + Appendix B6). Under BOTH modes the credential rides the SDK subprocess env and is therefore readable from the agent's shell; the `policy.ts` hard-deny on commands naming either variable, plus `command-runner`'s scrub, are what guard it — both pinned by regression tests, neither to be weakened.
-- Distribution target: `bun build --compile` → single binary
+These are the whole security model after the simplification. Nothing here ever
+asks a human anything, which is the point.
 
-The Agent SDK is developed against Node; Bun compatibility is verified (Bun 1.3.14 via Homebrew, 2026-07-16): spawn, streaming, hooks, `defer`, and resume all work. If a future SDK update trips on Bun, record the exact failure in `DECISIONS.md` and pick a hedge from §6 (isolate the SDK in a Node child process behind the harness port, or run the daemon on Node temporarily).
+- **Worktree containment.** Every path-bearing tool call resolves inside the
+  session's worktree. The boundary is the worktree ROOT, which may sit above the
+  cwd in a monorepo session, and containment is computed only from the root.
+- **The hard-deny floor.** Credential env names (`ANTHROPIC_API_KEY`,
+  `CLAUDE_CODE_OAUTH_TOKEN`, the daemon's own secrets), `rm -rf` escapes, and
+  linking an out-of-tree path into the worktree. No one overrides it.
+- **Injection framing** (`core/framing.ts`). Thread text reaches the model inside
+  an unforgeable random-nonce fence with protocol-sentinel defanging. Authority
+  attaches only to the verified `user=` id in the header, never to display names
+  or message content. This is the control that a trusted team does not replace:
+  the attacker here is a string in a dependency README, not a person in Slack.
+- **Cost cap and runaway brake.** Not security, money. A wedged thread can spend
+  real cash overnight.
+- **The audit log.** Free at runtime, and the only record of what the agent did.
+- **Agent memory.** Per (repo, channel), outside the worktree, the one named
+  exception to containment. `verifyMemoryTarget` re-proves every target against
+  the filesystem (no symlinks, no hard links) before the call runs. That per-call
+  proof is the boundary; the sweep in `prepare` is hygiene.
+- **Plan mode.** Read-only "investigate and propose first". Keeps the posture,
+  loses the Approve/Deny card.
 
 ## Architecture (the shape to preserve)
 
-One long-lived Bun daemon, ports-and-adapters. The core (session manager, policy engine, SQLite store, worktree manager) speaks only domain types and has exactly two seams:
+One long-lived Bun daemon. The core speaks only domain types and has exactly two
+seams:
 
-- **Surface port** — how humans reach Condotto (Slack v1; Teams/email/SMS/web later). Adapters own their transport and prefer outbound connections (Slack: Bolt over Socket Mode — no public URL, hard requirement). Capabilities are flags (`threads`, `buttons`, `editMessages`, `identityStrength`), not a lowest common denominator.
-- **Harness port** — how Condotto drives a coding agent (Claude Code via Agent SDK v1; others later). The non-negotiable capability is **mechanical gating**: pausing a tool call un-executed until the policy engine or a human approves. A harness that can't gate runs only under OS-level confinement or not at all. Never simulate gating by watching output.
+- **Surface port** — how humans reach Condotto (Slack v1; Teams/email/web later).
+  Adapters own their transport and prefer outbound connections. Slack uses Bolt
+  over Socket Mode, and that is a hard requirement: no public URL. Capabilities
+  are flags (`threads`, `buttons`, `editMessages`, `identityStrength`), not a
+  lowest common denominator.
+- **Harness port** — how Condotto drives a coding agent (Claude Code via the
+  Agent SDK v1; others later). The non-negotiable capability is mechanically
+  stopping a tool call before it runs. Never simulate that by watching output.
 
-**Port erosion is a review-blocking bug even with one adapter per seam:** no `@slack/bolt` or `@anthropic-ai/claude-agent-sdk` import outside `adapters/`; no `thread_ts` in the session manager; no SDK type in the policy engine. Domain types (`Principal`, `ConversationRef`, `ToolCall`) live in the core. Enforce with a lint rule once code exists.
-
-## Security model (the heart of the product)
-
-The daemon is by construction an RCE portal — text from Slack drives an agent with a shell. Non-negotiables from §4 and Appendix A:
-
-- Authority attaches **only** to a surface-verified `Principal` (e.g. `slack:U0123ABC` from a genuine platform event) — never to display names, bot usernames, or message *content*. Approval clicks are verified server-side against the roles table.
-- Tool calls are mechanically gated: auto-allow read-only, gate writes/bash-outside-allowlist/push/deploy behind architect approval, hard-deny a denylist no one can override.
-- Thread content rendered into agent context must be unforgeable-by-content (framing rules in Appendix A1 — this exact injection was found in the prototype).
-- Production-data reads are gated like builds; results in-thread are aggregates only.
-- Audit every tool call, approval, and decision.
+**Port erosion is a review-blocking bug even with one adapter per seam:** no
+`@slack/bolt` or `@anthropic-ai/claude-agent-sdk` import outside `adapters/`, no
+`thread_ts` in the core, no SDK type in `policy.ts`. Domain types (`Principal`,
+`ConversationRef`, `ToolCall`) live in the core. `bun run check:ports` enforces
+part of this; the rest is on you.
 
 ## Key invariants (enforce in code, not just schema)
 
-- `(surface_id, conversation_id)` → exactly one session, forever: one conversation → one worktree → one harness session handle.
-- `worktree_path` is stable and absolute — the SDK keys session storage by encoded cwd; moving a live session's worktree loses the session.
-- `harness_session_handle` is opaque JSON owned by the harness adapter; the core persists it but never inspects it.
-- Slack `ts` values are strings, never floats (leading zeros in the fractional part are significant).
+- `(surface_id, conversation_id)` maps to exactly one session, forever. One
+  conversation, one worktree, one harness session handle.
+- `worktree_path` is stable and absolute. The SDK keys session storage by encoded
+  cwd, so moving a live session's worktree loses the session.
+- `harness_session_handle` is opaque JSON owned by the harness adapter. The core
+  persists it and never inspects it.
+- Slack `ts` values are strings, never floats. Leading zeros in the fractional
+  part are significant.
+
+## Toolchain
+
+Runtime is **Bun 1.2+**. TypeScript runs directly, no build step.
+
+- Run: `bun run <file>`. Test: `bun test`, or `bun test <path>` for one file.
+- Deps: `@anthropic-ai/claude-agent-sdk` and `@slack/bolt`. SQLite is built in
+  via `bun:sqlite`. **Bolt is pinned to v4 and must stay there**: Bolt 5 pulls
+  `@slack/socket-mode@^3`, which Bun cannot run. On an existing clone always
+  `bun install --frozen-lockfile`, never a bare `bun add @slack/bolt`.
+- Requires agent-sdk **>= 0.3.220**, the release at parity with Claude Code
+  2.1.220, which is what added `claude-opus-5`. An older sidecar has no such
+  model id.
+- Auth: two modes, chosen by `[auth].mode` (`core/config.ts`, `loadAuthConfig`).
+  `api_key` resolves `[auth].api_key` then env `ANTHROPIC_API_KEY`; this is the
+  default and the right posture for a team install. `subscription` uses keychain
+  OAuth, or `claude setup-token` into `CLAUDE_CODE_OAUTH_TOKEN` when headless;
+  supported, not deprecated, and scoped to a single operator driving their own
+  sessions. Under both modes the credential rides the SDK subprocess env and is
+  readable from the agent's shell, so the floor's hard-deny on commands naming
+  either variable is what guards it. Pinned by a regression test. Do not weaken.
+- Distribution: `bun build --compile` to a single binary, with the native
+  `claude` runtime riding alongside as a sidecar.
+
+Bun compatibility with the SDK is verified (Bun 1.3.14): spawn, streaming, hooks
+and resume all work. If a future SDK update trips on Bun, the hedges are to
+isolate the SDK in a Node child process behind the harness port, or run the
+daemon on Node.
+
+## SDK gotchas
+
+Facts that cost real money to learn and will silently re-break if forgotten.
+Re-confirm exact field names against the live docs before building on them; two
+of the last three we relied on contradicted the SDK's own documentation.
+
+- **`tools` and `allowedTools` are orthogonal.** `tools` says which built-ins
+  exist for the session; `allowedTools` says which of them skip the permission
+  callback. Naming a tool in `allowedTools` also supplies it, which is how
+  emptying that list once silently took `Grep` and `Glob` away from the shipped
+  posture. The adapter passes an explicit `tools` allowlist, so the reachable
+  tool surface is that list. Removing a name from `BASE_DISALLOWED` no longer
+  supplies it; it must also be added to `BASE_TOOLS`.
+- **`tools: {type:'preset',preset:'claude_code'}` is a no-op**, byte-identical to
+  omitting the option. Only an explicit list works.
+- A `tools` entry the runtime does not expose is ignored, not an error.
+  `TodoWrite` is absent in every configuration measured. `Agent` is exposed only
+  under its legacy name `Task`.
+- **Without `systemPrompt: {type:'preset', preset:'claude_code'}`** the model gets
+  no environment context and invents paths. Use the preset plus an append.
+- **`settings.plansDirectory` must be absolute.** A relative value resolves
+  against cwd, which in a monorepo session is the sub-project. The default
+  `~/.claude/plans/` is outside the worktree and hard-denied, so plan mode
+  cannot present a plan at all without this.
+- **Skill text is preprocessed before the model sees it.** `` !`cmd` `` runs
+  shell and `@path` inlines a file, both before any hook, so `policy.ts` never
+  sees them. `disableSkillShellExecution: true` closes the shell half.
+- **`disableAllHooks` governs filesystem hooks only.** The SDK-passed
+  programmatic `PreToolUse` hook still fires, which is what makes it safe to pin.
+- **Session storage is keyed by encoded cwd**:
+  `~/.claude/projects/<cwd with every non-alphanumeric replaced by ->/<id>.jsonl`.
+  Resuming requires the same cwd. Relocate with `CLAUDE_CONFIG_DIR`.
+- **A workflow turn yields multiple `result` messages**: an immediate "launched,
+  waiting" one, then the real synthesized one when the background task finishes.
+  Buffer and deliver the last.
+- **Background workflow sub-agents get refused at random**, upstream of our hook,
+  with the CLI's "The user doesn't want to take this action right now". It is
+  tool-agnostic and arrives in bursts, so a workflow's coverage is best-effort.
+  Measured 2026-07-26, `scripts/spike-workflow-grep.ts`.
+- **xhigh effort** needs Fable 5, Opus 4.7+ or Sonnet 5; elsewhere the SDK falls
+  back to `high` silently. Opus 5 refuses a request that disables thinking at
+  xhigh or max, so do not set a thinking option.
+
+## Process rules
+
+- **Do not add documents.** See the top of this file.
+- **Spike before building on SDK behaviour.** Probes go in the scratchpad, or
+  `scripts/spike-<name>.ts` if worth keeping, and run against a throwaway fixture
+  directory. Never a real repo, never a real deploy path.
+- **Build-time safety:** point the system only at a throwaway git repo while
+  developing Condotto itself. Slack development runs in the real company
+  workspace by explicit architect decision; prefer a dedicated test channel.
+- **Commit directly to main.** No branches.

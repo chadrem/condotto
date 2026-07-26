@@ -97,8 +97,7 @@ platforms and coding agents can be added later without touching the core.
 
 - **A development computer**, macOS or Linux. An always-on box (or a Mac that
   doesn't sleep) is best — a laptop that sleeps kills an *actively-streaming*
-  turn (parked sessions survive on disk and resume). See DESIGN.md §3
-  "Deployment shapes".
+  turn (parked sessions survive on disk and resume).
 - **Git**, plus whatever toolchain your repos need (Node, Bun, test runners…).
 - **An Anthropic API key** from [Claude Console](https://platform.claude.com/) —
   the documented default, and what you want whenever more than one person will
@@ -265,8 +264,9 @@ workspace you'll use it in. Then:
 7. **Invite the bot to your channel**: `/invite @Condotto`. Without this, reads
    fail with `not_in_channel`.
 
-Design notes on the Slack adapter — why Socket Mode is a hard requirement and
-how each scope maps to an adapter capability — live in **DESIGN.md Appendix C**.
+Socket Mode is a hard requirement, not a preference: Condotto connects outbound
+to Slack, so it needs no public URL, no inbound port and no tunnel. That is what
+lets it run on a box behind a firewall.
 
 > **Finding a user's Slack ID** (for `architects` in the config): open their
 > profile → **⋯** → **Copy member ID**. It looks like `U0123ABC`; Condotto writes
@@ -627,7 +627,7 @@ against. Condotto invests heavily in defense against *mistakes*, *prompt injecti
 from thread content*, and *accidental blast radius* — but it deliberately does
 **not** try to isolate against a hostile insider, and it is **not** multi-tenant
 SaaS. Scope the daemon's credentials to itself (its own least-privilege deploy key
-and cloud role — never a human's personal keychain). See DESIGN.md §1 and §4.
+and cloud role — never a human's personal keychain).
 
 ---
 
@@ -832,13 +832,9 @@ loudly, since that runs an agent against a real repo.
 
 ## Further reading
 
-- **[DESIGN.md](DESIGN.md)** — the authoritative engineering design:
-  architecture and the two ports, the security model, the data model, and the
-  verified SDK and Slack facts. This README is the overview; DESIGN.md is the
-  design underneath it and does not repeat it.
-- **[DECISIONS.md](DECISIONS.md)** — the chronological decision & verified-facts
-  log.
-- **[CLAUDE.md](CLAUDE.md)** — orientation for working in this codebase.
+- **[CLAUDE.md](CLAUDE.md)** — orientation for working in this codebase: the two
+  ports, what the security model actually consists of, the invariants, and the
+  Agent SDK gotchas worth knowing before you touch the harness adapter.
 
 ## License
 

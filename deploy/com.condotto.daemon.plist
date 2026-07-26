@@ -16,7 +16,7 @@
 
   Heads-up: a laptop that sleeps kills an actively-streaming turn (parked
   sessions survive on disk and resume). An always-on Mac — or a Linux box with
-  the systemd unit — avoids that. See DESIGN.md §3 "Deployment shapes".
+  the systemd unit — avoids that.
 
   INSTALL
     1. Put the release bundle somewhere stable and fill in condotto.toml beside it
