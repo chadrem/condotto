@@ -37,6 +37,7 @@ is your machine, your repo, your team.
 - [What holds the agent in](#what-holds-the-agent-in)
 - [Skills](#skills)
 - [Memory](#memory)
+- [Remote control](#remote-control)
 - [Operations](#operations)
 - [Development](#development)
 - [License](#license)
@@ -144,6 +145,10 @@ mode with several people driving sessions the daemon warns at boot and keeps goi
 Your install, your call.
 
 The daemon logs which credential type it found, never the value.
+
+One feature depends on which mode you pick: [remote control](#remote-control) needs a
+full `claude auth login` on the daemon host. API keys and `claude setup-token`
+credentials are both refused for it — by Anthropic's service, not by Condotto.
 
 ---
 
@@ -318,6 +323,7 @@ In a channel the bot has been invited to:
 | `@Condotto cancel` | architect | — | Interrupt the running turn. The session lives on. |
 | `@Condotto clear` | architect | — | Forget the conversation. Worktree, branch, uncommitted work, settings, memory and spend all survive. |
 | `@Condotto plan on\|off` | architect | **off** | Read-only mode. The agent investigates and posts a plan, and changes nothing until you turn it off. |
+| `@Condotto remote-control on\|off` | architect | **off** | Drive this thread from claude.ai/code or the Claude mobile app. See [Remote control](#remote-control). |
 | `@Condotto budget <usd\|off>` | architect | **none** | Set this thread's cost ceiling. `off` removes it. From `cost_cap_usd`. |
 | `@Condotto model <opus\|sonnet\|fable>` | architect | **`opus`** | Set the model. From `[defaults].model`. |
 | `@Condotto effort <low\|medium\|high\|xhigh\|max>` | architect | **`xhigh`** | Set reasoning effort. From `[defaults].effort`. Prefer setting it early; changing it mid-thread drops the prompt cache. |
@@ -489,6 +495,50 @@ there is a supported reset.
 
 ---
 
+## Remote control
+
+You're away from your desk. A thread is mid-task. Open the Claude app on your phone
+and keep going.
+
+```
+@Condotto remote-control on
+```
+
+Condotto publishes that thread's session to claude.ai and posts you a link. Open it
+in the mobile app or at claude.ai/code and you get the same session — same worktree,
+same branch, same conversation. Type there and the work runs on your dev machine.
+Everything you type, and everything the agent replies, also lands in the Slack thread,
+so the thread stays the whole record.
+
+`@Condotto remote-control off` ends it. So does `stop`, `clear`, and a session whose
+worktree gets collected.
+
+**Three things to know before you turn it on.**
+
+It needs a subscription login on the daemon host. Run `claude auth status` there — you
+want `authMethod: claude.ai`. An API key won't do: there's no claude.ai session behind
+one, and the service refuses it. A `claude setup-token` credential is refused too, for
+the same reason it can only make model requests.
+
+It widens who can reach the thread. Once on, anyone who can sign into that claude.ai
+account can drive it, and Slack roles don't govern that. Condotto says so in the thread
+when you enable it.
+
+Messages from the app act as `remote:operator`, not as you. That's deliberate — the
+audit log should never name a Slack user for something they didn't type. Grant it once:
+
+```toml
+architects = ["slack:U0123ABC", "remote:operator"]
+```
+
+Until you do, a message from the app is held for the next architect turn rather than
+run, which is the same thing that happens to anyone else without the role.
+
+Files are the one gap: send them in the thread, not from the app. Plan mode and remote
+control are mutually exclusive — turn plan mode off first.
+
+---
+
 ## Operations
 
 ### Running as a service
@@ -625,8 +675,14 @@ bun run smoke:workflows # multi-agent workflows fan out, and the boundary holds
 bun run smoke:plan      # plan mode: reads run, writes do not, the plan reaches the thread
 bun run smoke:monorepo  # sub-project cwd, cross-package edits, the boundary
 bun run smoke:attachments # the agent opens a file it was handed and sends one back
+bun run smoke:remote    # remote control: publish to claude.ai and close it again
 bun run smoke:reset     # delete the scratch dir; the next run rebuilds it
 ```
+
+`smoke:remote` is the odd one out: it costs no model tokens, and it exists because the
+bridge API it depends on is `@alpha` and can break without a major version bump. Run it
+after upgrading the SDK. Add `CONDOTTO_SMOKE_INTERACTIVE=1` to also test the inbound
+path, which needs you to type into the Claude app.
 
 To point one at a repo of your own, set `CONDOTTO_SMOKE_REPO=<name>`. It says so
 loudly, because that runs an agent against a real repo.

@@ -228,6 +228,49 @@ describe("env-scrub the agent shell (rider a)", () => {
   });
 });
 
+describe("claude-code adapter: the runtime never publishes a session by itself", () => {
+  /**
+   * The repo's own project config is untrusted input and can ask the runtime to
+   * mirror the session to claude.ai (`remoteControlAtStartup`, `autoUploadSessions`).
+   * These pins are the only thing stopping it, so they are asserted on the real query
+   * options rather than trusted to a default.
+   */
+  async function optionsFor(harness?: any): Promise<any> {
+    let captured: any;
+    const q = fakeQuery(async function* (opts) {
+      captured = opts;
+      yield { type: "result", subtype: "success", result: "ok", total_cost_usd: 0 };
+    });
+    await collect(new ClaudeCodeAdapter(q), allowGate, harness);
+    return captured;
+  }
+
+  test("remote control and session mirroring are pinned off in the settings tier", async () => {
+    const opts = await optionsFor();
+    expect(opts.settings.disableRemoteControl).toBe(true);
+    expect(opts.settings.autoUploadSessions).toBe(false);
+    expect(opts.settings.isolatePeerMachines).toBe(true);
+  });
+
+  test("commits carry no claude.ai session link", async () => {
+    const opts = await optionsFor();
+    expect(opts.settings.attribution.sessionUrl).toBe(false);
+  });
+
+  test("the pins hold under every posture, not just the default one", async () => {
+    for (const harness of [
+      undefined,
+      { subagents: true, workflows: true },
+      { memoryDir: "/tmp/mem" },
+      { planMode: true, plansDir: "/wt/session-abc/.condotto/plans" },
+    ]) {
+      const opts = await optionsFor(harness);
+      expect(opts.settings.disableRemoteControl).toBe(true);
+      expect(opts.settings.autoUploadSessions).toBe(false);
+    }
+  });
+});
+
 describe("claude-code adapter: background cost/cancel (rider b)", () => {
   /** A fake query whose interrupt() runs `onInterrupt` (e.g. to increment a counter). */
   function fakeQueryI(

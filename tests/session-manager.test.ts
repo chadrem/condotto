@@ -2394,3 +2394,159 @@ describe("attachments", () => {
     expect(w.surface.postedFiles).toEqual([]);
   });
 });
+
+describe("remote control — driving a thread from the Claude apps", () => {
+  const assign = (w: World, id: string) =>
+    w.manager.handleEvent({ kind: "command", conv: conv(id), author: architect, name: "assign", args: "testrepo" });
+  const rc = (w: World, id: string, args: string, author: Principal = architect) =>
+    w.manager.handleEvent({ kind: "command", conv: conv(id), author, name: "remote_control", args });
+  const say = (w: World, id: string, text: string, author: Principal = architect) =>
+    w.manager.handleEvent({ kind: "message", conv: conv(id), author, text, attachments: [] });
+  const sid = (w: World, id: string) => w.store.getSessionByConversation("fake", id)!.id;
+  const lastPost = (w: World) => w.surface.posts.at(-1)!.text;
+
+  test("`remote-control on` publishes, persists an opaque handle, and posts the link", async () => {
+    const w = makeWorld();
+    await assign(w, "rc1.000001");
+    await rc(w, "rc1.000001", "on");
+
+    expect(w.harness.remoteCalls.at(-1)).toMatchObject({ enabled: true });
+    const row = w.store.getSession(sid(w, "rc1.000001"))!;
+    // Opaque to the core: it stores the string and never interprets it.
+    expect(row.remote_control).toContain("cse_fake");
+    expect(lastPost(w)).toContain("claude.ai/code");
+    // The widened-authority warning is in the THREAD, not only the docs.
+    expect(lastPost(w)).toMatch(/claude\.ai account/);
+  });
+
+  test("the session name is repo and branch — no channel name leaves the machine", async () => {
+    const w = makeWorld();
+    await assign(w, "rc2.000001");
+    await rc(w, "rc2.000001", "on");
+    const row = w.store.getSession(sid(w, "rc2.000001"))!;
+    const call = w.harness.remoteCalls.at(-1)!;
+    expect(call.name).toBe(`${row.repo_id} — ${row.branch}`);
+    expect(call.name).not.toContain(conv("rc2.000001").channelId);
+  });
+
+  test("a member cannot publish a thread, and the refusal is audited", async () => {
+    const w = makeWorld();
+    await assign(w, "rc3.000001");
+    await rc(w, "rc3.000001", "on", member);
+    expect(w.store.getSession(sid(w, "rc3.000001"))!.remote_control).toBeNull();
+    expect(w.harness.remoteCalls).toEqual([]);
+    const audit = w.store.listAudit(sid(w, "rc3.000001")).map((a) => a.event);
+    expect(audit).toContain("authz_denied");
+  });
+
+  test("publishing is refused while plan mode is on", async () => {
+    const w = makeWorld();
+    await assign(w, "rc4.000001");
+    await w.manager.handleEvent({ kind: "command", conv: conv("rc4.000001"), author: architect, name: "plan", args: "on" });
+    await rc(w, "rc4.000001", "on");
+    // A read-only thread must not be published: a remote client can ask to change
+    // permission mode, and a thread whose runtime and row disagree is one whose
+    // settings banner lies.
+    expect(w.store.getSession(sid(w, "rc4.000001"))!.remote_control).toBeNull();
+    expect(lastPost(w)).toMatch(/plan mode off first/i);
+  });
+
+  test("a failed enable leaves the flag OFF, never half-on", async () => {
+    const w = makeWorld();
+    await assign(w, "rc5.000001");
+    w.harness.remoteRefusal = "this daemon is authenticated with an API key";
+    await rc(w, "rc5.000001", "on");
+    expect(w.store.getSession(sid(w, "rc5.000001"))!.remote_control).toBeNull();
+    expect(lastPost(w)).toContain("API key");
+    const audit = w.store.listAudit(sid(w, "rc5.000001")).map((a) => a.event);
+    expect(audit).toContain("remote_control_refused");
+  });
+
+  test("a message from the app runs as the remote principal, framed and audited", async () => {
+    const w = makeWorld();
+    await assign(w, "rc6.000001");
+    // The remote operator has to be granted before it can drive — see REMOTE_PRINCIPAL.
+    w.store.setRole("remote:operator", "architect", "*", "config", "test");
+    await rc(w, "rc6.000001", "on");
+
+    expect(w.harness.remoteSink).not.toBeNull();
+    w.harness.remoteSink!.onRemoteInput("add a test for the retry path");
+    await new Promise((r) => setTimeout(r, 20));
+
+    // It became an ordinary turn, and the text reached the harness FRAMED.
+    const framed = w.harness.allTurns.at(-1)!.text;
+    expect(framed).toContain("add a test for the retry path");
+    expect(framed).toContain("user=remote:operator");
+    // The prompt is echoed into the thread so it stays a complete record.
+    expect(w.surface.posts.some((p) => /from the Claude app/.test(p.text))).toBe(true);
+    // The audit names the wire, not just the actor.
+    const rows = w.store.listAudit(sid(w, "rc6.000001")).filter((a) => a.event === "message_in");
+    expect(rows.length).toBe(1);
+    expect(rows[0]!.actor).toBe("remote:operator");
+    expect(JSON.stringify(rows[0]!.detail)).toContain("remote");
+  });
+
+  test("an UNGRANTED remote message is held, not run", async () => {
+    const w = makeWorld();
+    await assign(w, "rc7.000001");
+    await rc(w, "rc7.000001", "on");
+    const before = w.harness.allTurns.length;
+
+    w.harness.remoteSink!.onRemoteInput("ship it");
+    await new Promise((r) => setTimeout(r, 20));
+
+    // Authority is never inherited from the architect who enabled it.
+    expect(w.harness.allTurns.length).toBe(before);
+    const audit = w.store.listAudit(sid(w, "rc7.000001")).map((a) => a.event);
+    expect(audit).toContain("message_held");
+  });
+
+  test("`stop` closes the bridge BEFORE dropping the harness", async () => {
+    const w = makeWorld();
+    await assign(w, "rc8.000001");
+    await rc(w, "rc8.000001", "on");
+    await w.manager.handleEvent({ kind: "command", conv: conv("rc8.000001"), author: architect, name: "stop", args: "" });
+
+    // A thread told it had stopped must not stay drivable from a phone.
+    expect(w.harness.remoteCalls.at(-1)).toMatchObject({ enabled: false });
+    expect(w.harness.remoteSink).toBeNull();
+  });
+
+  test("`clear` unpublishes too — the remote transcript is the history being forgotten", async () => {
+    const w = makeWorld();
+    await assign(w, "rc9.000001");
+    await rc(w, "rc9.000001", "on");
+    await say(w, "rc9.000001", "do a thing");
+    await w.manager.handleEvent({ kind: "command", conv: conv("rc9.000001"), author: architect, name: "clear", args: "" });
+    expect(w.store.getSession(sid(w, "rc9.000001"))!.remote_control).toBeNull();
+    expect(w.harness.remoteCalls.at(-1)).toMatchObject({ enabled: false });
+  });
+
+  test("a closed bridge clears the flag and says so in the thread", async () => {
+    const w = makeWorld();
+    await assign(w, "rc10.000001");
+    await rc(w, "rc10.000001", "on");
+    w.harness.remoteSink!.onClosed("another machine took over this remote session");
+    await new Promise((r) => setTimeout(r, 20));
+    expect(w.store.getSession(sid(w, "rc10.000001"))!.remote_control).toBeNull();
+    expect(lastPost(w)).toMatch(/another machine took over/);
+  });
+
+  test("the settings summary always reports it — it changes WHO can reach the session", async () => {
+    const w = makeWorld();
+    await assign(w, "rc11.000001");
+    await rc(w, "rc11.000001", "on");
+    await w.manager.handleEvent({ kind: "command", conv: conv("rc11.000001"), author: architect, name: "status", args: "" });
+    expect(w.surface.posts.map((p) => p.text).join("\n")).toMatch(/remote control on/);
+  });
+
+  test("`on` twice re-posts the link rather than minting a second remote session", async () => {
+    const w = makeWorld();
+    await assign(w, "rc12.000001");
+    await rc(w, "rc12.000001", "on");
+    const first = w.store.getSession(sid(w, "rc12.000001"))!.remote_control;
+    await rc(w, "rc12.000001", "on");
+    // The adapter is idempotent; the second call passes the stored handle back in.
+    expect(w.harness.remoteCalls.at(-1)!.handle).toBe(first);
+  });
+});

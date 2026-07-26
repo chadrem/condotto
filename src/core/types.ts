@@ -137,7 +137,12 @@ export type CommandName =
   // only — no config knob and no repo default, because it is a per-TASK mode).
   // While on, only genuine reads run and the agent presents a plan into the
   // thread. `plan off` is how it ends; there is no button.
-  | "plan";
+  | "plan"
+  // publish this thread's session to claude.ai so it can be driven from the Claude
+  // apps ("on"|"off", architect-only, in-thread only). The one command that widens
+  // who can reach a session beyond this surface's roles, which is why it is
+  // per-thread and opt-in rather than a config knob.
+  | "remote_control";
 
 export type InboundEvent =
   | {
@@ -423,7 +428,59 @@ export interface HarnessSession {
    * membership in this list IS the core's authorization signal.
    */
   listSkills(): readonly HarnessSkill[] | null;
+  /**
+   * Publish this session so a human can drive it from somewhere other than the
+   * surface it belongs to (remote control), or stop publishing it.
+   *
+   * Optional: a harness without it simply has no remote control, and
+   * `HarnessCapabilities.remoteControl` is what the core checks before offering the
+   * command. A refusal is a RETURNED VALUE, not a throw, so the core can post the
+   * harness's own reason (wrong auth mode, stale credential, service refusal) instead
+   * of a generic failure notice.
+   *
+   * `handle` on the success arm is opaque and persisted verbatim
+   * (`sessions.remote_control`), the same contract as `SessionHandle`. Enabling twice
+   * is idempotent and returns the existing url.
+   *
+   * A published session OUTLIVES this object. `HarnessSession` instances are
+   * replaced whenever the core rebuilds one (a posture toggle, a thrown turn), and a
+   * bridge torn down by that would hand the architect a new url every time they typed
+   * `subagents off`. So the adapter must key the bridge on something session-stable
+   * (the worktree), not on this instance, and turning it OFF has to be an explicit
+   * call from the core — never a side effect of an instance being dropped.
+   */
+  setRemoteControl?(
+    enabled: boolean,
+    opts: { name: string; handle?: string | null; sink: RemoteControlSink },
+  ): Promise<RemoteControlResult>;
 }
+
+/**
+ * How a published session reports back to the core. Plain callbacks: nothing
+ * transport-shaped crosses the port, so the core never sees a JWT, a remote session
+ * id, or an SSE cursor.
+ */
+export interface RemoteControlSink {
+  /**
+   * A human typed somewhere other than the thread. `text` is the message AS TYPED —
+   * the core frames it (`frameMessage`) and runs it as an ordinary turn, so it is
+   * authority-checked, budgeted, audited and FIFO-serialized identically to one typed
+   * in the thread. Nothing reaches the model unframed.
+   */
+  onRemoteInput(text: string): void;
+  /** The bridge ended (closed, evicted, credential expired). Carries a human reason. */
+  onClosed(reason: string): void;
+}
+
+export type RemoteControlResult =
+  | {
+      ok: true;
+      /** Where a human opens this session. Posted into the thread; never parsed. */
+      url: string;
+      /** Opaque, persisted to `sessions.remote_control`. */
+      handle: string;
+    }
+  | { ok: false; reason: string };
 
 export interface HarnessCapabilities {
   mechanicalGating: boolean;
@@ -454,6 +511,16 @@ export interface HarnessCapabilities {
    * core policy enforces that independently.
    */
   planMode: boolean;
+  /**
+   * The harness can publish a session for driving from elsewhere
+   * (`HarnessSession.setRemoteControl`). False ⇒ `@Condotto remote-control on` is
+   * refused at the command — the `skillInvocation` rule again.
+   *
+   * Says only that the harness has the feature, NOT that the machine is configured
+   * for it. Whether the credential can actually mint a remote session is the
+   * adapter's to answer, and it answers by refusing with a reason.
+   */
+  remoteControl: boolean;
 }
 
 export interface HarnessAdapter {
@@ -474,6 +541,18 @@ export interface HarnessAdapter {
    * the handle. `root` carries the same meaning as in `create`.
    */
   resume(handle: SessionHandle, cwd: string, system: string, root?: string): Promise<HarnessSession>;
+  /**
+   * Release anything the adapter holds that outlives an individual session object —
+   * today, published remote-control bridges. Called once on daemon shutdown.
+   * Idempotent, never throws, and bounded: shutdown must not block on a wedged
+   * network transport.
+   *
+   * This sits on the ADAPTER rather than on `HarnessSession` deliberately. Session
+   * objects are transient (the core rebuilds them on posture changes and thrown
+   * turns) while a bridge belongs to the session's whole life, so a per-object
+   * teardown hook would close it at exactly the wrong moments.
+   */
+  shutdown?(): Promise<void>;
 }
 
 // ---------------------------------------------------------------------------

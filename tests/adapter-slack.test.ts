@@ -358,6 +358,36 @@ describe("parseMentionCommand — plan", () => {
   });
 });
 
+describe("parseMentionCommand — remote-control", () => {
+  test("both spellings parse, case-insensitively", () => {
+    expect(parse("remote-control on")).toEqual({ name: "remote_control", args: "on" });
+    expect(parse("remote-control off")).toEqual({ name: "remote_control", args: "off" });
+    // The short spelling exists because it is what fingers type.
+    expect(parse("remote on")).toEqual({ name: "remote_control", args: "on" });
+    expect(parse("Remote-Control OFF")).toEqual({ name: "remote_control", args: "OFF" });
+  });
+
+  test("the hyphen survives tokenizing, which is why the command is not two words", () => {
+    // `split(/\s+/)` keeps `remote-control` as ONE token. A `remote control on`
+    // spelling would need arity-3 handling for no gain; pinned so nobody re-spells it.
+    expect(parse("remote-control on")).not.toBeNull();
+    expect(parse("remote control on")).toBeNull();
+  });
+
+  test("wrong arity and prose fall through to conversation", () => {
+    expect(parse("remote-control")).toBeNull();
+    expect(parse("remote")).toBeNull();
+    expect(parse("remote-control on off")).toBeNull();
+    // "remote" leads ordinary sentences, so strict arity earns its keep here too.
+    expect(parse("remote work is fine by me")).toBeNull();
+    expect(parse("remote debugging this would help")).toBeNull();
+  });
+
+  test("a mention that does not LEAD the message mints no command", () => {
+    expect(parseMentionCommand(`can <@${BOT}> remote-control on?`, BOT)).toBeNull();
+  });
+});
+
 describe("parseMentionCommand — skills", () => {
   // The mention-first spelling is not cosmetic. Slack intercepts a message that
   // BEGINS with `/` as one of its own commands, and custom slash commands cannot

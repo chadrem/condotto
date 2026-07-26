@@ -29,7 +29,8 @@
     "smoke:monorepo": "bun run scripts/smoke-monorepo.ts",
     "smoke:memory": "bun run scripts/smoke-memory.ts",
     "smoke:attachments": "bun run scripts/smoke-attachments.ts",
-    "smoke:plan": "bun run scripts/smoke-plan-mode.ts"
+    "smoke:plan": "bun run scripts/smoke-plan-mode.ts",
+    "smoke:remote": "bun run scripts/smoke-remote-control.ts"
   },
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "^0.3.220",

@@ -179,6 +179,12 @@ export function parseMentionCommand(
   if (first === "plan" && words.length === 2) return { name: "plan", args: words[1]! };
   // Single whitespace-free token, so `split(/\s+/)` keeps it intact.
   if (first === "workflows" && words.length === 2) return { name: "workflows", args: words[1]! };
+  // Both spellings: the hyphenated one is the documented name, `remote` is what
+  // fingers type. Hyphenated survives `split(/\s+/)` as one token, which is why the
+  // command is not `remote control on` — that would need arity-3 handling for no gain.
+  if ((first === "remote-control" || first === "remote") && words.length === 2) {
+    return { name: "remote_control", args: words[1]! };
+  }
   // Role delegation. args carry the resolved principal key (or "?") + the
   // lowercased remainder: grant -> "<key|?> <role> [everywhere]", revoke -> "<key|?> [everywhere]".
   if (first === "grant" && words.length >= 2 && words.length <= 4) {

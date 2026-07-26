@@ -59,6 +59,28 @@ What follows is the whole model.
   the one write it permits, `policy.ts` flags that decision with `plan: true`, and
   the session manager posts the content into the thread. `@Condotto plan off` is
   how it ends — there is no button.
+- **Nothing publishes itself.** `disableRemoteControl`, `autoUploadSessions`,
+  `isolatePeerMachines` and `attribution.sessionUrl` are pinned in the `settings`
+  tier of EVERY session. Without the pins a repo's own project config — which every
+  session loads — could set `remoteControlAtStartup` or `autoUploadSessions` and
+  mirror a private thread's whole transcript to the operator's claude.ai account with
+  nothing in the thread saying so. The `settings` tier outranks project settings,
+  which is the only reason the pins hold. Pinned by a regression test on the query
+  options.
+- **Remote control.** Off by default, per thread, architect-only, and the one place
+  the boundary is not this machine. `@Condotto remote-control on` publishes the
+  thread's session to claude.ai, which moves the transcript through Anthropic's
+  servers and makes the thread drivable by anyone who can sign into that claude.ai
+  account — an authority path Slack roles do not reach, which is why enabling it says
+  so in the thread. The bridge is OURS (`adapters/claude-code/remote.ts`), not the
+  runtime's: the runtime's own version lives inside the CLI subprocess, so phone text
+  would reach the model without passing `framing.ts`. Ours hands the text to the core,
+  which frames it, attributes it to a distinct `remote:operator` principal that must
+  be granted architect explicitly, and runs it as an ordinary turn — same gate, same
+  budget, same FIFO, same audit, with `origin: "remote"` recorded. Ungranted, a phone
+  message is held like any other non-architect's. Refused under `api_key` auth and
+  while plan mode is on. Pinned by tests that an ungranted remote message never
+  becomes a turn and that `stop` closes the bridge before dropping the harness.
 
 **Outside the boundary by design:** a repo's checked-in hooks, a skill's inline
 `` !`cmd` ``, and skill arguments all expand BEFORE the model and before our hook,

@@ -13,6 +13,8 @@ import type {
   OutboundFile,
   OutboundMessage,
   PostedRef,
+  RemoteControlResult,
+  RemoteControlSink,
   SessionHandle,
   SurfaceAdapter,
   SurfaceCapabilities,
@@ -108,6 +110,19 @@ class FakeHarnessSession implements HarnessSession {
 
   listSkills(): readonly HarnessSkill[] | null {
     return this.parent.skills;
+  }
+
+  async setRemoteControl(
+    enabled: boolean,
+    opts: { name: string; handle?: string | null; sink: RemoteControlSink },
+  ): Promise<RemoteControlResult> {
+    this.parent.remoteCalls.push({ enabled, name: opts.name, handle: opts.handle ?? null });
+    if (enabled) this.parent.remoteSink = opts.sink;
+    else this.parent.remoteSink = null;
+    if (this.parent.remoteRefusal) return { ok: false, reason: this.parent.remoteRefusal };
+    if (!enabled) return { ok: true, url: "", handle: "" };
+    const url = `https://claude.ai/code/cse_fake${++this.parent.remoteSeq}`;
+    return { ok: true, url, handle: JSON.stringify({ v: 1, remoteSessionId: `cse_fake${this.parent.remoteSeq}`, seq: 0, url }) };
   }
 
   async *turn(input: TurnInput, gate: GateFn): AsyncIterable<TurnEvent> {
@@ -226,9 +241,19 @@ export class FakeHarness implements HarnessAdapter {
     supportedEfforts: ["low", "medium", "high", "xhigh", "max"],
     skillInvocation: true,
     planMode: true,
+    remoteControl: true,
   };
 
   sessionSeq = 0;
+  /** Every setRemoteControl call, so a test can assert order and arguments. */
+  remoteCalls: { enabled: boolean; name: string; handle: string | null }[] = [];
+  /** The live sink, so a test can push an inbound message as if from the app. */
+  remoteSink: RemoteControlSink | null = null;
+  /** Set to make publishing refuse with this reason (auth mode, stale credential…). */
+  remoteRefusal: string | null = null;
+  remoteSeq = 0;
+  /** Bridges closed by the adapter-wide shutdown hook. */
+  shutdownCalls = 0;
   created: { cwd: string; system: string; root?: string }[] = [];
   resumed: { handle: SessionHandle; cwd: string; system: string; root?: string }[] = [];
   allTurns: {
@@ -287,6 +312,11 @@ export class FakeHarness implements HarnessAdapter {
     this.resumed.push({ handle, cwd, system, root });
     // Reflect the freshly-supplied prompt, as the real adapter does.
     return new FakeHarnessSession({ ...(handle as FakeHandle), system }, cwd, this);
+  }
+
+  async shutdown(): Promise<void> {
+    this.shutdownCalls++;
+    this.remoteSink = null;
   }
 }
 

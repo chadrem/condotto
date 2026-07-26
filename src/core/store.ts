@@ -52,6 +52,21 @@ export interface SessionRow {
    */
   plan_mode: number;
   /**
+   * Remote control: when non-null, this thread's session is published to
+   * claude.ai and drivable from the Claude apps. NULL is off, and off is the
+   * default — `@Condotto remote-control on` is the only thing that sets it.
+   *
+   * The value is an OPAQUE handle owned by the harness adapter, like
+   * `harness_session_handle` but not even parsed here: the core reads it only as
+   * "non-null means on" and hands the string back on re-attach. Keeping the remote
+   * session id out of the core is what stops a transport identifier becoming a
+   * domain concept.
+   *
+   * In-thread only, never seeded from config or a repo default: publishing a
+   * private thread is a per-thread decision an architect makes explicitly.
+   */
+  remote_control: string | null;
+  /**
    * Worktree GC: when non-null, this session was explicitly stopped with
    * the `clean` variant and its worktree becomes collectible at this ISO
    * timestamp (the stop time + retention interval). NULL is the resting state —
@@ -411,6 +426,20 @@ function migrateV11(db: Database): void {
   db.run(`ALTER TABLE repos DROP COLUMN policy_overrides`);
 }
 
+/**
+ * Migration **v12** (remote control): `sessions.remote_control`, the opaque
+ * harness-owned handle for a thread published to claude.ai.
+ *
+ * Nullable TEXT rather than a NOT NULL flag, because one column has to answer both
+ * "is it on" and "which remote session, at which cursor" — and NULL is then the
+ * honest resting state for the overwhelming majority of rows. Existing sessions
+ * upgrade to off, which is what an operator swapping a binary expects: a session
+ * nobody asked to publish must never come back published.
+ */
+function migrateV12(db: Database): void {
+  db.run(`ALTER TABLE sessions ADD COLUMN remote_control TEXT`);
+}
+
 /** Add `column` to `table` only if absent (idempotent ALTER — SQLite has no
  *  `ADD COLUMN IF NOT EXISTS`). Used by the baseline migration to evolve tables
  *  a pre-runner DB already created. */
@@ -459,7 +488,8 @@ export class Store {
       migrateV9, // v9: drop repos.trusted — every repo loads its own project config.
       migrateV10, // v10: fold the observer role into member.
       migrateV11, // v11: drop the surfaces/channels tables and two unused repo columns.
-      // v12+: append new migrations here. They only ever run on a store already
+      migrateV12, // v12: sessions.remote_control for the per-thread claude.ai bridge.
+      // v13+: append new migrations here. They only ever run on a store already
       // at the prior version, so they can be plain forward DDL — no IF NOT EXISTS
       // gymnastics.
     ];
@@ -667,6 +697,9 @@ export class Store {
       workflows,
       // Never seeded: plan mode is a per-task decision made in the thread.
       plan_mode: 0,
+      // Never seeded either, and for a sharper reason: a new session must not be
+      // published to claude.ai by anything other than an architect asking for it.
+      remote_control: null,
       cleanup_at: null,
       created_at: now,
       last_active_at: now,
@@ -792,6 +825,30 @@ export class Store {
    */
   setSessionPlanMode(id: string, on: boolean): void {
     this.db.query(`UPDATE sessions SET plan_mode = $v WHERE id = $id`).run({ id, v: on ? 1 : 0 });
+  }
+
+  /**
+   * Record that a thread is published to claude.ai, storing the harness's opaque
+   * handle (`@Condotto remote-control on`). Turning it OFF is
+   * `clearSessionRemoteControl`, not this method with an empty value — see the
+   * warning there.
+   */
+  setSessionRemoteControl(id: string, handle: string): void {
+    this.db.query(`UPDATE sessions SET remote_control = $h WHERE id = $id`).run({ id, h: handle });
+  }
+
+  /**
+   * Stop publishing a thread (`@Condotto remote-control off`, a closed bridge, a
+   * stop, or a GC).
+   *
+   * Writes SQL NULL, and has to be its own method for the same reason
+   * `clearSessionHandle` does: a caller reaching for `setSessionRemoteControl(id,
+   * JSON.stringify(null))` would store the four-character TEXT `'null'`, which is
+   * truthy for `remote_control !== null` and would leave the thread believing it is
+   * published forever.
+   */
+  clearSessionRemoteControl(id: string): void {
+    this.db.query(`UPDATE sessions SET remote_control = NULL WHERE id = $id`).run({ id });
   }
 
   /**

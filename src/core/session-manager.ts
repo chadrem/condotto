@@ -7,6 +7,7 @@ import type {
   HarnessTurnOptions,
   InboundEvent,
   Principal,
+  RemoteControlSink,
   Role,
   SurfaceAdapter,
 } from "./types";
@@ -295,6 +296,7 @@ function threadCommandHelp(): string {
     `• \`@Condotto grant @user architect [everywhere]\` · \`@Condotto revoke @user\` — delegate authority (this channel, or everywhere)`,
     `• \`@Condotto budget <usd>\` — cap this thread's spend (\`off\` to remove it) · \`@Condotto cancel\` — stop the running turn (e.g. a runaway workflow)`,
     `• \`@Condotto plan on|off\` — research first: I propose a plan and change nothing until you turn it off`,
+    `• \`@Condotto remote-control on|off\` — drive this thread from claude.ai/code or the Claude mobile app`,
     `• \`@Condotto clear\` — forget the conversation and start fresh (the worktree, your uncommitted work, and these settings all stay)`,
     `• \`@Condotto /<skill> [args]\` — run one of my skills · \`@Condotto skills\` — list what's available`,
     `• \`@Condotto status\` — list sessions · \`@Condotto stop\` — end this session (keeps the worktree; \`stop clean\` discards it)`,
@@ -327,6 +329,24 @@ interface LiveEntry {
 
 /** How many un-driven messages to carry into the next architect turn. */
 const MAX_PENDING_CONTEXT = 20;
+
+/**
+ * Who a remote-control message acts as.
+ *
+ * A distinct principal, deliberately NOT the architect who ran `remote-control on`:
+ * the claude.ai account is a separately verified identity, and attributing its
+ * messages to a Slack principal would make the audit log name a human who did not
+ * type them. Authority is granted to this key explicitly
+ * (`architects = ["remote:operator"]`, or `@Condotto grant`) and is never inherited
+ * from a thread identity — ungranted, a remote message is HELD like any other
+ * non-architect's, which is the right default for a path that reaches the machine from
+ * outside the workspace.
+ *
+ * One constant rather than a per-message identity because there is exactly one
+ * claude.ai login on a host: the operator's. `config.ts`'s principal validation
+ * already accepts the form, so this needs no config change.
+ */
+const REMOTE_PRINCIPAL: Principal = { surface: "remote", externalId: "operator" };
 
 export interface SessionManagerOptions {
   /** Per-thread cost ceiling (USD) when a repo sets none; null = no ceiling. */
@@ -525,6 +545,9 @@ export class SessionManager {
     } else if (session.workflows === 1) {
       parts.push("workflows paused");
     }
+    // Last, and always shown when on: it is the only setting here that changes WHO can
+    // reach the session, so it must never be something a reader has to infer.
+    if (session.remote_control) parts.push("*remote control on*");
     return parts.join(", ");
   }
 
@@ -740,6 +763,9 @@ export class SessionManager {
         break;
       case "plan":
         await this.setPlanMode(event.conv, event.author, event.args);
+        break;
+      case "remote_control":
+        await this.setRemoteControl(event.conv, event.author, event.args);
         break;
       case "skill":
         await this.invokeSkill(event.conv, event.author, event.args);
@@ -1196,6 +1222,10 @@ export class SessionManager {
       // Mark stopped immediately (in-flight turn output may still land), but keep
       // the live entry and its FIFO — deleting mid-turn would let a later
       // reactivation start a second concurrent turn on the same session.
+      // Stop publishing BEFORE dropping the harness: the bridge is reachable through
+      // it, and a dropped reference would leave the thread drivable from a phone after
+      // this surface was told it had stopped.
+      if (session.remote_control) await this.stopPublishing(session, "session_stopped");
       this.store.updateSessionStatus(session.id, "stopped");
       const entry = this.live.get(session.id);
       if (entry) entry.harness = null;
@@ -1326,6 +1356,11 @@ export class SessionManager {
         const s = this.store.getSession(session.id);
         if (!s || s.status === "stopped") return;
         const hadContext = s.harness_session_handle !== null;
+        // Unpublish too. The remote transcript is the conversation being forgotten, so
+        // leaving it up would show a remote reader the very history the architect was
+        // just told I had dropped — and it cannot be cleared from here, only replaced.
+        // `remote-control on` again gets a fresh one.
+        if (s.remote_control) await this.stopPublishing(s, "context_cleared");
         // Durable write first: a crash between the two leaves a cleared session
         // rather than a resurrectable one.
         this.store.clearSessionHandle(s.id);
@@ -1445,6 +1480,10 @@ export class SessionManager {
           if (!s || s.status !== "stopped" || s.cleanup_at === null) return;
           if (new Date(s.cleanup_at).getTime() > now) return; // window pushed out
           const repo = this.store.getRepo(s.repo_id);
+          // A stopped session should already be unpublished, but the worktree is about
+          // to be deleted underneath it — so prove it rather than assume it. This is
+          // the last point at which anything can reach the bridge.
+          if (s.remote_control) await this.stopPublishing(s, "worktree_collected");
           const res = await this.worktrees.remove({
             repoPaths: repo ? [repo.path] : allRepoPaths,
             sessionId: s.id,
@@ -1769,6 +1808,228 @@ export class SessionManager {
     await surface.post(conv, { text: lines.join("\n") });
   }
 
+
+  /**
+   * Publish this thread's session so it can be driven from the Claude apps
+   * (`@Condotto remote-control on|off`).
+   *
+   * The one command that widens who can reach a session beyond this surface's roles:
+   * once on, anyone who can sign into the machine's claude.ai account can drive the
+   * thread. That is why it is per-thread, architect-only, opt-in, and announced in the
+   * thread rather than only in the docs.
+   */
+  private async setRemoteControl(conv: ConversationRef, author: Principal, args: string): Promise<void> {
+    const surface = this.surfaceFor(conv);
+    const session = this.store.getSessionByConversation(conv.surfaceId, conv.conversationId);
+    if (!session || session.status === "stopped") {
+      await surface.post(conv, { text: "No active session in this thread." });
+      return;
+    }
+    if (!this.store.isArchitect(principalKey(author), conv.channelId)) {
+      this.store.audit({
+        sessionId: session.id,
+        actor: principalKey(author),
+        event: "authz_denied",
+        detail: { action: "remote_control" },
+      });
+      await surface.post(conv, { text: "Only architects can turn remote control on." });
+      return;
+    }
+    if (!this.harness.capabilities.remoteControl) {
+      await surface.post(conv, { text: "This harness can't be driven remotely." });
+      return;
+    }
+    const on = this.parseOnOff(args.trim());
+    if (on === null) {
+      await surface.post(conv, {
+        text: `Usage: \`@Condotto remote-control on|off\`. Currently ${session.remote_control ? "*on*" : "off"}.`,
+      });
+      return;
+    }
+    // Refused mid-turn for the same reason `plan` is: publishing or unpublishing under
+    // a running turn would leave the thread describing a session it doesn't have until
+    // the turn ends.
+    if (session.status === "active") {
+      await surface.post(conv, {
+        text: "Something's running right now. `@Condotto cancel` first, then set remote control.",
+      });
+      return;
+    }
+    // Plan mode and remote control are mutually exclusive, and this is a security rule
+    // rather than an ergonomic one: a remote client can ask to change permission mode.
+    // The read-only guarantee itself does not depend on that — `PolicyContext.planMode`
+    // is read live from the row on every tool call — but a thread whose runtime and row
+    // disagree about the posture is a thread whose settings banner is lying.
+    if (on && session.plan_mode === 1) {
+      await surface.post(conv, {
+        text: "Take plan mode off first (`@Condotto plan off`) — I don't publish a session that's meant to be read-only.",
+      });
+      return;
+    }
+
+    // Inside the per-session FIFO, so it cannot race a turn or a stop.
+    const entry = this.entryFor(session.id);
+    entry.chain = entry.chain.then(async () => {
+      const fresh = this.store.getSession(session.id);
+      if (!fresh || fresh.status === "stopped") return;
+
+      if (!on) {
+        if (!fresh.remote_control) {
+          await surface.post(conv, { text: "Remote control is already off." }).catch(() => {});
+          return;
+        }
+        await this.stopPublishing(fresh, "command");
+        await surface.post(conv, { text: "🔒 Remote control off. The claude.ai link is dead." }).catch(() => {});
+        return;
+      }
+
+      const memoryRoot = await this.resolveMemoryRoot(fresh, this.store.getRepo(fresh.repo_id));
+      const harnessSession = await this.getOrAttachHarness(fresh, memoryRoot);
+      if (!harnessSession?.setRemoteControl) {
+        await surface.post(conv, { text: "This harness can't be driven remotely." }).catch(() => {});
+        return;
+      }
+      const result = await harnessSession.setRemoteControl(true, {
+        // Repo and branch, so sessions are distinguishable in the app without sending
+        // the channel name or thread topic off this machine.
+        name: `${fresh.repo_id} — ${fresh.branch}`,
+        handle: fresh.remote_control,
+        sink: this.remoteSinkFor(fresh.id, conv),
+      });
+      if (!result.ok) {
+        // Never leave the flag set on a failed enable.
+        this.store.clearSessionRemoteControl(fresh.id);
+        this.store.audit({
+          sessionId: fresh.id,
+          actor: principalKey(author),
+          event: "remote_control_refused",
+          detail: { reason: result.reason },
+        });
+        await surface.post(conv, { text: `I couldn't turn on remote control. ${result.reason}` }).catch(() => {});
+        return;
+      }
+      this.store.setSessionRemoteControl(fresh.id, result.handle);
+      this.store.audit({
+        sessionId: fresh.id,
+        actor: principalKey(author),
+        event: "remote_control_set",
+        detail: { on: true, via: "command" },
+      });
+      await surface
+        .post(conv, {
+          text: [
+            `📱 *Remote control on.* [Open this session in Claude](${result.url})`,
+            "",
+            "Anything you type there runs here, in this worktree, under the same rules — and shows up in this thread.",
+            `Worth knowing: anyone who can sign into this machine's claude.ai account can now drive this thread, ` +
+              `which Slack roles don't control. \`@Condotto remote-control off\` ends it.`,
+          ].join("\n"),
+        })
+        .catch(() => {});
+    });
+    await entry.chain;
+  }
+
+  /**
+   * Re-establish a publication whose bridge is gone (a daemon restart), keeping the
+   * same link when the service lets us re-attach to the session we already created and
+   * minting a new one when it does not. Called at the top of every turn on a published
+   * thread; a no-op while the bridge is live.
+   *
+   * The thread is told only when the link actually CHANGES. Announcing a successful
+   * silent re-attach would be noise; failing to announce a changed url would leave the
+   * architect holding a dead link and no way to know.
+   */
+  private async republish(session: SessionRow, conv: ConversationRef, harnessSession: HarnessSession): Promise<void> {
+    if (!harnessSession.setRemoteControl) return;
+    const before = session.remote_control;
+    const result = await harnessSession
+      .setRemoteControl(true, {
+        name: `${session.repo_id} — ${session.branch}`,
+        handle: before,
+        sink: this.remoteSinkFor(session.id, conv),
+      })
+      .catch((err) => ({ ok: false as const, reason: String(err) }));
+    if (!result.ok) {
+      this.store.clearSessionRemoteControl(session.id);
+      this.store.audit({
+        sessionId: session.id,
+        actor: "system",
+        event: "remote_control_closed",
+        detail: { reason: `republish_failed: ${result.reason}` },
+      });
+      await this.surfaceFor(conv)
+        .post(conv, { text: `📱 Remote control is off — I couldn't re-publish this session. ${result.reason}` })
+        .catch(() => {});
+      return;
+    }
+    if (result.handle === before) return;
+    this.store.setSessionRemoteControl(session.id, result.handle);
+    const changedUrl = !before || !before.includes(result.url);
+    if (changedUrl) {
+      await this.surfaceFor(conv)
+        .post(conv, {
+          text: `📱 Remote control is back up: [open this session in Claude](${result.url}). Any earlier link is dead.`,
+        })
+        .catch(() => {});
+    }
+  }
+
+  /**
+   * Stop publishing a session: close the bridge FIRST, then clear the row. That order
+   * matters — a cleared row with a live bridge is a thread that is still drivable from
+   * a phone while claiming not to be.
+   */
+  private async stopPublishing(session: SessionRow, reason: string): Promise<void> {
+    const live = this.live.get(session.id);
+    await live?.harness?.setRemoteControl?.(false, { name: "", sink: this.remoteSinkFor(session.id, null) }).catch(() => {});
+    this.store.clearSessionRemoteControl(session.id);
+    this.store.audit({ sessionId: session.id, actor: "system", event: "remote_control_closed", detail: { reason } });
+  }
+
+  /**
+   * How a published session reports back. Inbound text becomes an ORDINARY inbound
+   * message event, which is the whole point of owning the bridge ourselves: it is
+   * framed by `frameMessage`, authority-checked, budget-checked, audited and
+   * FIFO-serialized on exactly the path a message typed in the thread takes. Nothing
+   * reaches the model unframed, and there is no second turn path to keep in step.
+   */
+  private remoteSinkFor(sessionId: string, conv: ConversationRef | null): RemoteControlSink {
+    return {
+      onRemoteInput: (text: string) => {
+        if (!conv) return;
+        // A remote interrupt arrives as this sentinel rather than as a message, so it
+        // maps onto the existing cancel command instead of being sent to the model.
+        if (text === "__condotto_interrupt__") {
+          void this.handleEvent({ kind: "command", conv, author: REMOTE_PRINCIPAL, name: "cancel", args: "" });
+          return;
+        }
+        void this.handleEvent({
+          kind: "message",
+          conv,
+          author: REMOTE_PRINCIPAL,
+          text,
+          // Deferred: `landInbound` fetches a file through the CONVERSATION's surface,
+          // which is Slack, so a remote file reference would resolve to nothing and post
+          // "I couldn't read the file". Files go in the thread until that is fixed.
+          attachments: [],
+          mentioned: true,
+        });
+      },
+      onClosed: (reason: string) => {
+        const session = this.store.getSession(sessionId);
+        if (!session?.remote_control) return;
+        this.store.clearSessionRemoteControl(sessionId);
+        this.store.audit({ sessionId, actor: "system", event: "remote_control_closed", detail: { reason } });
+        if (!conv) return;
+        void this.surfaceFor(conv)
+          .post(conv, {
+            text: `📱 Remote control ended — ${reason}. \`@Condotto remote-control on\` to publish it again.`,
+          })
+          .catch(() => {});
+      },
+    };
+  }
 
   /** Skills this session's harness will dispatch: the repo's and the operator's. */
   private availableSkills(session: SessionRow): HarnessSkill[] | null {
@@ -2134,6 +2395,18 @@ export class SessionManager {
     });
     const entry = this.entryFor(session.id);
 
+    // A message that did NOT arrive on this conversation's own transport (remote
+    // control) has nothing visible in the thread, so echo it. The thread is the
+    // ticket: a reply to an invisible question means someone reading this back in six
+    // weeks cannot reconstruct why the agent did the work. Posted as Condotto
+    // reporting, never as the person — there is no thread identity for a remote
+    // principal, and a post that looked like one would be a small forgery.
+    if (event.author.surface !== event.conv.surfaceId) {
+      await this.surfaceFor(event.conv)
+        .post(event.conv, { text: `📱 _from the Claude app_\n> ${event.text.replace(/\n/g, "\n> ")}` })
+        .catch(() => {});
+    }
+
     // Only an architect's message runs a turn. Anyone else's is held and carried
     // into the next one, so a thread where a PM and an engineer are talking still
     // reaches the agent whole — it just does not spend a turn (and an unanswered
@@ -2252,7 +2525,15 @@ export class SessionManager {
 
     if (inbound) {
       this.store.insertTurn({ sessionId, direction: "in", principal: inbound.principal, text: inbound.text });
-      this.store.audit({ sessionId, actor: inbound.principal, event: "message_in" });
+      // `actor` is the authority; `origin` is the wire it came in on. The same split
+      // the gate already uses for `agentId`/`escaped` — audit detail, never policy —
+      // and it is what makes "what did the phone cause" one query rather than a guess.
+      this.store.audit({
+        sessionId,
+        actor: inbound.principal,
+        event: "message_in",
+        ...(inbound.principal.startsWith(`${REMOTE_PRINCIPAL.surface}:`) ? { detail: { origin: "remote" } } : {}),
+      });
     }
 
     // The gate is THE security boundary. It audits every call and answers from
@@ -2413,6 +2694,10 @@ export class SessionManager {
         return;
       }
       const harnessSession = await this.getOrAttachHarness(session, memoryRoot);
+      // A daemon restart kills the bridge but not the row's flag, so the first turn
+      // after one re-publishes. Idempotent and a map lookup when the bridge is already
+      // live, so this costs nothing on the normal path.
+      if (session.remote_control) await this.republish(session, conv, harnessSession);
 
       // Forward the session's harness capabilities with the turn: opaque config
       // the adapter applies (model, effort, subagents, workflows, memory, plan).

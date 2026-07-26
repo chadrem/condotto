@@ -436,7 +436,7 @@ describe("store schema migrations", () => {
   // The current schema version == the number of migrations in the runner. Bump
   // this constant in lockstep whenever a migration is appended — the tests below
   // pin the runner's behavior to it.
-  const CURRENT_SCHEMA_VERSION = 11;
+  const CURRENT_SCHEMA_VERSION = 12;
 
   const migPath = (name: string): string => join(mkdtempSync(join(tmpdir(), "condotto-mig-")), name);
   const userVersion = (path: string): number => {
@@ -467,10 +467,12 @@ describe("store schema migrations", () => {
     // A runtime grant could have written one before the role was removed. The v1
     // CHECK still permits the string, which is what makes the row reachable at all.
     raw.run(`INSERT INTO roles (principal, role, scope, source) VALUES ('slack:U1', 'observer', '*', 'grant')`);
-    // Rewind so v10 runs again. v11 re-runs too, so put back what it drops —
-    // same reversal the lossless test above does, for the same reason.
+    // Rewind so v10 runs again. v11 and v12 re-run too, so undo each: put back what
+    // v11 drops, drop what v12 adds — same reversal the lossless test above does, for
+    // the same reason.
     raw.run("ALTER TABLE repos ADD COLUMN safe_bash_allowlist TEXT NOT NULL DEFAULT '[]'");
     raw.run("ALTER TABLE repos ADD COLUMN policy_overrides TEXT NOT NULL DEFAULT '{}'");
+    raw.run("ALTER TABLE sessions DROP COLUMN remote_control");
     raw.run("PRAGMA user_version = 9");
     raw.close();
     const store = new Store(path);
@@ -494,6 +496,47 @@ describe("store schema migrations", () => {
     expect(store.getRepo("r")?.name).toBe("r");
     store.close();
     expect(userVersion(path)).toBe(CURRENT_SCHEMA_VERSION);
+  });
+
+  test("v12 adds remote_control, and an existing session upgrades to OFF", () => {
+    const path = migPath("v12.sqlite");
+    let store = new Store(path);
+    store.upsertRepo({ name: "r", path: "/tmp/r", defaultBranch: "main" });
+    store.createSession({ ...baseSession, id: "s12", conversation_id: "1.12" });
+    store.close();
+
+    // Rewind to v11 as a real pre-v12 store: the column gone, the stamp back.
+    const raw = new Database(path);
+    raw.run("ALTER TABLE sessions DROP COLUMN remote_control");
+    raw.run("PRAGMA user_version = 11");
+    raw.close();
+
+    store = new Store(path);
+    expect(userVersion(path)).toBe(12);
+    // A session nobody asked to publish must not come back published.
+    expect(store.getSession("s12")!.remote_control).toBeNull();
+    store.close();
+  });
+
+  test("clearing remote control writes SQL NULL, not the TEXT 'null'", () => {
+    const path = migPath("rc-null.sqlite");
+    const store = new Store(path);
+    store.upsertRepo({ name: "r", path: "/tmp/r", defaultBranch: "main" });
+    store.createSession({ ...baseSession, id: "sRC", conversation_id: "1.13" });
+
+    store.setSessionRemoteControl("sRC", JSON.stringify({ v: 1, remoteSessionId: "sess_x" }));
+    expect(store.getSession("sRC")!.remote_control).toContain("sess_x");
+
+    store.clearSessionRemoteControl("sRC");
+    expect(store.getSession("sRC")!.remote_control).toBeNull();
+    // The trap this method exists to avoid: a stringified null is truthy TEXT.
+    const db = new Database(path, { readonly: true });
+    const row = db
+      .query<{ n: number }, []>(`SELECT COUNT(*) AS n FROM sessions WHERE remote_control IS NULL`)
+      .get()!;
+    expect(row.n).toBe(1);
+    db.close();
+    store.close();
   });
 
   test("adopting the runner over a pre-runner store (user_version 0, full schema) is lossless", () => {
@@ -523,6 +566,7 @@ describe("store schema migrations", () => {
     raw.run("ALTER TABLE repos DROP COLUMN default_subagents"); // v5
     raw.run("ALTER TABLE repos DROP COLUMN default_workflows"); // v5
     raw.run("ALTER TABLE sessions DROP COLUMN plan_mode"); // v6
+    raw.run("ALTER TABLE sessions DROP COLUMN remote_control"); // v12
     // v7 dropped these; a v0 store had them, and the baseline's `CREATE TABLE IF
     // NOT EXISTS` cannot re-add a column to a table that already exists.
     raw.run("ALTER TABLE repos ADD COLUMN land_cmd TEXT"); // v1-era, dropped at v7

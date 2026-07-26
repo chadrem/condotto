@@ -233,6 +233,10 @@ async function main(): Promise<void> {
     log(`[daemon] ${signal} — shutting down`);
     clearInterval(gcTimer);
     await slack.stop().catch(() => {});
+    // Close published remote-control bridges so no thread stays drivable from a phone
+    // after the daemon is gone. Bounded internally — shutdown must not block on a
+    // wedged network transport.
+    await harness.shutdown?.().catch(() => {});
     store.close();
     process.exit(0);
   };

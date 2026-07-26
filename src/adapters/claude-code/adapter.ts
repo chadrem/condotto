@@ -10,11 +10,14 @@ import type {
   HarnessSession,
   HarnessSkill,
   HarnessTurnOptions,
+  RemoteControlResult,
+  RemoteControlSink,
   SessionHandle,
   TurnEvent,
   TurnInput,
 } from "../../core/types";
 import { parseWorkflowMeta } from "../../core/policy";
+import { RemoteBridges } from "./remote";
 
 /**
  * The SDK `query()` surface the adapter drives — narrowed to what `runQuery` uses
@@ -675,7 +678,22 @@ class ClaudeCodeSession implements HarnessSession {
      * environment (tests / smoke harnesses). Never read from the environment here.
      */
     private auth?: HarnessAuth,
+    /**
+     * The adapter-wide bridge registry, or undefined in a harness with no remote
+     * control (unit tests). Shared rather than per-session because a published
+     * session outlives THIS object — see `RemoteBridges`.
+     */
+    private bridges?: RemoteBridges,
   ) {}
+
+  /**
+   * How this session's bridge is identified: the worktree root, which is stable and
+   * absolute for the session's whole life. Never this object's identity — the core
+   * replaces `ClaudeCodeSession` instances on posture changes and thrown turns.
+   */
+  private get remoteKey(): string {
+    return this.root ?? this.cwd;
+  }
 
   /** The in-flight query, so an out-of-band interrupt() can reach it.
    *  Null when no turn is running. */
@@ -876,6 +894,25 @@ class ClaudeCodeSession implements HarnessSession {
         // regardless of `settingSources`, so both keys below are PINNED in both
         // directions rather than left to a default a repo could move.
         settings: {
+          // The runtime's OWN remote-control machinery stays off in every session, pinned
+          // here rather than left to a default. `settingSources` above loads the repo's
+          // project config, which is untrusted input and can set `remoteControlAtStartup`
+          // or `autoUploadSessions` — either publishes a private thread's whole transcript
+          // to the operator's claude.ai account with nothing in the thread saying so. The
+          // `settings` tier outranks project settings, which is the only reason this holds.
+          //
+          // Condotto's own remote control runs its own bridge from the daemon and does not
+          // use these. There is no posture in which the runtime should publish a session by
+          // itself, so these are unconditional rather than keyed off the thread's flag.
+          disableRemoteControl: true,
+          autoUploadSessions: false,
+          // Remote control is what lets a session on ANOTHER machine reach this one by
+          // message. `SendMessage` is absent from BASE_TOOLS so the agent cannot send —
+          // which says nothing about receiving, hence this.
+          isolatePeerMachines: true,
+          // Sessions reached remotely append a claude.ai session link to commits and PRs by
+          // default. Condotto's commits carry no session attribution.
+          attribution: { sessionUrl: false },
           // Auto-memory. The `settings` tier is the highest user-controlled layer and
           // applies regardless of `settingSources`, so this PINS the posture in both
           // directions rather than relying on a default:
@@ -922,6 +959,7 @@ class ClaudeCodeSession implements HarnessSession {
     // Expose the running query so an out-of-band interrupt() (architect `@Condotto
     // cancel`) can reach it. Cleared in the finally.
     this.activeQuery = q;
+    this.bridges?.reportWorking(this.remoteKey);
     let sawResult = false;
     // A workflow turn produces MULTIPLE `result` messages: an intermediate
     // "workflow launched; waiting…" success, then the FINAL synthesized success
@@ -988,6 +1026,12 @@ class ClaudeCodeSession implements HarnessSession {
         pending = iterator.next();
 
         const m = step.value as Record<string, any>;
+        // Mirror every runtime message to the remote transcript when this session is
+        // published, so someone driving from the Claude app sees the same work the
+        // thread sees. A no-op when nothing is published, and it swallows its own
+        // failures: the thread is the authoritative surface and a wedged bridge must
+        // never cost a turn.
+        this.bridges?.write(this.remoteKey, m);
         if (m.type === "system" && m.subtype === "init") {
           // The init message carries the session id AND the runtime's own list of
           // dispatchable commands. Emit once if EITHER changed: on a resume the
@@ -1158,6 +1202,11 @@ class ClaudeCodeSession implements HarnessSession {
       // The query is done (or being abandoned) — stop routing interrupts to it so a
       // later `@Condotto cancel` on an idle session is a clean no-op, not a stray abort.
       if (this.activeQuery === q) this.activeQuery = null;
+      // Close the remote transcript's turn so the Claude app stops showing a spinner.
+      // In the finally, not after the loop, because an aborted or thrown turn has to
+      // stop the spinner too — a remote viewer left watching a dead spinner has no way
+      // to tell that from work still running.
+      this.bridges?.endTurn(this.remoteKey);
     }
     // A turn that produced no result at all (and wasn't an intentional abort) is an
     // error. An abort (timeout/cancel/budget) already yielded its own notice above, so
@@ -1176,6 +1225,20 @@ class ClaudeCodeSession implements HarnessSession {
    * idle session does nothing. Only sets `cancelRequested` when a query is actually
    * live, so it can never taint a subsequent normal turn.
    */
+  async setRemoteControl(
+    enabled: boolean,
+    opts: { name: string; handle?: string | null; sink: RemoteControlSink },
+  ): Promise<RemoteControlResult> {
+    if (!this.bridges) {
+      return { ok: false, reason: "This harness was built without remote control." };
+    }
+    if (!enabled) {
+      await this.bridges.disable(this.remoteKey);
+      return { ok: true, url: "", handle: "" };
+    }
+    return this.bridges.enable(this.remoteKey, opts);
+  }
+
   async interrupt(): Promise<void> {
     const q = this.activeQuery;
     if (!q) return;
@@ -1284,7 +1347,25 @@ export class ClaudeCodeAdapter implements HarnessAdapter {
     // deferred_tool_use. The plan reaches Condotto as the
     // plan-file write, since the runtime exposes no plan-exit tool headless.
     planMode: true,
+    // A session can be published to claude.ai and driven from the Claude apps. The
+    // bridge is ours (`remote.ts`), NOT the runtime's own remote control — that stays
+    // pinned off in `settings` for every session, so the runtime never publishes
+    // anything by itself.
+    //
+    // True regardless of this machine's auth: it says the harness HAS the feature.
+    // Whether the credential can mint a remote session is answered per call, by
+    // refusing with a reason.
+    remoteControl: true,
   };
+
+  /**
+   * Published bridges, keyed by worktree root and owned by the ADAPTER rather than by
+   * a session object. Session objects are transient — the core rebuilds one whenever
+   * the posture changes or a turn throws — while a publication belongs to the
+   * session's whole life. A per-object registry would drop the architect's claude.ai
+   * link every time they typed `subagents off`.
+   */
+  private readonly bridges = new RemoteBridges(this.auth);
 
   async create(opts: { cwd: string; system: string; root?: string }): Promise<HarnessSession> {
     return new ClaudeCodeSession(
@@ -1295,6 +1376,7 @@ export class ClaudeCodeAdapter implements HarnessAdapter {
       this.turnInactivityMs,
       opts.root,
       this.auth,
+      this.bridges,
     );
   }
 
@@ -1307,6 +1389,12 @@ export class ClaudeCodeAdapter implements HarnessAdapter {
       this.turnInactivityMs,
       root,
       this.auth,
+      this.bridges,
     );
+  }
+
+  /** Daemon shutdown: close every publication so no thread stays drivable. */
+  async shutdown(): Promise<void> {
+    await this.bridges.closeAll().catch(() => {});
   }
 }
