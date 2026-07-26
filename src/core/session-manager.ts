@@ -329,7 +329,7 @@ interface LiveEntry {
 const MAX_PENDING_CONTEXT = 20;
 
 export interface SessionManagerOptions {
-  /** Per-thread cost ceiling (USD) when a repo sets none (DESIGN §4). */
+  /** Per-thread cost ceiling (USD) when a repo sets none. */
   defaultCostCapUsd?: number;
   /** Max harness turns running at once across all sessions. */
   maxConcurrentTurns?: number;
@@ -337,7 +337,7 @@ export interface SessionManagerOptions {
   /**
    * Daemon-wide default model/effort tokens, used when a session
    * (and its repo) sets none. Opaque — validated against the harness adapter's
-   * capabilities. Default Opus 5 + xhigh (DESIGN §1 north-star: a first-class agent).
+   * capabilities. Default Opus 5 + xhigh.
    */
   defaultModel?: string;
   defaultEffort?: string;
@@ -380,7 +380,7 @@ export interface SessionManagerOptions {
 
 /**
  * Counting semaphore bounding how many harness turns execute concurrently across
- * all sessions (DESIGN §7). Per-session turns are already serialized by the
+ * all sessions. Per-session turns are already serialized by the
  * FIFO; this protects the box from N simultaneous heavy `query()` processes when
  * many threads are active. FIFO order guarantees no deadlock: a turn never waits
  * on another turn of the same session while holding a slot.
@@ -547,7 +547,6 @@ export class SessionManager {
       `• subagents ${subagents ? "*on*" : "off"}  ·  workflows ${workflows ? "*on*" : planMode && session.workflows === 1 ? "paused" : "off"}  ·  ultra ${ultra ? "*on*" : "off"}`,
       `• cost budget $${budget.toFixed(2)}`,
     ];
-    if (repo?.trusted === 1) lines.push("• 🔐 trusted repo — loading its `CLAUDE.md`, skills, and `.claude/` config");
     if (repo?.memory === 1) {
       lines.push(
         "• 🧠 memory on — what I learn here carries to other threads on this repo in this channel " +
@@ -584,18 +583,13 @@ export class SessionManager {
   }
 
   /** The per-turn harness config for a session (opaque tokens + capability flags). */
-  private harnessOptionsFor(
-    session: SessionRow,
-    repoTrusted: boolean,
-    memoryDir?: string,
-  ): HarnessTurnOptions {
+  private harnessOptionsFor(session: SessionRow, memoryDir?: string): HarnessTurnOptions {
     const planMode = session.plan_mode === 1;
     return {
       model: this.effectiveModel(session),
       effort: this.effectiveEffort(session),
       subagents: session.subagents === 1,
       workflows: this.effectiveWorkflows(session),
-      projectConfig: repoTrusted,
       // Memory is paused while planning: its writes are gate-tier and therefore
       // denied, and `autoMemoryEnabled` is pinned on whenever a directory is
       // supplied — so passing it would have auto-memory generating denials all
@@ -761,7 +755,7 @@ export class SessionManager {
 
   private async assign(conv: ConversationRef, author: Principal, args: string): Promise<void> {
     const surface = this.surfaceFor(conv);
-    // Assignment is command authority (DESIGN.md §2) — architects only.
+    // Assignment is command authority — architects only.
     if (!this.store.isArchitect(principalKey(author), conv.channelId)) {
       this.store.audit({ actor: principalKey(author), event: "authz_denied", detail: { action: "assign", channel: conv.channelId } });
       await surface.post(conv, { text: "Only architects can assign sessions." });
@@ -1106,7 +1100,7 @@ export class SessionManager {
 
   /**
    * `/condotto status` — the daemon-wide, architect-only OPERATOR dashboard
-   * (DESIGN §8-(5)). Called synchronously by the surface adapter (like `isArchitect`,
+   *). Called synchronously by the surface adapter (like `isArchitect`,
    * mirroring the `SurfaceAuthority` injection) and rendered as an EPHEMERAL reply,
    * so it never spams a channel. Read-only telemetry: uptime, session counts across
    * ALL channels, turns-in-flight vs the concurrency cap, the daemon-wide pending-
@@ -1145,7 +1139,7 @@ export class SessionManager {
    * command can't run inside a thread, so it can't target a stop; instead it lists
    * this channel's live sessions (so the operator can find the thread) and points
    * them at the in-thread `@Condotto stop` (mirroring `@Condotto assign`). Closes the
-   * old "silent no-op" gap (DESIGN §8-(5)).
+   * old "silent no-op" gap).
    */
   channelStopGuidance(channelId: string): string {
     const list = this.renderChannelSessions(channelId);
@@ -1158,8 +1152,8 @@ export class SessionManager {
   }
 
   /**
-   * `@Condotto stop [clean]` (architect-only, DESIGN §2 journey 6). Plain `stop`
-   * ends the session but KEEPS its worktree for reactivation (journey 6 / §2 j5);
+   * `@Condotto stop [clean]` (architect-only, DESIGN ). Plain `stop`
+   * ends the session but KEEPS its worktree for reactivation (journey 6 /  j5);
    * `stop clean` additionally schedules the worktree for teardown a retention
    * interval later — a grace window in which a re-assign still recovers it.
    */
@@ -1170,7 +1164,7 @@ export class SessionManager {
       await surface.post(conv, { text: "No active session in this thread." });
       return;
     }
-    // Stopping is command authority (DESIGN.md §2) — architects only.
+    // Stopping is command authority — architects only.
     if (!this.store.isArchitect(principalKey(author), conv.channelId)) {
       this.store.audit({ sessionId: session.id, actor: principalKey(author), event: "authz_denied", detail: { action: "stop" } });
       await surface.post(conv, { text: "Only architects can stop sessions." });
@@ -1245,7 +1239,7 @@ export class SessionManager {
       await surface.post(conv, { text: "No session in this thread to cancel." });
       return;
     }
-    // Cancelling is command authority (DESIGN §2) — architects only, like stop.
+    // Cancelling is command authority — architects only, like stop.
     if (!this.store.isArchitect(principalKey(author), conv.channelId)) {
       this.store.audit({ sessionId: session.id, actor: principalKey(author), event: "authz_denied", detail: { action: "cancel" } });
       await surface.post(conv, { text: "Only architects can cancel a running turn." });
@@ -1288,7 +1282,7 @@ export class SessionManager {
       await surface.post(conv, { text: "No active session in this thread." });
       return;
     }
-    // Clearing is command authority (DESIGN §2) — architects only, like stop/cancel.
+    // Clearing is command authority — architects only, like stop/cancel.
     // It is also the one command that deletes the human-stated half of the control
     // surface: an architect's constraints ("don't touch the migrations", "prod is
     // frozen until Thursday") live ONLY in the agent's context — not in policy, roles
@@ -1397,9 +1391,9 @@ export class SessionManager {
   }
 
   /**
-   * Worktree garbage collection (DESIGN §8-(3)). Reclaims disk from
+   * Worktree garbage collection). Reclaims disk from
    * worktrees no longer bound to a live or parked session, and NEVER touches one
-   * that is — the park-and-resume invariant (§2 journey 5). Two collection targets:
+   * that is — the park-and-resume invariant. Two collection targets:
    *
    *   1. **Clean-stopped, past retention** — a session explicitly ended with
    *      `@Condotto stop clean` whose grace window has elapsed. Remove its worktree
@@ -1512,7 +1506,7 @@ export class SessionManager {
    * implementer's model per thread. The token is opaque to the core — it is only
    * validated for membership in the harness adapter's advertised `supportedModels`
    * (the adapter maps it to the concrete SDK id), so the core never learns SDK
-   * model names. Model×effort spend the plan's rate limit (§4), so this is also
+   * model names. Model×effort spend the plan's rate limit, so this is also
    * how an architect dials capability DOWN (cheaper model).
    */
   private async setModel(conv: ConversationRef, author: Principal, args: string): Promise<void> {
@@ -1545,7 +1539,7 @@ export class SessionManager {
   /**
    * `@Condotto effort <low|medium|high|xhigh|max>`. Architect tunes
    * reasoning effort per thread. Opaque token, validated against the adapter's
-   * `supportedEfforts`. Higher effort burns more of the plan's rate limit (§4);
+   * `supportedEfforts`. Higher effort burns more of the plan's rate limit;
    * lower effort is the dial-down.
    */
   private async setEffort(conv: ConversationRef, author: Principal, args: string): Promise<void> {
@@ -1677,7 +1671,7 @@ export class SessionManager {
    * This is now the SHIPPED default posture, not an opt-in: a new session already
    * arrives with all three on (`[defaults]` in `condotto.toml`), so `ultra on` is
    * mainly how you get back after dialing something down. It burns the plan's
-   * rate limit fastest (§4), which is why it stays architect-only.
+   * rate limit fastest, which is why it stays architect-only.
    */
   private async setUltra(conv: ConversationRef, author: Principal, args: string): Promise<void> {
     const surface = this.surfaceFor(conv);
@@ -1802,17 +1796,10 @@ export class SessionManager {
   }
 
 
-  /**
-   * Skills this session's harness will dispatch, filtered by what is actually
-   * reachable. A repo's own skills load only under the trusted posture
-   * (`settingSources: ["project"]`), so listing them for an untrusted repo would
-   * advertise something that cannot run.
-   */
+  /** Skills this session's harness will dispatch: the repo's and the operator's. */
   private availableSkills(session: SessionRow): HarnessSkill[] | null {
     const listed = this.live.get(session.id)?.harness?.listSkills();
-    if (!listed) return null;
-    const trusted = (this.store.getRepo(session.repo_id)?.trusted ?? 0) === 1;
-    return listed.filter((s) => s.source !== "repo" || trusted);
+    return listed ? [...listed] : null;
   }
 
   /**
@@ -1844,7 +1831,7 @@ export class SessionManager {
    *
    * Architect-only because invoking is, and because the list exposes the
    * OPERATOR's own environment: their `~/.claude` skills reach the agent in both
-   * trust postures (DECISIONS 2026-07-20), so this is a window onto the machine
+   * trust postures, so this is a window onto the machine
    * Condotto runs on, not just onto the repo.
    */
   private async listSessionSkills(conv: ConversationRef, author: Principal): Promise<void> {
@@ -1868,8 +1855,8 @@ export class SessionManager {
     if (skills.length === 0) {
       await surface.post(conv, {
         text:
-          "I have no skills to run in this thread. A repo's own skills need it marked `trusted` in " +
-          "`condotto.toml`; anything in the operator's `~/.claude/skills` shows up here too.",
+          "I have no skills to run in this thread. I pick them up from this repo's " +
+          "`.claude/skills` and from your own `~/.claude/skills`.",
       });
       return;
     }
@@ -1900,7 +1887,7 @@ export class SessionManager {
   /**
    * `@Condotto /<name> [args]` — architect-only. Runs a harness skill as a TURN of
    * this session, so it carries the session's model, effort, budget and — the point
-   * — the same §4 gate as any other turn (verified: a Write inside a skill turn
+   * — the same  gate as any other turn (verified: a Write inside a skill turn
    * defers and re-drives on the approval resume).
    *
    * This is the ONLY path to a skill marked `disable-model-invocation`. That flag
@@ -2449,9 +2436,9 @@ export class SessionManager {
       }
       const harnessSession = await this.getOrAttachHarness(session, memoryRoot);
 
-      // Forward the session's harness capabilities (model/effort/subagents/
-      // workflows + repo trust) with the turn. Opaque config the adapter applies.
-      const harnessOpts = this.harnessOptionsFor(session, (repo?.trusted ?? 0) === 1, memoryRoot);
+      // Forward the session's harness capabilities with the turn: opaque config
+      // the adapter applies (model, effort, subagents, workflows, memory, plan).
+      const harnessOpts = this.harnessOptionsFor(session, memoryRoot);
       for await (const ev of harnessSession.turn(
         { text: framedText, budgetUsd: turnBudgetUsd, harness: harnessOpts, ...(skill ? { skill } : {}) },
         gate,
@@ -2492,7 +2479,7 @@ export class SessionManager {
             producedOutput = true;
             // An error result (incl. error_max_budget_usd) still reports spend —
             // record it so the runaway cap can't be evaded by turns that end in
-            // error (DESIGN §4). Guarded like reply, to avoid double-counting.
+            // error. Guarded like reply, to avoid double-counting.
             if (ev.costUsd !== undefined && !replyDelivered) {
               this.store.insertTurn({ sessionId, direction: "out", text: "(turn error)", costUsd: ev.costUsd, resultSubtype: "error" });
             }

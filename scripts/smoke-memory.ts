@@ -1,7 +1,7 @@
 // Smoke test: durable agent memory against the REAL SDK.
 //
 // The unit tests pin the policy table; this answers the questions only a real
-// agent can (DECISIONS 2026-07-20):
+// agent can:
 //
 //   Q1  Does the agent actually record a memory through the gate, into the
 //       Condotto-owned directory rather than the SDK's cwd-keyed default?

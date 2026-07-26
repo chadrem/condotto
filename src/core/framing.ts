@@ -1,7 +1,7 @@
 import type { Principal } from "./types";
 import { principalKey } from "./types";
 
-// Event framing is a security boundary (DESIGN.md Appendix A1, section 4/7):
+// Event framing is a security boundary:
 // thread content is untrusted input to an agent with a shell, so content
 // rendered into the agent's context must be UNFORGEABLE by message content. The
 // exact attack — a message body forging a header that attributes a command to
@@ -107,88 +107,34 @@ export function sanitizeDisplayName(name: string): string {
 // ---------------------------------------------------------------------------
 // Skill invocation text
 //
-// Arguments to an architect-invoked skill are the ONE piece of human text that
-// reaches the harness OUTSIDE the fence. They are substituted into the skill's own
-// body at `$ARGUMENTS`, and that substitution happens during EXPANSION — before the
-// model, and therefore before the PreToolUse hook. Two consequences, both verified
-// live (spike 2026-07-25, `scripts/spike-skills.ts`):
+// Arguments to an architect-invoked skill are substituted into the skill's body at
+// `$ARGUMENTS` during expansion, before the model and before the PreToolUse hook.
+// They are not screened. An architect typing `@Condotto /ship v2.1` is an architect
+// running their own skill with their own arguments, which is the whole feature.
 //
-//   * `!`cmd`` in argument text EXECUTES, and `disableSkillShellExecution` does NOT
-//     stop it — that setting covers the skill FILE's body only. Proven with a
-//     construct whose output ("42") is absent from its source ("$((21+21))").
-//   * Bare backticks without the bang are inert.
-//
-// So this check is not defence in depth; it is the boundary. Nothing downstream
-// sees this text: not `evaluateBash`, not `bashHardDeny`, not the audit log.
-//
-// It therefore REFUSES rather than rewrites, over a POSITIVE charset. Refusing
-// tells the architect exactly what to retype instead of silently running something
-// they did not write; a positive charset fails closed when the harness grows new
-// expansion syntax, which a denylist would not.
+// Two limits remain, and neither is about safety:
+//   * a length cap, because an argument line is a commit message, not an essay;
+//   * a leading `/` is refused, because it reads as a SECOND slash command and
+//     would load a different skill than the one that was named.
 
 /** Argument text is one short line; a skill's `argument-hint` is a commit message, not an essay. */
 const MAX_SKILL_ARGS = 400;
 
-/**
- * Everything allowed in skill arguments: letters, digits, space, and ordinary
- * sentence punctuation. Deliberately EXCLUDES the expansion triggers — `!`
- * (shell), backtick (shell), `@` (file inlining), `$` (placeholders) — along with
- * `<>|&\^~*` and every control, bidi and line-separator character, which have no
- * legitimate place in a one-line argument.
- */
-// `\p{Pd}` (dashes), `\p{Pi}`/`\p{Pf}` (opening/closing quotes) and `…` are whole
-// categories of inert typography — an em dash or a smart quote is ordinary in a
-// commit message, and nothing in those categories is an expansion trigger. Adding
-// them by CATEGORY rather than by hand keeps the rule short without turning it
-// into a denylist. `\p{Po}` is deliberately NOT included: it contains `!` and `@`.
-const SKILL_ARGS_ALLOWED = /^[\p{L}\p{N}\p{Pd}\p{Pi}\p{Pf} .,:;'"?()[\]{}/_+=#%…]*$/u;
-/** Reported back to the architect, so a refusal is actionable rather than mysterious. */
-const SKILL_ARGS_ALLOWED_DESC =
-  "letters, digits, spaces, dashes, quotes and . , : ; ? ( ) [ ] { } / _ + = # %";
-
 export type SkillArgsCheck = { ok: true; args: string } | { ok: false; reason: string };
 
-/**
- * Validate the free-text arguments of an architect-invoked skill.
- *
- * Returns the accepted (whitespace-collapsed) text, or a refusal naming what was
- * wrong. See the block comment above for why this refuses instead of sanitizing.
- */
+/** Normalize an architect's skill arguments, refusing only what would misroute. */
 export function checkSkillArgs(raw: string): SkillArgsCheck {
   const args = raw.replace(/\s+/g, " ").trim();
   if (args === "") return { ok: true, args: "" };
   if (args.length > MAX_SKILL_ARGS) {
     return { ok: false, reason: `arguments are too long (${args.length} characters; the limit is ${MAX_SKILL_ARGS})` };
   }
-  if (!SKILL_ARGS_ALLOWED.test(args)) {
-    // Name the first offender: "it contains a bad character" is unactionable.
-    const bad = [...args].find((c) => !SKILL_ARGS_ALLOWED.test(c))!;
-    const shown = /\p{C}/u.test(bad) ? `U+${bad.codePointAt(0)!.toString(16).toUpperCase().padStart(4, "0")}` : `\`${bad}\``;
+  if (args.startsWith("/")) {
     return {
       ok: false,
-      reason:
-        `${shown} isn't allowed in skill arguments. A skill's text runs before I can gate anything, ` +
-        `so arguments are limited to ${SKILL_ARGS_ALLOWED_DESC}.`,
+      reason: "arguments can't start with `/` — that reads as a second slash command and would load a different skill.",
     };
   }
-  // A token starting with `/` would read as a SECOND slash command and load another
-  // skill alongside the one that was asked for. `/` inside a token (a path like
-  // src/app.ts) is fine and common, so only the leading position is refused.
-  const secondCommand = args.split(" ").find((w) => w.startsWith("/"));
-  if (secondCommand) {
-    return {
-      ok: false,
-      reason: `\`${secondCommand}\` looks like a second command. Run one skill at a time.`,
-    };
-  }
-  // The charset already excludes `@`, so a mention token cannot form; the protocol
-  // header sentinel is spellable from allowed characters alone, so check it here.
-  // Invisible-tolerant, like every other sentinel check in this file.
-  if (HEADER_SENTINEL_RE.test(args)) {
-    HEADER_SENTINEL_RE.lastIndex = 0; // `g` flag: never leave state behind for the next caller
-    return { ok: false, reason: "skill arguments can't contain a `[condotto:` protocol header." };
-  }
-  HEADER_SENTINEL_RE.lastIndex = 0;
   return { ok: true, args };
 }
 

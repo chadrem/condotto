@@ -362,7 +362,7 @@ describe("parseMentionCommand — plan", () => {
 describe("parseMentionCommand — skills", () => {
   // The mention-first spelling is not cosmetic. Slack intercepts a message that
   // BEGINS with `/` as one of its own commands, and custom slash commands cannot
-  // run inside a thread at all (DECISIONS 2026-07-18) — so the `/` has to sit
+  // run inside a thread at all — so the `/` has to sit
   // behind the mention, where it is ordinary text.
   test("`/name` becomes a skill command with the slash stripped", () => {
     expect(parse("/ship")).toEqual({ name: "skill", args: "ship" });

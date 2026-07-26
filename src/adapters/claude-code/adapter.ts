@@ -29,7 +29,7 @@ export type QueryFn = (args: { prompt: unknown; options: Record<string, any> }) 
 // Claude Code harness adapter over the Agent SDK.
 //
 // Verified facts this code builds on (spike 2026-07-16 + live docs, see
-// DECISIONS.md and DESIGN.md Appendix B):
+// Verified SDK facts (see CLAUDE.md, "SDK gotchas"):
 //  - Auth is EITHER an Anthropic API key OR the machine's Claude subscription
 //    login (keychain OAuth / headless CLAUDE_CODE_OAUTH_TOKEN). The credential is
 //    resolved by the composition root (core/config loadAuthConfig) and handed in;
@@ -42,8 +42,7 @@ export type QueryFn = (args: { prompt: unknown; options: Record<string, any> }) 
 //    Agent SDK authenticate with a Console API key, and that Free/Pro/Max plan
 //    limits assume ordinary individual use; Condotto is explicitly multi-person.
 //    So API key is now the documented default and subscription OAuth is the
-//    explicitly single-operator path. Both are supported. See DECISIONS.md
-//    2026-07-20 and DESIGN.md Appendix B.
+//    explicitly single-operator path. Both are supported.
 //
 //    The key reaches the model by riding the SDK subprocess environment — the
 //    SDK's documented mechanism (sdk.d.ts:1414 names ANTHROPIC_API_KEY as a
@@ -221,7 +220,7 @@ const SUBAGENT_TOOLS = ["Agent", "Task"];
 // workflow's sub-agent tool calls route THROUGH the PreToolUse hook (agent_id-
 // tagged) where the read-only subagent policy confines them — the hook still
 // outranks permission mode, so main-agent defer/deny are unaffected (spike
-// 2026-07-18, DECISIONS.md). Was disabled outright earlier (which used
+// 2026-07-18). Was disabled outright earlier (which used
 // permissionMode "default", under which the same agents default-DENY off-gate).
 const WORKFLOW_TOOL = "Workflow";
 
@@ -439,12 +438,13 @@ export function enumerateSkills(opts: {
           refused.set(key, `it inlines \`${escaping}\` with \`@\`, which reaches outside the worktree`);
           continue;
         }
-        // Inline shell is NOT refused. `disableSkillShellExecution` already replaces
-        // it with a placeholder, so the security question is settled — but the skill
-        // then runs without whatever context that command was gathering, and the
-        // architect should hear that from us rather than wonder later.
+        // Inline shell (`` !`cmd` ``) runs during expansion, before the model and
+        // before our hook. It is allowed: a skill that gathers context this way is
+        // a skill working as designed, and these are your own skills in your own
+        // repo. Worth saying once in the listing so nobody is surprised that a
+        // skill runs a command before it starts.
         const warning = INLINE_SHELL_RE.test(body)
-          ? "this skill gathers context with inline shell commands, which Condotto disables — it will run without that context"
+          ? "runs shell inline to gather context, before the turn starts"
           : undefined;
         const skill: HarnessSkill = {
           name,
@@ -479,7 +479,7 @@ export function enumerateSkills(opts: {
  * (CLAUDE_SDK_CAN_USE_TOOL_SHADOWED). For Condotto that is expected and correct:
  * read-only tools are auto-approved by allowedTools and confined by the
  * PreToolUse hook, so they must never reach the deny-by-default canUseTool
- * backstop — only gated tools do (see DECISIONS.md). Left alone it masquerades
+ * backstop — only gated tools do. Left alone it masquerades
  * as an error in the daemon log after every turn. Silence exactly that one
  * warning code (nothing else) across every emission path. Idempotent; runs once
  * on import so both the daemon and the smoke scripts get clean output.
@@ -528,7 +528,7 @@ const DRAIN_AFTER_ABORT_MS = 30_000;
  * tokens or config from its own environ, while PRESERVING everything the toolchain
  * and the Claude Code CLI need — `PATH`/`HOME`, the repo's build env, and the Claude
  * auth token (which never matches these prefixes, so keychain OAuth AND a headless
- * `CLAUDE_CODE_OAUTH_TOKEN` both survive). Belt-and-braces over the §4 policy floor
+ * `CLAUDE_CODE_OAUTH_TOKEN` both survive). Belt-and-braces over the  policy floor
  * (credential/secret hard-deny stays); spike-proven under keychain OAuth
  * (verified 2026-07-19). Distinct from CommandRunner's scrub, which
  * drops a fixed NAME list incl. the Claude auth token because a deploy command,
@@ -705,11 +705,8 @@ class ClaudeCodeSession implements HarnessSession {
 
   listSkills(): readonly HarnessSkill[] | null {
     if (this.skillCache) return this.skillCache;
-    // Both sources are enumerated here, tagged by `source`. Whether the REPO's are
-    // actually reachable depends on repo trust — which is a per-turn option
-    // (`harness.projectConfig`), not session state, so this nullary/synchronous
-    // listing cannot know it. The core filters for display (it owns `repo.trusted`),
-    // and `turn()` below refuses a repo-source dispatch when trust is absent.
+    // Both sources are enumerated here, tagged by `source`: the repo's own
+    // `.claude/skills` and the operator's `~/.claude/skills`. Both are reachable.
     const { skills, refused } = enumerateSkills({
       repoRoot: this.root ?? this.cwd,
       operatorHome: homedir(),
@@ -744,18 +741,6 @@ class ClaudeCodeSession implements HarnessSession {
       const match = (this.listSkills() ?? []).find((s) => s.name.toLowerCase() === wanted);
       if (!SKILL_NAME_RE.test(input.skill.name) || !match) {
         yield { kind: "error", message: `I don't have a skill called \`/${input.skill.name}\` in this session.` };
-        return;
-      }
-      // A repo's own skills load only under `settingSources: ["project"]`, which is
-      // the trusted posture. Dispatching one without it would reach the runtime as
-      // an unknown command; saying why is more useful than letting that happen.
-      if (match.source === "repo" && !input.harness?.projectConfig) {
-        yield {
-          kind: "error",
-          message:
-            `\`/${match.name}\` is one of this repo's own skills, and this repo isn't marked ` +
-            `\`trusted\` — so its \`.claude/\` config isn't loaded and the skill isn't available.`,
-        };
         return;
       }
     }
@@ -797,31 +782,22 @@ class ClaudeCodeSession implements HarnessSession {
       return { hookSpecificOutput: { hookEventName: "PreToolUse" as const, ...out } };
     };
 
-    // Per-turn harness capabilities (opaque config from the core). model/
-    // effort tune the implementer; subagents/workflows toggle multi-agent tools;
-    // projectConfig loads a trusted repo's settings.
+    // Per-turn harness capabilities (opaque config from the core): model/effort
+    // tune the implementer, subagents/workflows toggle the multi-agent tools.
     const h = input.harness;
     const { tools, allowedTools, disallowedTools } = toolPosture(h);
     const model = resolveModel(h?.model);
     const effort = resolveEffort(h?.effort);
-    // A trusted repo loads its own project settings + skills; the §4 gate
-    // still applies (the PreToolUse hook fires regardless of settingSources, and a
-    // hook deny/defer beats any repo allow-rule per SDK precedence). Untrusted
-    // (default) does not load the REPO's CLAUDE.md/.mcp.json/.claude/ — repo
-    // content is untrusted input and must not register MCP servers or alter
-    // permissions (§4). That is what `settingSources` governs.
+    // Every repo loads its own project config: `CLAUDE.md`, `.claude/`, its
+    // skills, its hooks. There used to be a per-repo `trusted` flag deciding this
+    // and it was deleted 2026-07-26 — Condotto runs on one team's own machine
+    // against their own repos, and refusing to read the conventions they wrote is
+    // ceremony rather than safety.
     //
-    // It does NOT govern skill discovery. The OPERATOR's own user-level skills
-    // (~/.claude) reach the agent in BOTH postures — verified live 2026-07-20, and
-    // stated in sdk.d.ts: omitting the `skills` option is "no SDK auto-configuration.
-    // The CLI's own defaults still apply", i.e. explicitly NOT "skills off".
-    // This is INTENDED for Condotto (decision 2026-07-20): the daemon runs on the
-    // operator's own machine under their account, and the implementer is meant to
-    // be as capable there as they are. It is not a gate hole — a skill is
-    // instructions, and every tool call it makes still hits the hook (`Skill`
-    // itself is an unknown tool, so invoking one gates). Pass `skills: []` here if
-    // an install ever wants the operator's skills genuinely off.
-    const settingSources: ("user" | "project" | "local")[] = h?.projectConfig ? ["project"] : [];
+    // The operator's own `~/.claude` skills reach the agent in either case:
+    // omitting the `skills` option is documented as "no SDK auto-configuration,
+    // the CLI's own defaults still apply", which is explicitly not "skills off".
+    const settingSources: ("user" | "project" | "local")[] = ["project"];
 
     // Workflows run under bypassPermissions ONLY so the background workflow's
     // sub-agent tool calls route through the PreToolUse hook (agent_id-tagged) where
@@ -875,7 +851,7 @@ class ClaudeCodeSession implements HarnessSession {
         ...(this.root && this.root !== this.cwd ? { additionalDirectories: [this.root] } : {}),
         resume: this._handle.sessionId ?? undefined,
         // rider (a): scrub the daemon's own SLACK_*/CONDOTTO_* secrets from the
-        // environment the agent's Bash inherits (belt-and-braces over the §4 policy
+        // environment the agent's Bash inherits (belt-and-braces over the  policy
         // floor). options.env REPLACES the subprocess env, so this is a denylist
         // spread of process.env that keeps PATH/HOME + the toolchain + the Claude
         // auth token the SDK needs (spike-proven under keychain OAuth).
@@ -894,7 +870,7 @@ class ClaudeCodeSession implements HarnessSession {
         // defaults; the core always supplies them (default Opus 5 + xhigh).
         ...(model ? { model } : {}),
         ...(effort ? { effort: effort as "low" | "medium" | "high" | "xhigh" | "max" } : {}),
-        // Intra-turn runaway brake (DESIGN §4). The SDK stops the turn if it
+        // Intra-turn runaway brake. The SDK stops the turn if it
         // exceeds this, returning an `error_max_budget_usd` result we surface as
         // a clear Slack notice (never a silent stall). The core passes the
         // session's remaining thread headroom; omitted = no per-turn cap.
@@ -905,38 +881,24 @@ class ClaudeCodeSession implements HarnessSession {
         // subagent (restricted toolset — defense-in-depth over the gate).
         ...(h?.subagents ? { agents: SUBAGENT_DEFS } : {}),
         // Load the trusted repo's skills alongside its project settings.
-        ...(h?.projectConfig ? { skills: "all" as const } : {}),
+        skills: "all" as const,
         // Untrusted (default): never load filesystem settings (CLAUDE.md,
         // .mcp.json, .claude/) from the worktree — repo content is untrusted
-        // input and must not register MCP servers or alter permissions (§4).
+        // input and must not register MCP servers or alter permissions.
         settingSources,
         // The `settings` tier is the highest user-controlled layer and applies
         // regardless of `settingSources`, so both keys below are PINNED in both
         // directions rather than left to a default a repo could move.
         settings: {
-          // A skill / custom slash command body may embed `!`cmd`` to run a shell
-          // command and inline its output. That runs during EXPANSION — before the
-          // model sees anything, and therefore BEFORE our PreToolUse hook — so it is
-          // not gated by `policy.ts` at all: no allowlist check, no prod-data check,
-          // no hard-deny, no audit row. The §4 premise that "a skill is instructions
-          // and every tool call it makes still hits the hook" (DECISIONS 2026-07-20)
-          // holds for the calls a skill CAUSES and fails for its preprocessing.
-          //
-          // Pinned true for user/project/plugin sources (bundled and managed skills
-          // are unaffected, per sdk.d.ts). This matters already, not only for
-          // human-invoked skills: a `trusted` repo gets `skills: "all"` above, so a
-          // model-invoked skill could reach this channel today.
-          disableSkillShellExecution: true,
           // Auto-memory. The `settings` tier is the highest user-controlled layer and
           // applies regardless of `settingSources`, so this PINS the posture in both
           // directions rather than relying on a default:
           //   on  — point it at the core's proven per-(repo, channel) directory. The
           //         SDK default is keyed on the SANITIZED CWD (sdk.d.ts:6378), i.e. a
           //         worktree that gets destroyed, so without this memory cannot persist.
-          //   off — explicitly false, which also closes the one path by which a
-          //         TRUSTED repo's checked-in settings could switch memory on. (The SDK
-          //         already ignores `autoMemoryDirectory` from project settings "for
-          //         security", but not `autoMemoryEnabled`.)
+          //   off — explicitly false, so a repo's checked-in settings cannot switch
+          //         memory on by themselves. Memory outlives the worktree, which is
+          //         what makes it worth the operator naming the repo.
           // The agent writes memory with ordinary Write/Edit, so those calls hit the
           // hook below and the core's memory rules govern them (spike 2026-07-20).
           // NOTE: deliberately NOT added to `additionalDirectories` — the spike showed
@@ -965,11 +927,8 @@ class ClaudeCodeSession implements HarnessSession {
         // into disagreeing about what is allowed.
         ...(h?.planMode ? { planModeInstructions: PLAN_MODE_INSTRUCTIONS } : {}),
         hooks: { PreToolUse: [{ hooks: [gateHook] }] },
-        // Backstop for calls that reach the un-deferrable path (batched gated
-        // calls; escaped workflow-agent calls). Runs the core confinement policy
-        // (see canUseToolFn): reads pass, gated actions deny, worktree-write opt-in
-        // allows confined writes. In the normal single-call flow the hook is
-        // terminal and this is never reached.
+        // Backstop for calls that reach the permission flow instead of the hook.
+        // Runs the same core policy, so the answer is identical either way.
         canUseTool: canUseToolFn,
       },
     });
@@ -1149,7 +1108,7 @@ class ClaudeCodeSession implements HarnessSession {
               continue;
             }
             // The turn hit its cost budget and stopped. Surface it clearly
-            // with the spend — the core will then pause the session (§4).
+            // with the spend — the core will then pause the session.
             pendingReply = null;
             yield {
               kind: "error",

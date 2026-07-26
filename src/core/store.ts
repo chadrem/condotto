@@ -1,7 +1,7 @@
 import { Database } from "bun:sqlite";
 import type { Role, SessionHandle } from "./types";
 
-// SQLite store (DESIGN.md §5). One process, one file, WAL mode.
+// SQLite store. One process, one file, WAL mode.
 // Invariants enforced here in code, not just schema:
 //   - (surface_id, conversation_id) -> exactly one session, forever (UNIQUE).
 //   - worktree_path is absolute and never rewritten once set.
@@ -56,8 +56,8 @@ export interface SessionRow {
    * the `clean` variant and its worktree becomes collectible at this ISO
    * timestamp (the stop time + retention interval). NULL is the resting state —
    * a live/parked session, or a plain `stop` that keeps its worktree for
-   * reactivation (DESIGN §2 journey 6). The GC NEVER collects a NULL row's
-   * worktree, which is how the park-and-resume invariant (§2 journey 5) is held.
+   * reactivation. The GC NEVER collects a NULL row's
+   * worktree, which is how the park-and-resume invariant is held.
    */
   cleanup_at: string | null;
   created_at: string;
@@ -76,8 +76,6 @@ export interface RepoRow {
   /** Per-repo default model/effort tokens; null = daemon-wide default. */
   default_model: string | null;
   default_effort: string | null;
-  /** Trust flag: 1 loads project config/skills/MCP; 0 stays isolated. */
-  trusted: number;
   /** Durable agent memory: 1 gives the repo a Condotto-owned memory root. */
   memory: number;
   /**
@@ -293,7 +291,7 @@ function migrateV2(db: Database): void {
  * absolute, never-rewritten path (and the confinement boundary), while this is a
  * pure offset from it. It is IMMUTABLE for the session's life — the harness keys
  * its transcript storage by encoded cwd, so re-pointing it would silently lose the
- * conversation (DESIGN §5).
+ * conversation.
  */
 function migrateV3(db: Database): void {
   db.run(`ALTER TABLE sessions ADD COLUMN workdir TEXT`);
@@ -302,7 +300,7 @@ function migrateV3(db: Database): void {
 /**
  * Migration **v4** (durable agent memory): per-repo opt-in for the SDK's
  * auto-memory feature, backed by a Condotto-owned memory root outside the
- * worktree (DECISIONS 2026-07-20). Defaults to 0, so every existing repo keeps
+ * worktree. Defaults to 0, so every existing repo keeps
  * exactly its current behaviour — memory is an operator vouch, never inherited.
  */
 function migrateV4(db: Database): void {
@@ -382,6 +380,18 @@ function migrateV8(db: Database): void {
   db.run(`ALTER TABLE repos DROP COLUMN default_auto_approve`);
 }
 
+/**
+ * Migration **v9**: drop `repos.trusted`.
+ *
+ * Every repo loads its own `CLAUDE.md`, skills and `.claude/` config. The flag
+ * existed to withhold that from repos an operator had not vouched for, which is a
+ * question that does not arise: Condotto runs on one team's machine against their
+ * own repos, and refusing to read the conventions they wrote was ceremony.
+ */
+function migrateV9(db: Database): void {
+  db.run(`ALTER TABLE repos DROP COLUMN trusted`);
+}
+
 /** Add `column` to `table` only if absent (idempotent ALTER — SQLite has no
  *  `ADD COLUMN IF NOT EXISTS`). Used by the baseline migration to evolve tables
  *  a pre-runner DB already created. */
@@ -427,7 +437,8 @@ export class Store {
       migrateV6, // v6: sessions.plan_mode for the per-thread plan-mode posture.
       migrateV7, // v7: drop repos.test_cmd/land_cmd/deploy_cmd (the agent runs its own).
       migrateV8, // v8: drop the approvals table + the auto-approve / worktree-write columns.
-      // v9+: append new migrations here. They only ever run on a store already
+      migrateV9, // v9: drop repos.trusted — every repo loads its own project config.
+      // v10+: append new migrations here. They only ever run on a store already
       // at the prior version, so they can be plain forward DDL — no IF NOT EXISTS
       // gymnastics.
     ];
@@ -468,7 +479,6 @@ export class Store {
     costCapUsd?: number;
     defaultModel?: string;
     defaultEffort?: string;
-    trusted?: boolean;
     subagents?: boolean;
     workflows?: boolean;
     memory?: boolean;
@@ -477,16 +487,15 @@ export class Store {
       .query(
         `INSERT INTO repos
            (id, name, path, default_branch, safe_bash_allowlist, cost_cap_usd,
-            default_model, default_effort, trusted, memory,
+            default_model, default_effort, memory,
             default_subagents, default_workflows)
          VALUES ($id, $name, $path, $branch, $allow, $cap,
-                 $model, $effort, $trusted, $memory,
+                 $model, $effort, $memory,
                  $subagents, $workflows)
          ON CONFLICT(name) DO UPDATE SET
            path = $path, default_branch = $branch, safe_bash_allowlist = $allow,
            cost_cap_usd = $cap,
-           default_model = $model, default_effort = $effort, trusted = $trusted,
-           memory = $memory,
+           default_model = $model, default_effort = $effort, memory = $memory,
            default_subagents = $subagents, default_workflows = $workflows`,
       )
       .run({
@@ -498,7 +507,6 @@ export class Store {
         cap: repo.costCapUsd ?? null,
         model: repo.defaultModel ?? null,
         effort: repo.defaultEffort ?? null,
-        trusted: repo.trusted ? 1 : 0,
         memory: repo.memory ? 1 : 0,
         subagents: repo.subagents === undefined ? null : repo.subagents ? 1 : 0,
         workflows: repo.workflows === undefined ? null : repo.workflows ? 1 : 0,
@@ -540,7 +548,7 @@ export class Store {
     const row = this.db
       .query<RawRepoRow, { name: string }>(
         `SELECT id, name, path, default_branch, cost_cap_usd,
-                default_model, default_effort, trusted, memory,
+                default_model, default_effort, memory,
                 default_subagents, default_workflows
          FROM repos WHERE name = $name`,
       )
@@ -554,7 +562,6 @@ export class Store {
       cost_cap_usd: row.cost_cap_usd,
       default_model: row.default_model,
       default_effort: row.default_effort,
-      trusted: row.trusted,
       memory: row.memory,
       default_subagents: row.default_subagents,
       default_workflows: row.default_workflows,
@@ -708,7 +715,7 @@ export class Store {
   /**
    * Atomically move a session to 'active' only if it is not stopped. Returns
    * false if it was stopped — a stop that landed while a turn was starting must
-   * never be resurrected (DESIGN.md: stop is irreversible mid-flight).
+   * never be resurrected.
    */
   tryActivate(id: string): boolean {
     return (
@@ -784,7 +791,7 @@ export class Store {
 
 
   /**
-   * Cumulative spend for a session in USD (runaway cap, DESIGN §4). Sums the
+   * Cumulative spend for a session in USD (runaway cap, DESIGN ). Sums the
    * per-turn `cost_usd` the harness reported; SQLite returns NULL for an empty
    * set, coalesced to 0.
    */
@@ -817,7 +824,7 @@ export class Store {
   /**
    * Sessions whose worktree is due for collection: explicitly clean-stopped
    * (`cleanup_at` set) and past that instant. The `status = 'stopped'` guard bakes
-   * the park-and-resume invariant (§2 journey 5) into the query itself — a
+   * the park-and-resume invariant into the query itself — a
    * live/parked row can never surface here even if a `cleanup_at` somehow lingered.
    * ISO-8601 UTC strings compare lexically == chronologically, so the `<=` is safe.
    */
@@ -964,7 +971,7 @@ export class Store {
   /**
    * The effective role of a principal in a channel. A channel-scoped mapping
    * wins over a '*' mapping; absent any mapping, everyone is a `member`
-   * (they can converse; only architects hold command authority — DESIGN.md §2).
+   * (they can converse; only architects hold command authority.
    */
   roleOf(principal: string, channelId: string): Role {
     const rows = this.db

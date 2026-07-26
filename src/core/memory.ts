@@ -6,7 +6,7 @@ import { dirname, join, resolve, sep } from "node:path";
 // Memory manager: one Condotto-owned memory directory per (repo, channel).
 //
 // This is the ONE place the agent may write outside its worktree, so it is also
-// the one place that has to earn it (DECISIONS 2026-07-20).
+// the one place that has to earn it.
 //
 // WHY IT EXISTS. The SDK's auto-memory feature loads `MEMORY.md` into the system
 // prompt at session start and the agent maintains it with ordinary Write/Edit.

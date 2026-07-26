@@ -1,4 +1,4 @@
-// Port-boundary check (DESIGN.md §7 "port erosion"): platform imports are
+// Port-boundary check: platform imports are
 // allowed only under src/adapters/. A Slack or Agent SDK type in the core is a
 // review-blocking bug even while each seam has a single adapter.
 //
@@ -14,7 +14,7 @@ const ADAPTERS_PREFIX = join("src", "adapters") + sep;
 const FORBIDDEN_IMPORTS = ["@slack/", "@anthropic-ai/claude-agent-sdk"];
 // `<@` is Slack's mention markup. The core refers to people with `mentionToken`
 // and lets the adapter render it natively; minting surface markup in the core is
-// the port erosion that produced the raw-id leak (DECISIONS 2026-07-20).
+// the port erosion that produced the raw-id leak.
 const FORBIDDEN_CORE_TOKENS = ["thread_ts", "block_actions", "xoxb-", "xapp-", "<@"];
 /** The composition root is the one non-adapter file allowed to import adapters. */
 const COMPOSITION_ROOTS = new Set([join("src", "daemon.ts")]);

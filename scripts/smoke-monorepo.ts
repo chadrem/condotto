@@ -1,8 +1,7 @@
 // Smoke test: monorepo sub-project sessions against the REAL SDK.
 //
 // This exists to answer questions no unit test can, because they are questions
-// about the Agent SDK's own behaviour, not ours (DECISIONS 2026-07-20 "Not
-// verified"):
+// about the Agent SDK's own behaviour, not ours:
 //
 //   Q1  With cwd in a sub-project and settingSources:["project"], does the SDK
 //       discover the repo ROOT's CLAUDE.md by walking up — or only the one at
@@ -171,7 +170,7 @@ async function turn(label: string, text: string, opts?: Record<string, unknown>)
   console.log(`\n=== ${label} ===`);
   let reply = "";
   for await (const ev of session.turn(
-    { text, harness: { projectConfig: true, ...opts } }, // projectConfig = trusted repo
+    { text, harness: { ...opts } },
     gate,
   )) {
     if (ev.kind === "reply") reply = ev.text;

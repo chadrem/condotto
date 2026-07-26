@@ -23,53 +23,14 @@ It is an installable open-source daemon: a ports-and-adapters core in `src/core/
 plus a Slack adapter (`src/adapters/slack/`) and a Claude Code adapter
 (`src/adapters/claude-code/`).
 
-## In flight: the 2026-07-26 simplification
+## The security model, in full
 
-The security model was built for an untrusted, multi-tenant world. This install
-is a trusted team on a dedicated server, so most of it is friction rather than
-safety. Architects get god mode. Delete this whole section when the phases are
-done.
-
-- [x] **Phase 0 — docs.** Delete DESIGN/PLAN/DECISIONS, fold the load-bearing SDK
-      facts in here, make README self-contained.
-- [x] **Phase 1 — test/land/deploy.** Delete `core/command-runner.ts`, the
-      `test_cmd`/`land_cmd`/`deploy_cmd` config keys, `@Condotto land`/`deploy`,
-      `runShip` and their store columns (migration v7). That path existed only
-      because shell was gated; the agent runs its own tests now. Retired config
-      keys are ignored rather than rejected, so an old `condotto.toml` still
-      boots. `safeBashAllowlist` outlives it by one phase and dies in phase 2,
-      where it is a policy concept rather than a config one.
-- [x] **Phase 2 — collapse `policy.ts`.** Two answers, allow or deny. The gate
-      tier, `PolicyConcern`, production-data detection, the bash allowlist,
-      `workflowWrite` and `evaluateConfined` are gone; origin (`agentId`,
-      `escaped`) is audit detail rather than a policy input. The floor tests were
-      widened at the same time, since they are now the only security tests in the
-      repo, and the widening found one real gap: bare `set` dumps the environment
-      and was not floored.
-- [x] **Phase 3 — delete the approval loop.** The defer/resume handshake, the
-      approvals table, Approve/Deny blocks, the prior-approval short-circuit,
-      `@Condotto auto-approve`, `@Condotto workflows write`, the budget-capped
-      approval resume, `requestApproval` on the surface port, and the `deferred`
-      turn event (migration v8). A turn is one query that runs to completion.
-- [x] **Phase 4 — only architects drive.** A non-architect's message is framed,
-      recorded and held on the live session entry, then prepended to the next
-      architect turn. In memory on purpose: a restart loses the queue, and the
-      messages are still sitting in the thread.
-- [ ] **Phase 5 — trust stops being per-repo ceremony.** Drop the `trusted` flag;
-      every repo loads its own `CLAUDE.md`, skills and `.claude/`. Drop
-      `checkSkillArgs`. Keep `disableAllHooks` and `disableSkillShellExecution`
-      pinned: a repo's checked-in shell runs before any hook, which is the one
-      path that walks straight past the floor.
-- [ ] **Phase 6 — the last sweep.** Clean up the ~48 stale `DESIGN.md`/
-      `DECISIONS.md` references in code comments, and delete this section.
-
-**Still in the tree until phase 5 lands:** per-repo `trusted`, and the skill
-argument charset refusal. Everything else on the list above is done.
-
-## What survives, and why
-
-These are the whole security model after the simplification. Nothing here ever
-asks a human anything, which is the point.
+Condotto runs on one team's machine, against their own repos, driven by people
+they trust. On 2026-07-26 the approval loop was deleted along with everything
+built to support it: the gate tier, per-call Approve/Deny, architect
+auto-approve, the bash allowlist, the production-data gate, the read-only
+confinement for subagents, and the per-repo `trusted` flag. What follows is all
+of it now. Nothing here ever asks a human anything, which is the point.
 
 - **Worktree containment.** Every path-bearing tool call resolves inside the
   session's worktree. The boundary is the worktree ROOT, which may sit above the
@@ -95,6 +56,13 @@ asks a human anything, which is the point.
   the one write it permits, `policy.ts` flags that decision with `plan: true`, and
   the session manager posts the content into the thread. `@Condotto plan off` is
   how it ends — there is no button.
+
+**Deliberately outside the boundary, and it is worth knowing where:** a repo's
+checked-in hooks, a skill's inline `` !`cmd` ``, and skill arguments all expand
+BEFORE the model and before our hook, so `policy.ts` never sees them. That is
+accepted: they are your repo, your skills, your typing. It is only worth
+remembering because the agent can write files in the repo too, so in principle it
+could write itself a hook. Every write is in the audit log.
 
 ## Architecture (the shape to preserve)
 

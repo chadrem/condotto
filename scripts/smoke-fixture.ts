@@ -2,7 +2,7 @@
 //
 // The smokes drive a REAL agent with a real shell: they create worktrees, run
 // turns, and some of them write files. They must never be able to do that to a
-// repo someone cares about (CLAUDE.md build-time safety, DESIGN.md §8).
+// repo someone cares about (CLAUDE.md, build-time safety).
 //
 // So they don't borrow the operator's setup at all. This module builds their
 // whole world under one scratch directory and puts it in a KNOWN state on every

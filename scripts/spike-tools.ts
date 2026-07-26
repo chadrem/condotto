@@ -34,7 +34,7 @@
 // Throwaway fixture only — never a real repo (CLAUDE.md build-time safety).
 //
 // RESULTS — run 2026-07-26, agent-sdk 0.3.220 / claude-code 2.1.220, model
-// claude-opus-5[1m]. Recorded here as well as in DECISIONS.md so a re-run has
+// claude-opus-5[1m]. Recorded here so a re-run has
 // something to diff against:
 //
 //   Q1  The shipped posture (workflows ON) reaches the model with 27 tools and

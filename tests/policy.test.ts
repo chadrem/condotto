@@ -221,7 +221,7 @@ describe("policy: bash", () => {
   test("linking an out-of-tree path INTO the worktree is hard-denied", () => {
     // Containment is lexical (offendingPath never realpaths), so `<wt>/esc -> /`
     // would make an auto-allowed `Read <wt>/esc/etc/passwd` lexically legal and
-    // post a host file into the thread. DESIGN §4 named this mitigation
+    // post a host file into the thread. DESIGN  named this mitigation
     // ("don't let `ln -s` auto-approve"); it was missing until 2026-07-20.
     for (const c of [
       "ln -s / esc",

@@ -16,7 +16,7 @@ const log = (msg: string) => console.log(`${new Date().toISOString()} ${msg}`);
 
 /** How often the daemon sweeps for collectible worktrees. A boot sweep
  *  plus this tick reclaim clean-stopped (past-retention) and orphaned trees; the
- *  sweep never touches a live/parked worktree (§2 journey 5). */
+ *  sweep never touches a live/parked worktree. */
 const WORKTREE_GC_INTERVAL_MS = 60 * 60 * 1000; // hourly
 
 /** The program name to show in `--help`: the compiled binary's own filename
@@ -177,7 +177,7 @@ async function main(): Promise<void> {
 
   // Worktree GC: sweep once at boot — before any surface is live, so a
   // reactivation can't race the initial teardown — then hand off to a timer below.
-  // Never touches a live/parked worktree (§2 journey 5); best-effort, never fatal.
+  // Never touches a live/parked worktree; best-effort, never fatal.
   {
     const { cleaned, orphans } = await manager
       // orphanMinAgeMs: 0 — no surface is live yet, so no assign can be mid-flight;

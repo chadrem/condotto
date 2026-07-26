@@ -1,11 +1,11 @@
-// Domain types and the two ports (surface, harness). See DESIGN.md §3.
+// Domain types and the two ports (surface, harness).
 // Nothing in this file (or anywhere under core/) may reference Slack or the
 // Agent SDK — platform types live behind adapters/ (enforced by check-ports).
 
 // ---------------------------------------------------------------------------
 // Identity
 
-/** Surface-verified identity. Authority attaches ONLY to this (DESIGN.md §4). */
+/** Surface-verified identity. Authority attaches ONLY to this. */
 export interface Principal {
   surface: string; // "slack" | "teams" | ...
   externalId: string; // platform-stable user id, e.g. "U0123ABC"
@@ -42,7 +42,7 @@ export function mentionToken(p: Principal | string): string {
 export const MENTION_TOKEN_RE = /@\[\[([a-z0-9_]+:[^\][\s]{1,64})\]\]/gi;
 
 /**
- * Command authority (DESIGN.md §2). Only `architect` may approve gated actions,
+ * Command authority. Only `architect` may approve gated actions,
  * order landings/deploys, or stop sessions. `member` converses; `observer` is
  * read-as-context only. Anyone not explicitly mapped defaults to `member`.
  */
@@ -78,7 +78,7 @@ export type CommandName =
   // interrupt the session's IN-FLIGHT turn (a wedged/over-cap multi-agent
   // workflow) without ending the session, mirroring `stop`'s architect-only,
   // thread-scoped shape. The detached background task is halted via q.interrupt()
-  // and its spend is drained into the ledger (spike 2026-07-19, DECISIONS.md).
+  // and its spend is drained into the ledger (spike 2026-07-19).
   | "cancel"
   // wipe the agent's conversation context WITHOUT ending the session: the thread,
   // worktree, branch, uncommitted work, settings, roles, memory and cost ledger all
@@ -257,7 +257,7 @@ export type TurnEvent =
   /**
    * A turn that ended without a usable reply. `costUsd` is carried because an
    * error result (including the SDK's `error_max_budget_usd`) still reports the
-   * spend, and the core's cost ledger must count it (DESIGN §4 runaway cap).
+   * spend, and the core's cost ledger must count it.
    */
   | { kind: "error"; message: string; costUsd?: number }
   /**
@@ -272,11 +272,11 @@ export type SessionHandle = unknown;
 /**
  * Per-turn harness capability configuration. Everything here is OPAQUE to
  * the core: it persists these values and passes them through, never interpreting
- * them as policy (DESIGN §1 north-star, §4 ports). The adapter maps `model`
+ * them as policy. The adapter maps `model`
  * tokens to concrete SDK model IDs and validates `effort`; `subagents`/`workflows`
- * toggle multi-agent tools (still behind the §4 gate — a PreToolUse hook fires
+ * toggle multi-agent tools (every call still hits the PreToolUse hook
  * inside subagents too, so their tool calls are gated exactly like the main
- * agent's); `projectConfig` loads a TRUSTED repo's settings/skills. The core
+ * agent's). The core
  * validates `model`/`effort` against `HarnessCapabilities` before they ever
  * reach here (a bad value is rejected at the command, never silently applied).
  */
@@ -293,12 +293,11 @@ export interface HarnessTurnOptions {
    * `permissionMode: "bypassPermissions"` — which, contrary to its name, routes the
    * background workflow's sub-agent tool calls THROUGH our PreToolUse hook (with an
    * `agent_id`) instead of the SDK's default-deny, so the hook still gates them
-   * read-only (spike 2026-07-18, DECISIONS.md). The main agent's defer→approve→
+   * read-only (spike 2026-07-18). The main agent's defer→approve→
    * resume loop is unaffected (hooks outrank permission mode). Implies subagents.
    */
   workflows?: boolean;
   /** Load the repo's project settings + skills. TRUSTED repos only. */
-  projectConfig?: boolean;
   /**
    * Absolute directory for this session's durable agent memory, or omitted when
    * the repo has not been vouched for memory. Supplied by the core only after
@@ -308,7 +307,7 @@ export interface HarnessTurnOptions {
    * is pinned OFF, not merely unreachable: the feature loads regardless of
    * `settingSources`, so leaving it at its default would have the agent quietly
    * writing to a cwd-keyed directory that dies with the worktree — which is what it
-   * has been doing all along (DECISIONS 2026-07-20).
+   * has been doing all along.
    */
   memoryDir?: string;
   /**
@@ -487,15 +486,6 @@ export interface RepoConfig {
   defaultModel?: string;
   defaultEffort?: string;
   /**
-   * Trust flag. A trusted repo loads its own project config —
-   * `CLAUDE.md`, skills, `.claude/agents`, and daemon-configured MCP — while the
-   * §4 gate still applies. Default (false/undefined) keeps the untrusted-repo
-   * isolation (`settingSources: []`). Set ONLY for repos the admin vouches for:
-   * it also loads that repo's permissions/hooks/MCP. A throwaway repo used to
-   * shake out a new install should stay untrusted.
-   */
-  trusted?: boolean;
-  /**
    * Per-repo default for the architect self-approve setting. Seeded onto
    * each new session (the architect can then toggle it per thread with
    * `@Condotto auto-approve on|off`). `undefined` = fall back to the daemon-wide
@@ -509,7 +499,7 @@ export interface RepoConfig {
    * on). `workflows` implies `subagents` — the seed asserts that invariant, so
    * `workflows = true, subagents = false` still starts with subagents on.
    *
-   * NOT a vouch like `trusted` or `memory`: these widen how much work a session
+   * NOT a vouch like `memory`: these widen how much work a session
    * can do in parallel, not what authority it carries. Confined (subagent-,
    * workflow-, and escaped-origin) calls stay read-only under `evaluateConfined`
    * either way.
@@ -520,11 +510,11 @@ export interface RepoConfig {
    * Durable agent memory for this repo. When on, the session gets a
    * Condotto-owned memory directory (scoped per repo AND channel) that the SDK's
    * auto-memory feature reads at session start and the agent writes through the
-   * §4 gate, so knowledge compounds across threads instead of dying with each
+   *  gate, so knowledge compounds across threads instead of dying with each
    * worktree. Default (false/undefined) = off, and auto-memory is pinned off in
    * the harness rather than merely unreachable.
    *
-   * An operator VOUCH like `trusted`, not a per-session toggle: what one thread
+   * An operator VOUCH, not a per-session toggle: what one thread
    * records is loaded into the SYSTEM PROMPT of every later thread in that
    * channel — above `framing.ts`, and so outside the `user=`-header authority
    * rule. See DECISIONS 2026-07-20.

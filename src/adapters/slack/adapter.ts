@@ -69,7 +69,7 @@ export function slashEphemeralText(
 }
 
 // Slack surface adapter: Bolt over Socket Mode (outbound WebSocket, no public
-// URL — hard requirement, DESIGN.md §3). All Slack shapes (thread_ts, channel
+// URL — a hard requirement). All Slack shapes (thread_ts, channel
 // ids, Bolt payloads) stay inside this directory.
 //
 // Slack `ts` values are strings with significant leading zeros in the
@@ -80,8 +80,7 @@ export function slashEphemeralText(
 // encoding is private to this adapter (decoded again in post/update); the core
 // treats conversation ids as opaque strings.
 //
-// Verified live-doc fact (2026-07-18, contradicts DESIGN.md journey 1; logged
-// in DECISIONS.md): custom slash commands CANNOT be invoked inside a message
+// Verified live-doc fact (2026-07-18): custom slash commands CANNOT be invoked inside a message
 // thread — the client only offers them at top level, and the payload carries
 // no thread context. So:
 //   /condotto assign        -> creates a NEW conversation: we post an anchor
@@ -195,7 +194,7 @@ export function parseMentionCommand(
   // because the slash is not the FIRST CHARACTER of the message. That placement is
   // the whole reason for the mention-first spelling: Slack intercepts a message
   // that BEGINS with `/` as one of its own commands, and custom slash commands
-  // cannot run inside a thread at all (DECISIONS 2026-07-18).
+  // cannot run inside a thread at all.
   //
   // The `/` is stripped here — the core speaks skill NAMES, and only the harness
   // adapter knows that Claude Code spells an invocation with a leading slash.
@@ -335,7 +334,7 @@ export class SlackAdapter implements SurfaceAdapter {
     // `/condotto status` (daemon-wide operator dashboard) and `/condotto stop`
     // (session list + how to stop in-thread) are EPHEMERAL operator-console
     // queries: the core renders the text, and we deliver it privately via
-    // `respond` — never a public channel post (DESIGN §8-(5)).
+    // `respond` — never a public channel post).
     const ephemeral = slashEphemeralText(sub, author, channelId, this.operator);
     if (ephemeral !== null) {
       await respond({ response_type: "ephemeral", text: renderMrkdwn(ephemeral) });
@@ -542,7 +541,7 @@ export class SlackAdapter implements SurfaceAdapter {
    * An Approve/Deny click. Bolt has already verified the request signature, so
    * `body.user.id` is a genuine platform identity. We do the ephemeral
    * "architects only" gate here for UX; the daemon re-verifies authority
-   * server-side before it acts on the emitted decision (DESIGN.md §4).
+   * server-side before it acts on the emitted decision.
    */
 
   /**

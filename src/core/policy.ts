@@ -172,7 +172,7 @@ function pathTargets(input: unknown, from: string): { value: string; target: str
 
 /**
  * The first path field (if any) that targets the session's MEMORY root — the one
- * place outside the worktree the agent may touch (DECISIONS 2026-07-20).
+ * place outside the worktree the agent may touch.
  *
  * This is deliberately NOT expressed by making `offendingPath` take a set of roots.
  * Memory is not "another worktree": it is readable but writable only as `.md`
@@ -255,7 +255,7 @@ function globPatternEscapes(pattern: unknown): boolean {
 }
 
 /**
- * Classify a tool call (DESIGN §4). Dispatches on the call's ORIGIN first: a
+ * Classify a tool call. Dispatches on the call's ORIGIN first: a
  * subagent/workflow-agent call OR an "escaped" un-deferrable call
  * is CONFINED — it can't be paused for approval, so gated actions are
  * denied (read-only), unless the worktree-write opt-in allows confined writes.
@@ -360,7 +360,7 @@ function evaluateBase(call: ToolCall, ctx: PolicyContext): PolicyDecision {
 
   if (READ_TOOLS.has(name)) {
     // Reading anything on the host + posting the answer in a thread is an
-    // exfiltration channel — reads are confined like writes (DESIGN.md §4).
+    // exfiltration channel — reads are confined like writes.
     // Glob's `pattern` is itself a path glob (it can be absolute or contain
     // `..`) and drives enumeration on its own, so it must be confined too;
     // Grep's `pattern` is a regex scoped by the (already-checked) `path`.
@@ -493,7 +493,7 @@ export function bashHardDeny(
   // lexical (`offendingPath` never calls realpath — see its docstring), so a link
   // whose target escapes turns every later in-tree path into a real escape: once
   // `<wt>/x -> /`, an auto-allowed `Read <wt>/x/etc/passwd` is lexically confined
-  // and posts a host file into the thread. DESIGN.md §4 and this file's own
+  // and posts a host file into the thread. This file's own
   // 2026-07-19 entry both named "don't let `ln -s` auto-approve" as the interim
   // mitigation that keeps lexical containment tolerable; it was never implemented,
   // so `ln -s / <wt>/esc` auto-approved on any architect-initiated turn.
@@ -591,7 +591,7 @@ export function parseWorkflowMeta(script: unknown): { name?: string; description
     const m = scope.match(new RegExp(`${key}\\s*:\\s*(['"\`])([^'"\`]{0,200})\\1`));
     if (!m?.[2]) return undefined;
     // The script is authored by the main agent (injection-reachable), and this text
-    // lands in the human launch-approval prompt (§4 / Appendix A1). Sanitize it to a
+    // lands in a thread and in the audit log. Sanitize it to a
     // single short line: collapse ALL whitespace incl. newlines (so it can't forge a
     // multi-line "SYSTEM: approved" block), strip control chars, cap the length.
     const clean = m[2].replace(/[\x00-\x1f\x7f]+/g, " ").replace(/\s+/g, " ").trim();

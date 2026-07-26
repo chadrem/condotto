@@ -2,9 +2,8 @@
 // session has a real tool list? (Blocks Milestone 1's "re-probe, then delete, the
 // workflow-Grep sentence in the system prompt".)
 //
-// The claim under test is recorded in DECISIONS.md (2026-07-18, M3.6) and repeated
-// in three places — `condottoSystemPrompt`, DESIGN.md §8's "Known SDK limitation",
-// and DESIGN.md's workflow-confinement passage:
+// The claim under test was recorded on 2026-07-18 and repeated in three places —
+// `condottoSystemPrompt` plus two passages of the (since-deleted) design doc:
 //
 //     "Read/Glob route through our hook and are confined reliably; Grep/Bash/Write
 //      are frequently denied by the SDK's task-permission layer UPSTREAM of our
@@ -81,17 +80,17 @@
 //   control is confounded by time. What IS established: refusals arrive in bursts,
 //   are not caused deterministically by gating, and cannot be provoked on demand.
 //
-//   SIDE FINDING (out of scope — logged to PLAN.md): `StructuredOutput`, the tool
+//   SIDE FINDING (out of scope — logged for later): `StructuredOutput`, the tool
 //   `agent(prompt, {schema})` forces a workflow agent to call, was refused on EVERY
 //   observed attempt in BOTH postures (a dozen-plus). A schema'd workflow returns
 //   empty results and the main agent synthesizes "the agents completed without
 //   returning anything" over work that actually succeeded.
 //
-//   SIDE FINDING 2 (out of scope — logged to PLAN.md): the SDK now emits
+//   SIDE FINDING 2 (out of scope — logged for later): the SDK now emits
 //   `CLAUDE_SDK_CAN_USE_TOOL_SHADOWED` — "canUseTool will not be invoked:
 //   permissionMode 'bypassPermissions' auto-approves every tool call before the
 //   callback is consulted." If accurate, the adapter's `canUseTool` backstop is
-//   inert in the workflows-on posture, which contradicts DESIGN §8. Needs its own
+//   inert in the workflows-on posture, which contradicts DESIGN  Needs its own
 //   probe before anyone edits DESIGN — the PreToolUse hook, which is the actual
 //   boundary, is unaffected either way.
 //

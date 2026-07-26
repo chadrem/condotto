@@ -8,7 +8,7 @@ const CONDOTTO_EXCLUDE_BLOCK = `# condotto: daemon scratch (plan files) — neve
 
 // Worktree manager: one git worktree per session, at a stable absolute path.
 // The harness keys session storage by encoded cwd — a moved worktree loses the
-// session (DESIGN.md §5), so paths here are derived from the session id and
+// session, so paths here are derived from the session id and
 // never change.
 
 async function git(args: string[], cwd?: string): Promise<{ ok: boolean; out: string }> {

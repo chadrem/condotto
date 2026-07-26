@@ -39,7 +39,7 @@
 // Throwaway fixture only — never a real repo (CLAUDE.md build-time safety).
 //
 // RESULTS — run 2026-07-25, agent-sdk 0.3.220 / claude-code 2.1.220. Recorded here
-// as well as in DECISIONS.md so a re-run has something to diff against:
+// here so a re-run has something to diff against:
 //
 //   Q4  YES  `prompt: "/name args"` dispatches a `disable-model-invocation: true`
 //            skill, with "SlashCommand" still in disallowedTools. The feature works.

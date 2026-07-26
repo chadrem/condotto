@@ -17,7 +17,7 @@
 //   Q3  Does the SDK's own permission layer deny the write UPSTREAM of our hook
 //       when the memory dir is not in `additionalDirectories`? (There is a known
 //       precedent: the SDK's task permission denies some subagent calls above our
-//       gate — DESIGN §8 "Known SDK limit".)
+//       gate — DESIGN  "Known SDK limit".)
 //   Q4  Does `additionalDirectories: [memoryDir]` make the write succeed?
 //   Q5  Does a LATER session actually load MEMORY.md back?
 //

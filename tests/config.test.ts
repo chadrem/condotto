@@ -127,29 +127,6 @@ path = "/srv/bare"
     );
   });
 
-  test("per-repo default model/effort and the trust flag parse", () => {
-    const path = tomlFile(`
-[[repos]]
-name = "webapp"
-path = "/srv/webapp"
-default_model = "sonnet"
-default_effort = "xhigh"
-trusted = true
-
-[[repos]]
-name = "bare"
-path = "/srv/bare"
-`);
-    const cfg = loadConfig({}, path);
-    const webapp = cfg.repos.find((r) => r.name === "webapp")!;
-    expect(webapp.defaultModel).toBe("sonnet");
-    expect(webapp.defaultEffort).toBe("xhigh");
-    expect(webapp.trusted).toBe(true);
-    const bare = cfg.repos.find((r) => r.name === "bare")!;
-    expect(bare.defaultModel).toBeUndefined();
-    expect(bare.defaultEffort).toBeUndefined();
-    expect(bare.trusted).toBe(false);
-  });
 
   test("per-repo subagents/workflows are TRI-STATE: absent ≠ false", () => {
     // A repo that says nothing must fall through to the daemon default, which is
@@ -184,13 +161,6 @@ path = "/srv/bare"
     expect(bare.workflows).toBeUndefined();
   });
 
-  test("a non-boolean trusted fails fast rather than silently disabling trust", () => {
-    // trusted opens repo config/MCP, so a typo like trusted = "true" (quoted)
-    // must be surfaced, not coerced to a silent false.
-    expect(() => loadConfig({}, tomlFile(`[[repos]]\nname = "r"\npath = "/x"\ntrusted = "yes"\n`))).toThrow(
-      /must be a boolean/,
-    );
-  });
 
   test("the per-repo memory vouch parses and defaults off", () => {
     const cfg = loadConfig(

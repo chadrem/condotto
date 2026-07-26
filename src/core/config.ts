@@ -42,7 +42,7 @@ export interface CondottoConfig {
   /**
    * Daemon-wide default model/effort tokens, used when a repo sets
    * none. Opaque tokens the harness adapter validates; the north-star wants the
-   * implementer to be first-class, so the default is Opus 5 + xhigh (DESIGN §1, §8).
+   * implementer to be first-class, so the default is Opus 5 + xhigh.
    */
   defaultModel: string;
   defaultEffort: string;
@@ -76,7 +76,7 @@ export interface SlackCredentials {
  *                  ordinary individual use of Claude Code and the Agent SDK, so
  *                  this is the single-operator path: one architect driving their
  *                  own sessions. Supported, not deprecated — just not for teams.
- * See DECISIONS.md 2026-07-20 and the links in README ("Authenticate Claude").
+ *
  */
 export type AuthMode = "api_key" | "subscription";
 
@@ -98,7 +98,7 @@ export const DEFAULT_COST_CAP_USD = 50;
 export const DEFAULT_MAX_CONCURRENT_TURNS = 6;
 /**
  * Default implementer model/effort. Opus 5 + xhigh: the implementer must be
- * first-class for a PM to build a real feature (DESIGN §1 north-star), and
+ * first-class for a PM to build a real feature, and
  * Anthropic's own guidance is to step up to xhigh for demanding coding and
  * agentic work. Opaque tokens — the harness adapter maps/validates them.
  */
@@ -253,13 +253,9 @@ const REPO_KEYS = [
   "name",
   "path",
   "default_branch",
-  "test_cmd",
-  "land_cmd",
-  "deploy_cmd",
   "cost_cap_usd",
   "default_model",
   "default_effort",
-  "trusted",
   "subagents",
   "workflows",
   "memory",
@@ -283,27 +279,15 @@ function parseRepoEntry(entry: unknown, where: string): RepoConfig {
     // was gated; now the agent runs its own tests. An existing config that still
     // declares them boots fine — the keys are ignored, not rejected.
     costCapUsd: optPosNumber(e.cost_cap_usd, `${where}.cost_cap_usd`),
-    // Opaque model/effort tokens (validated by the harness adapter) and the
-    // trust flag. `trusted` must be an explicit boolean true — a truthy
-    // string won't do, since it opens a repo's config/MCP to the agent. optBool
-    // fails fast on a non-boolean (e.g. trusted = "true"), so a typo can't
-    // silently disable trust the operator thinks they enabled.
-    defaultModel: optString(e.default_model, `${where}.default_model`),
-    defaultEffort: optString(e.default_effort, `${where}.default_effort`),
-    trusted: optBool(e.trusted, `${where}.trusted`) === true,
-    // Per-repo default for architect self-approve. Only an explicit boolean
-    // pins it; anything else (absent) = fall back to the daemon-wide default.
-    // Per-repo harness posture, same tri-state rule: an explicit boolean pins
-    // it, absent falls through to the daemon default. Lets a sandbox repo run
-    // the full multi-agent posture while a repo you care about stays quieter.
+    // Opaque model/effort tokens, validated by the harness adapter.
+    // Per-repo harness posture is tri-state: an explicit boolean pins it, absent
+    // falls through to the daemon default.
     subagents: optBool(e.subagents, `${where}.subagents`),
     workflows: optBool(e.workflows, `${where}.workflows`),
-    // Durable agent memory for this repo (DECISIONS 2026-07-20). Like `trusted`
-    // this is an operator VOUCH, not a session toggle: memory a member's turn
-    // writes lands in the system prompt of every later session in that channel,
-    // above the framing rules — so the person who owns the install decides,
-    // once, per repo. Explicit boolean for the same reason as `trusted`: a typo
-    // must not silently enable it.
+    // Durable agent memory for this repo. An operator decision rather than a
+    // session toggle: what one thread writes lands in the system prompt of every
+    // later session in that channel, so the person who owns the install names the
+    // repos where that is wanted. Explicit boolean, so a typo cannot enable it.
     memory: optBool(e.memory, `${where}.memory`) === true,
   };
 }
@@ -348,7 +332,7 @@ function parseRepos(toml: Record<string, unknown>, configPath: string): RepoConf
 }
 
 /**
- * Admin role mappings (DESIGN.md §2). Three sources, merged and de-duped by
+ * Admin role mappings. Three sources, merged and de-duped by
  * (principal, scope): the `architects = [...]` array (surface-qualified principals
  * → architect at scope "*", the quick path), richer `[[roles]]` entries
  * ({principal, role, scope?}), and the `CONDOTTO_ARCHITECTS` env var (a comma/space

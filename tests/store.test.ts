@@ -21,7 +21,7 @@ const baseSession = {
 };
 
 describe("store sessions", () => {
-  test("(surface_id, conversation_id) is unique — forever, per DESIGN.md §5", () => {
+  test("(surface_id, conversation_id) is unique — forever", () => {
     const store = memoryStore();
     store.createSession({ ...baseSession, id: "s1", conversation_id: "1752241234.000567" });
     expect(() =>
@@ -193,19 +193,17 @@ describe("store sessions", () => {
   });
 
 
-  test("repo default model/effort and trust flag round-trip", () => {
+  test("repo default model/effort round-trip", () => {
     const store = memoryStore();
-    store.upsertRepo({ name: "r", path: "/tmp/r", defaultBranch: "main", defaultModel: "sonnet", defaultEffort: "xhigh", trusted: true });
+    store.upsertRepo({ name: "r", path: "/tmp/r", defaultBranch: "main", defaultModel: "sonnet", defaultEffort: "xhigh" });
     const r = store.getRepo("r")!;
     expect(r.default_model).toBe("sonnet");
     expect(r.default_effort).toBe("xhigh");
-    expect(r.trusted).toBe(1);
     // Upsert without them resets to null/untrusted (config stays authoritative).
     store.upsertRepo({ name: "r", path: "/tmp/r", defaultBranch: "main" });
     const r2 = store.getRepo("r")!;
     expect(r2.default_model).toBeNull();
     expect(r2.default_effort).toBeNull();
-    expect(r2.trusted).toBe(0);
   });
 
   test("repo default_subagents/default_workflows round-trip; undefined = null (v5)", () => {
@@ -251,6 +249,7 @@ describe("store sessions", () => {
     expect(cols).not.toContain("deploy_cmd");
     // v8 dropped the approval-era columns and the table itself.
     expect(cols).not.toContain("default_auto_approve");
+    expect(cols).not.toContain("trusted"); // v9
   });
 });
 
@@ -445,7 +444,7 @@ describe("store schema migrations", () => {
   // The current schema version == the number of migrations in the runner. Bump
   // this constant in lockstep whenever a migration is appended — the tests below
   // pin the runner's behavior to it.
-  const CURRENT_SCHEMA_VERSION = 8;
+  const CURRENT_SCHEMA_VERSION = 9;
 
   const migPath = (name: string): string => join(mkdtempSync(join(tmpdir(), "condotto-mig-")), name);
   const userVersion = (path: string): number => {
@@ -479,7 +478,7 @@ describe("store schema migrations", () => {
     // no data.
     const path = migPath("legacy.sqlite");
     let store = new Store(path);
-    store.upsertRepo({ name: "legacy", path: "/tmp/legacy", defaultBranch: "main", trusted: true });
+    store.upsertRepo({ name: "legacy", path: "/tmp/legacy", defaultBranch: "main" });
     store.createSession({ ...baseSession, id: "sL", conversation_id: "1.9" });
     store.setRole("slack:U_KEEP", "architect", "C9", "grant", "slack:U_BY");
     store.close();
@@ -506,13 +505,13 @@ describe("store schema migrations", () => {
     raw.run("ALTER TABLE sessions ADD COLUMN auto_approve INTEGER NOT NULL DEFAULT 1"); // v1-era, dropped at v8
     raw.run("ALTER TABLE sessions ADD COLUMN workflow_write INTEGER NOT NULL DEFAULT 0"); // v1-era, dropped at v8
     raw.run("ALTER TABLE repos ADD COLUMN default_auto_approve INTEGER"); // v1-era, dropped at v8
+    raw.run("ALTER TABLE repos ADD COLUMN trusted INTEGER NOT NULL DEFAULT 0"); // v1-era, dropped at v9
     raw.run("PRAGMA user_version = 0"); // rewind the stamp to the pre-runner state
     raw.close();
     expect(userVersion(path)).toBe(0);
 
     store = new Store(path);
     expect(userVersion(path)).toBe(CURRENT_SCHEMA_VERSION);
-    expect(store.getRepo("legacy")?.trusted).toBe(1);
     expect(store.getSession("sL")?.conversation_id).toBe("1.9");
     expect(store.isArchitect("slack:U_KEEP", "C9")).toBe(true);
     store.close();
