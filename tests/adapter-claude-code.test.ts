@@ -410,6 +410,71 @@ describe("claude-code adapter: tool posture", () => {
     expect(captured.disallowedTools).toContain("Workflow");
     expect(captured.disallowedTools).toContain("Agent");
   });
+
+  // The regression this pins: `allowedTools` is auto-approval, `tools` is
+  // availability. Naming a read in `allowedTools` also happened to supply it, so
+  // when workflows became the shipped default and emptied that list, the native
+  // runtime — which does not ship Grep/Glob in its default set — left the agent
+  // with no search at all (spike 2026-07-26, scripts/spike-tools.ts). An SDK
+  // upgrade must not be able to take search away again silently.
+  for (const workflows of [true, false]) {
+    test(`search tools are in the model's context with workflows ${workflows ? "on" : "off"}`, async () => {
+      let captured: any;
+      const q = fakeQuery(async function* (opts) {
+        captured = opts;
+        yield { type: "result", subtype: "success", result: "ok", total_cost_usd: 0 };
+      });
+      await collect(new ClaudeCodeAdapter(q), allowGate, { subagents: workflows, workflows });
+      // Availability is the `tools` option and nothing else. The preset value is
+      // NOT an alternative — measured byte-identical to omitting it.
+      expect(Array.isArray(captured.tools)).toBe(true);
+      for (const t of ["Read", "Glob", "Grep"]) expect(captured.tools).toContain(t);
+      // Gated actions stay reachable so the agent can propose them...
+      for (const t of ["Bash", "Write", "Edit"]) expect(captured.tools).toContain(t);
+      // ...but are never auto-approved.
+      for (const t of ["Bash", "Write", "Edit"]) expect(captured.allowedTools).not.toContain(t);
+      // The set does not depend on the workflow toggle: only auto-approval does.
+      expect(captured.allowedTools).toEqual(workflows ? [] : ["Read", "Glob", "Grep", "TodoWrite"]);
+    });
+  }
+
+  test("the reachable surface is an allowlist: runtime built-ins policy has no arm for are absent", async () => {
+    let captured: any;
+    const q = fakeQuery(async function* (opts) {
+      captured = opts;
+      yield { type: "result", subtype: "success", result: "ok", total_cost_usd: 0 };
+    });
+    await collect(new ClaudeCodeAdapter(q), allowGate, { subagents: true, workflows: true });
+    // These ship in the runtime's default set and every one of them gates into an
+    // unreadable raw-JSON card. `ExitWorktree` also takes
+    // `{action:'remove', discard_changes?: true}`, which no bash floor covers.
+    for (const t of [
+      "ExitWorktree",
+      "EnterWorktree",
+      "CronCreate",
+      "ScheduleWakeup",
+      "RemoteTrigger",
+      "PushNotification",
+      "SendMessage",
+      "DesignSync",
+      "TaskStop",
+    ]) {
+      expect(captured.tools).not.toContain(t);
+    }
+  });
+
+  test("disallowedTools still subtracts from the tools list (fan-out off ⇒ genuinely off)", async () => {
+    let captured: any;
+    const q = fakeQuery(async function* (opts) {
+      captured = opts;
+      yield { type: "result", subtype: "success", result: "ok", total_cost_usd: 0 };
+    });
+    await collect(new ClaudeCodeAdapter(q), allowGate, { subagents: false, workflows: false });
+    // Named in `tools` unconditionally — the per-turn toggle is the disallow list,
+    // and the SDK applies it ON TOP of `tools` (verified by probe, not assumed).
+    for (const t of ["Agent", "Task", "Workflow"]) expect(captured.tools).toContain(t);
+    for (const t of ["Agent", "Task", "Workflow"]) expect(captured.disallowedTools).toContain(t);
+  });
 });
 
 describe("claude-code adapter: plan mode", () => {

@@ -3315,3 +3315,85 @@ in the session and the one that most needs a ceiling.
    `bun run smoke:plan` passes end to end against the real SDK: read-only while
    planning, the ordinary write denied and absent from disk, the plan gated and
    readable, approval resuming into a real code change.
+
+## 2026-07-26 — The shipped posture had no search: `allowedTools` is not `tools`
+
+The gap audit (PLAN.md) opened with a claim worth disbelieving: under the default
+posture the implementer has no `Grep` and no `Glob`. It could `Read` a path it
+already knew and nothing else, so every "where is this used?" became a `grep`
+through `Bash` — gate-tier, an approval click, and raw stdout instead of a
+structured result. Probed and confirmed, then fixed the same day.
+
+**The mechanism.** `allowedTools` and `tools` are orthogonal: the first says which
+tools skip the permission callback, the second says which tools EXIST. They were
+easy to conflate because naming a tool in `allowedTools` also supplies it — so for
+as long as reads sat in `allowedTools`, availability came along for free. On
+2026-07-25 workflows became the shipped default, and workflows empty `allowedTools`
+(reads move onto the hook, or a background workflow sub-agent's read is
+shadow-denied — 2026-07-18). Emptying it dropped search off the session. The
+native runtime does not ship `Grep`/`Glob` in its default set; `sdk.d.ts` says so
+under `tools` ("native builds may provide search via Bash `find`/`grep` instead of
+the dedicated Grep/Glob tools"), and `allowedTools` had been quietly carrying them.
+Nothing announced the loss: no error, no warning, just a capable agent that had
+stopped being able to look things up.
+
+**Verified by probe** (`scripts/spike-tools.ts`, agent-sdk 0.3.220 / claude-code
+2.1.220, throwaway fixture, 11 probes reading the init `tools` array):
+
+- The shipped posture (workflows ON) reaches the model with 27 tools, neither of
+  them `Grep` or `Glob`. Workflows OFF has both — because `allowedTools` names them.
+- **`tools: {type:'preset',preset:'claude_code'}` is a no-op.** Byte-identical init
+  list to omitting the option; Grep/Glob still absent. PLAN.md had offered the
+  preset as an acceptable alternative to an explicit list. It is not one. "All
+  default Claude Code tools" means the runtime's defaults, which are precisely the
+  set that lacks search.
+- An explicit `tools: [...]` restores both under an empty `allowedTools`.
+- **`disallowedTools` still subtracts from an explicit `tools` list.** This was the
+  ship condition: `Agent`/`Task`/`Workflow` named in `tools` and disallowed came
+  back absent, so the per-turn capability toggles — the thing that makes "subagents
+  off" mean off — survive the change untouched.
+- A name the runtime does not expose is ignored, not an error.
+- `agents` and `permissionMode:"plan"` are unaffected by the explicit list.
+- `TodoWrite` is absent even when named in `tools`, in every configuration. The
+  earlier audit's incidental finding stands: `policy.ts`'s `TodoWrite` arm is dead
+  code in this runtime.
+
+**The fix.** `BASE_TOOLS` in the claude-code adapter, passed as `tools` on every
+turn, identical across postures — because what the agent HAS should not depend on
+whether an architect turned workflows on. `allowedTools` keeps its existing
+posture-dependent behaviour and its 2026-07-18 reason; nothing about the
+shadow-deny arrangement changed.
+
+**What that costs, deliberately.** An explicit list REPLACES the default set, so
+`BASE_TOOLS` is now also the reachable tool surface, and it drops everything the
+runtime ships that `policy.ts` has no arm for: `Cron*`, `ScheduleWakeup`,
+`RemoteTrigger`, `PushNotification`, `SendMessage`, `DesignSync`, `Monitor`,
+`ReportFindings`, `Task*` (the background-task manager, unrelated to the `Task`
+subagent alias) and `Enter`/`ExitWorktree`. Every one of them already gated into an
+unreadable "I want to use X" card with raw JSON, so no working capability was lost
+— and `ExitWorktree` takes `{action:'remove', discard_changes?: true}`, which no
+bash floor covers. This closes PLAN.md's separate "trim the reachable tool surface"
+item as a side effect; what remains of it is the narrower question of whether the
+hard-deny floor should back the allowlist up, which is now the only entry left.
+An allowlist fails CLOSED as the runtime's built-ins grow — the same reasoning that
+made `enumerateSkills` build its own list instead of filtering the runtime's.
+
+**The trap this sets.** Removing a tool from `BASE_DISALLOWED` no longer supplies
+it; it must also be added to `BASE_TOOLS`. Both PLAN.md items that would hit this
+(re-enabling `WebFetch`/`WebSearch`, classifying `TaskOutput`/`TaskStop`) now say so.
+
+**What surprised us.** Two things. The preset being a complete no-op — it reads
+like the safe, forward-compatible choice and it is the one option that does
+nothing. And the shape of the regression: the 2026-07-25 default flip was reviewed
+as a change to *permission posture*, and it silently changed *tool availability*
+too, because one option had been doing both jobs. Nothing in the test suite could
+have caught it — the tests asserted `allowedTools` was empty, which was correct and
+was the bug.
+
+**Verification.** 632 pass / 0 fail; `check:ports` clean. Six new assertions in
+`adapter-claude-code.test.ts` pin the `tools` array for both postures, that gated
+actions stay reachable but never auto-approved, that the dropped built-ins stay
+dropped, and that `disallowedTools` still subtracts. Live, through the real
+`ClaudeCodeAdapter` under the shipped posture: a search question produced one
+`Grep`, auto-allowed by the policy engine, answered correctly — no approval click.
+`bun run smoke:plan` still passes end to end.

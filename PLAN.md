@@ -48,7 +48,11 @@ Reading the `tools` array off the init message:
 | `allowedTools` omitted entirely | absent | absent |
 | `allowedTools: []` + explicit `tools: [...]` | present | present |
 
-`permissionMode` is not the variable. `allowedTools` is. The follow-up question,
+`permissionMode` is not the variable. `allowedTools` is — though only
+incidentally: a follow-up spike (2026-07-26, `scripts/spike-tools.ts`) showed the
+real control is `tools`, and that the `claude_code` preset value is a no-op. Fixed
+that day; the row for `allowedTools` omitted/empty is now moot because the adapter
+always passes an explicit `tools` allowlist. The follow-up question,
 whether the tools are merely *deferred* behind `ToolSearch` rather than gone, was
 settled by running a real turn that needed a search: the model called `ToolSearch`
 three times, found no match, and answered *"there's no way to search without Bash
@@ -91,24 +95,21 @@ fixtures under a `HOME` override rather than the operator's own directory.
 Small, mechanical, and the difference between a good session and a frustrating
 one. Everything here is adapter-local.
 
-- **Restore `Grep` and `Glob` under the shipped posture.** Pass an explicit
-  `tools` list (or the `claude_code` preset) in the query options.
-  `toolPosture` (`adapter.ts:205-223`) empties `allowedTools` whenever workflows
-  are on, which is the default, and `tools` is the orthogonal option that governs
-  availability. Do not undo the empty `allowedTools` itself: it exists to stop the
-  2026-07-18 shadow-deny of background workflow sub-agent reads, and that reason
-  still holds. `policy.ts:192` already classifies both as read tools, so nothing
-  in the core changes.
-  *Done when:* a workflows-on session's init `tools` array contains both, and a
-  member-turn search costs no approval click.
-
-- **Delete the wrong comment at `session-manager.ts:174-177`,** which tells the
-  agent that workflow agents cannot Grep because of an SDK background-task
-  restriction. It was this line all along.
+- **Re-probe, then delete, the comment at `session-manager.ts:171-188`,** which
+  tells the agent that workflow sub-agents cannot Grep because of an SDK
+  background-task restriction. The premise has changed under it: `Grep` was not in
+  the session's tool set at all when that was observed, and now is (2026-07-26).
+  Whether a background workflow sub-agent can *now* Grep is an open empirical
+  question — do not just delete the sentence on the strength of the old audit
+  claim; run a workflow and watch for a `Grep` call carrying an `agent_id`. The
+  same text appears in `DESIGN.md` (§8's "Known SDK limitation" and the
+  workflow-confinement passage), so fix all three or none.
 
 - **Re-enable `WebFetch` and `WebSearch`.** Remove them from `BASE_DISALLOWED`
-  (`adapter.ts:118`), behind a daemon-wide or per-repo `web` key if the choice
-  should be explicit. The whole gate path is already built and regression-tested
+  (`adapter.ts:118`) **and add them to `BASE_TOOLS`** — since 2026-07-26 the
+  adapter passes an explicit `tools` allowlist, so un-disallowing a tool no longer
+  supplies it. Behind a daemon-wide or per-repo `web` key if the choice should be
+  explicit. The whole gate path is already built and regression-tested
   and currently dead: `NETWORK_TOOLS` (`policy.ts:194`), the gate arm
   (`policy.ts:624`), the `describeCall` arms (`policy.ts:1003-1006`), the URL on
   the approval card (`render.ts:115`), `tests/policy.test.ts:331-333`. The system
@@ -117,11 +118,9 @@ one. Everything here is adapter-local.
   HTML.
 
 - **Decide `TodoWrite`.** It is unavailable in this runtime regardless of
-  configuration. Either surface an equivalent progress signal or drop the dead
+  configuration — re-confirmed 2026-07-26, absent even when named explicitly in
+  `tools`. Either surface an equivalent progress signal or drop the dead
   branch at `policy.ts:191`.
-
-- **Add a tool-posture regression test** pinning the init `tools` array for both
-  postures, so a future SDK upgrade cannot silently remove search again.
 
 ## Milestone 2 — Close the trusted-repo shell hole
 
@@ -309,8 +308,10 @@ Individually small, collectively the difference between tolerable and pleasant.
   and auto-backgrounds past 2, recovery needs `TaskOutput` which policy does not
   know, and a defer ends the query so an approved resume re-drives it in a new
   process where the task id no longer exists. Classify `TaskOutput` as read-only
-  and `TaskStop` as a gated kill, and add a per-repo `build_cmd` run daemon-side
-  through `CommandRunner` the way land and deploy already are.
+  and `TaskStop` as a gated kill — and note both now also need adding to
+  `BASE_TOOLS`, which since 2026-07-26 is what makes a tool reachable at all — and
+  add a per-repo `build_cmd` run daemon-side through `CommandRunner` the way land
+  and deploy already are.
 
 - **Stop billing a turn for every human message.** The `mentioned` flag is
   computed (`slack/adapter.ts:520`) and consulted only for unassigned threads, so
@@ -335,16 +336,21 @@ Individually small, collectively the difference between tolerable and pleasant.
 - **Handle `message_changed`,** which is currently dropped along with every other
   subtype, so an edited message silently diverges from what the agent saw.
 
-- **Route `AskUserQuestion` to `requestChoice`.** The model calls it, it hits the
-  catch-all gate and renders as raw JSON, and Condotto already owns a better
-  version of the primitive (`types.ts:190-197`) used only for its own repo picker.
+- **Route `AskUserQuestion` to `requestChoice`.** Condotto already owns a better
+  version of the primitive (`types.ts:190-197`), used only for its own repo picker.
+  Re-check the premise first: the 2026-07-26 spike found `AskUserQuestion` in no
+  posture's tool list, and naming it in `tools` did not add it, so "the model calls
+  it and it renders as raw JSON" may describe a tool this runtime never exposed.
 
-- **Trim the reachable tool surface.** `BASE_DISALLOWED` names four tools, so a
-  live session also exposes `ExitWorktree`, `EnterWorktree`, `Cron*`,
-  `ScheduleWakeup`, `RemoteTrigger`, `PushNotification`, `SendMessage`,
-  `DesignSync` and `Task*`, all unknown to policy and all rendering as
-  "I want to use X" plus raw JSON. `bashHardDeny` floors `rm -rf` but nothing
-  floors `ExitWorktree`, which takes `{action: 'remove', discard_changes?: true}`.
+- **Decide whether the tool-surface trim needs a policy floor behind it.** The
+  `BASE_TOOLS` allowlist added 2026-07-26 removed `ExitWorktree`, `EnterWorktree`,
+  `Cron*`, `ScheduleWakeup`, `RemoteTrigger`, `PushNotification`, `SendMessage`,
+  `DesignSync`, `Monitor`, `ReportFindings` and `Task*` from the model's context,
+  so none of them is reachable. What is still missing is defence in depth:
+  `bashHardDeny` floors `rm -rf`, but nothing in `policy.ts` floors
+  `ExitWorktree`, which takes `{action: 'remove', discard_changes?: true}` — so
+  the containment rests on one adapter list rather than on the hard-deny floor
+  the rest of §4 uses. Cheap to add; decide if the layering is worth it.
 
 - **Notice compaction.** Auto-compaction works for free and the default model is
   1M-context, so nothing breaks; what is missing is knowing. `compact_boundary`

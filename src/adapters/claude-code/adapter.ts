@@ -102,6 +102,11 @@ interface ClaudeCodeHandle {
 // a background workflow's sub-agents that shadow path silently DENIES the read
 // (spike 2026-07-18). Via the hook, reads still auto-allow (confined) for the main
 // agent and the workflow agents alike.
+//
+// This list governs AUTO-APPROVAL ONLY. Whether a tool exists for the session at
+// all is `BASE_TOOLS` below — a distinction that used to be invisible because
+// naming a tool here also happened to supply it, which is how emptying this list
+// silently took Grep and Glob away (spike 2026-07-26).
 const ALLOWED_TOOLS = ["Read", "Glob", "Grep", "TodoWrite"];
 // Always removed from context, regardless of capability flags: slash commands and
 // network reads are out of scope for the implementer.
@@ -116,6 +121,72 @@ const ALLOWED_TOOLS = ["Read", "Glob", "Grep", "TodoWrite"];
 // auto-approve list consulted before the callback, so putting it there would
 // shadow-approve the plan exit and the plan would never reach the thread.
 const BASE_DISALLOWED = ["ExitPlanMode", "SlashCommand", "WebFetch", "WebSearch"];
+
+/**
+ * The base set of built-in tools this session may have at all — the `tools`
+ * option, which is ORTHOGONAL to `allowedTools` (availability vs. auto-approve).
+ * `disallowedTools` still subtracts from it, so the per-turn capability toggles
+ * below keep working exactly as before.
+ *
+ * Why this exists (spike 2026-07-26, `scripts/spike-tools.ts`): the native runtime
+ * does not ship `Grep`/`Glob` in its default set — sdk.d.ts says as much under
+ * `tools` ("native builds may provide search via Bash `find`/`grep` instead...
+ * List Grep/Glob here or in `allowedTools` to get them"). Naming them in
+ * `allowedTools` is what used to supply them, so the moment workflows turned on
+ * and `allowedTools` went empty (see WORKFLOW_TOOL), the implementer lost search
+ * entirely — under what is now the SHIPPED DEFAULT posture. It could Read a path it
+ * already knew and nothing else, and every "where is this used?" became a gated
+ * `grep` through Bash. Putting them back in `allowedTools` is not available to us:
+ * that is the shadow-deny this whole arrangement exists to avoid. `tools` is.
+ *
+ * The `{type:'preset',preset:'claude_code'}` value is NOT an alternative — the
+ * spike measured it as byte-identical to omitting the option, Grep/Glob still
+ * absent. Only an explicit list works.
+ *
+ * An explicit list REPLACES the default set, so this is also, deliberately, the
+ * reachable tool surface. What it drops is everything the runtime ships that
+ * `policy.ts` has no arm for — `Cron*`, `ScheduleWakeup`, `RemoteTrigger`,
+ * `PushNotification`, `SendMessage`, `DesignSync`, `Monitor`, `ReportFindings`,
+ * `Task*` (the background-task manager, unrelated to the `Task` subagent alias)
+ * and `EnterWorktree`/`ExitWorktree`. Every one of those already gated into an
+ * unreadable "I want to use X" card with raw JSON, so none of them worked; and
+ * `ExitWorktree` takes `{action:'remove', discard_changes?: true}`, which is a
+ * worktree-destroying call nothing in the bash floor covers. An allowlist fails
+ * CLOSED as the runtime's built-ins grow, which is the same reason
+ * `enumerateSkills` builds its own list instead of filtering the runtime's.
+ *
+ * Names the runtime does not currently expose are harmless here (verified: a
+ * `tools` entry that matches nothing is ignored, not an error), so tools
+ * `policy.ts` classifies are listed even when this runtime lacks them —
+ * `TodoWrite` and `MultiEdit` are absent from every posture the spike measured,
+ * and `Agent` is exposed only under its legacy `Task` name.
+ *
+ * NOTE for anything that later un-disallows a tool: removing a name from
+ * `BASE_DISALLOWED` is no longer sufficient by itself — it must also appear here,
+ * or it stays out of context.
+ */
+const BASE_TOOLS = [
+  // Confined reads (policy `READ_TOOLS`). Grep/Glob are the point of this list.
+  "Read",
+  "Glob",
+  "Grep",
+  // Side-effect-free (policy `NO_FS_TOOLS`).
+  "ToolSearch",
+  "TodoWrite",
+  // Gated actions — reachable so the agent can PROPOSE them, never auto-allowed.
+  "Bash",
+  "Write",
+  "Edit",
+  "MultiEdit",
+  "NotebookEdit",
+  // Architect-invocable skills.
+  "Skill",
+  // Fan-out. Present here unconditionally; `disallowedTools` is what turns them
+  // off per-turn when the architect has not opted in.
+  "Agent",
+  "Task",
+  "Workflow",
+];
 
 /**
  * The plan-mode workflow body (SDK `planModeInstructions`). Replaces the runtime's
@@ -210,8 +281,14 @@ function resolveEffort(token: string | undefined): string | undefined {
  * background workflow's sub-agents aren't shadow-denied — see WORKFLOW_TOOL);
  * otherwise reads stay auto-allowed via allowedTools (unchanged behaviour).
  * Write/bash are always absent from both lists so they gate.
+ *
+ * `tools` is constant across postures on purpose: what the agent HAS should not
+ * depend on whether the architect turned workflows on. Availability is `tools`,
+ * auto-approve is `allowedTools`, and conflating the two is what cost the shipped
+ * posture its search (see BASE_TOOLS).
  */
 function toolPosture(h: HarnessTurnOptions | undefined): {
+  tools: string[];
   allowedTools: string[];
   disallowedTools: string[];
 } {
@@ -219,7 +296,7 @@ function toolPosture(h: HarnessTurnOptions | undefined): {
   if (!h?.subagents) disallowed.push(...SUBAGENT_TOOLS);
   if (!h?.workflows) disallowed.push(WORKFLOW_TOOL);
   const allowedTools = h?.workflows ? [] : ALLOWED_TOOLS;
-  return { allowedTools, disallowedTools: disallowed };
+  return { tools: BASE_TOOLS, allowedTools, disallowedTools: disallowed };
 }
 
 // ---------------------------------------------------------------------------
@@ -738,7 +815,7 @@ class ClaudeCodeSession implements HarnessSession {
     // effort tune the implementer; subagents/workflows toggle multi-agent tools;
     // projectConfig loads a trusted repo's settings.
     const h = input.harness;
-    const { allowedTools, disallowedTools } = toolPosture(h);
+    const { tools, allowedTools, disallowedTools } = toolPosture(h);
     const model = resolveModel(h?.model);
     const effort = resolveEffort(h?.effort);
     // A trusted repo loads its own project settings + skills; the §4 gate
@@ -825,6 +902,9 @@ class ClaudeCodeSession implements HarnessSession {
         // binary; omitted under `bun run`, where the SDK finds it itself.
         ...(claudeCliPath() ? { pathToClaudeCodeExecutable: claudeCliPath()! } : {}),
         systemPrompt: { type: "preset", preset: "claude_code", append: this.system },
+        // Which built-ins EXIST for this session (see BASE_TOOLS) — orthogonal to
+        // allowedTools, which only says which of them skip the callback.
+        tools,
         allowedTools,
         disallowedTools,
         permissionMode,
