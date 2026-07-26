@@ -1,13 +1,14 @@
 import { beforeAll, beforeEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, existsSync, readdirSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Store } from "../src/core/store";
 import { SessionManager } from "../src/core/session-manager";
 import { WorktreeManager } from "../src/core/worktrees";
 import { MemoryManager } from "../src/core/memory";
-import type { ConversationRef, Principal, ToolCall } from "../src/core/types";
+import type { Attachment, ConversationRef, Principal, ToolCall } from "../src/core/types";
 import { MENTION_TOKEN_RE, mentionToken } from "../src/core/types";
+import { ATTACHMENTS_REL, OUTBOX_REL } from "../src/core/attachments";
 import { FakeHarness, FakeSurface } from "./fakes";
 
 let repoPath: string;
@@ -2306,5 +2307,106 @@ describe("plan mode — research first, implement after approval", () => {
     await plan(w, "pm16.00001", "on");
     await w.manager.handleEvent({ kind: "command", conv: conv("pm16.00001"), author: architect, name: "help", args: "" });
     expect(w.surface.posts.at(-1)!.text).toContain("plan mode on");
+  });
+});
+
+describe("attachments", () => {
+  const fileEvent = (id: string, author: Principal, attachments: Attachment[], text = "have a look") =>
+    ({ kind: "message" as const, conv: conv(id), author, text, attachments });
+
+  async function assigned(w: World, id: string): Promise<string> {
+    await w.manager.handleEvent({ kind: "command", conv: conv(id), author: architect, name: "assign", args: "testrepo" });
+    return w.store.getSessionByConversation("fake", id)!.worktree_path;
+  }
+
+  test("an inbound file lands in the worktree and its path is named to the agent", async () => {
+    const w = makeWorld();
+    const worktree = await assigned(w, "900.000001");
+    w.surface.attachmentBytes.set("ref-1", new TextEncoder().encode("id,name\n1,ada"));
+
+    await w.manager.handleEvent(
+      fileEvent("900.000001", architect, [{ kind: "file", name: "users.csv", ref: "ref-1" }]),
+    );
+
+    const rel = join(ATTACHMENTS_REL, "users.csv");
+    expect(await Bun.file(join(worktree, rel)).text()).toBe("id,name\n1,ada");
+    // The agent is told where it is, outside the fence, so it reads it as a path.
+    const turn = w.harness.allTurns.at(-1)!.text;
+    expect(turn).toContain(rel);
+    expect(turn).toContain("saved");
+  });
+
+  test("a hostile filename cannot escape the attachments directory", async () => {
+    const w = makeWorld();
+    const worktree = await assigned(w, "900.000002");
+    w.surface.attachmentBytes.set("ref-evil", new TextEncoder().encode("pwned"));
+
+    await w.manager.handleEvent(
+      fileEvent("900.000002", architect, [{ kind: "file", name: "../../../escaped.txt", ref: "ref-evil" }]),
+    );
+
+    expect(existsSync(join(worktree, "..", "..", "..", "escaped.txt"))).toBe(false);
+    const turn = w.harness.allTurns.at(-1)!.text;
+    expect(turn).toContain(ATTACHMENTS_REL);
+    expect(turn).not.toContain("../../../escaped.txt");
+  });
+
+  test("a MEMBER's attachment lands too, and reaches the next architect turn", async () => {
+    // The file has to be on disk before the architect's turn names its path —
+    // holding the message but dropping the file would name a path that isn't there.
+    const w = makeWorld();
+    const worktree = await assigned(w, "900.000003");
+    w.surface.attachmentBytes.set("ref-m", new TextEncoder().encode("log line"));
+
+    await w.manager.handleEvent(fileEvent("900.000003", member, [{ kind: "file", name: "app.log", ref: "ref-m" }], "here's the log"));
+    const rel = join(ATTACHMENTS_REL, "app.log");
+    expect(await Bun.file(join(worktree, rel)).text()).toBe("log line");
+
+    await w.manager.handleEvent({ kind: "message", conv: conv("900.000003"), author: architect, text: "fix it", attachments: [] });
+    const turn = w.harness.allTurns.at(-1)!.text;
+    expect(turn).toContain(rel); // carried in with the held message
+    expect(turn).toContain("here's the log");
+  });
+
+  test("a file that will not download is reported, and never named as a path", async () => {
+    const w = makeWorld();
+    await assigned(w, "900.000004");
+    // No bytes registered for this ref: the fake returns null, like a revoked file.
+    await w.manager.handleEvent(fileEvent("900.000004", architect, [{ kind: "file", name: "gone.pdf", ref: "missing" }]));
+
+    expect(w.surface.posts.some((p) => p.text.includes("couldn't read") && p.text.includes("gone.pdf"))).toBe(true);
+    expect(w.harness.allTurns.at(-1)!.text).not.toContain("gone.pdf");
+  });
+
+  test("what the agent leaves in the outbox is posted, then removed", async () => {
+    const w = makeWorld();
+    const worktree = await assigned(w, "900.000005");
+    // Stand in for the agent's write: the outbox is an ordinary in-worktree path.
+    w.harness.beforeReply = async () => {
+      mkdirSync(join(worktree, OUTBOX_REL), { recursive: true });
+      writeFileSync(join(worktree, OUTBOX_REL, "report.md"), "# findings");
+    };
+
+    await w.manager.handleEvent({ kind: "message", conv: conv("900.000005"), author: architect, text: "write a report", attachments: [] });
+
+    expect(w.surface.postedFiles.map((f) => f.name)).toEqual(["report.md"]);
+    expect(w.surface.postedFiles[0]!.bytes).toBe("# findings");
+    // Emptied, so the next turn cannot re-post it.
+    expect(existsSync(join(worktree, OUTBOX_REL, "report.md"))).toBe(false);
+  });
+
+  test("a symlink in the outbox is not uploaded — the boundary holds on the way out", async () => {
+    const w = makeWorld();
+    const worktree = await assigned(w, "900.000006");
+    const outside = join(mkdtempSync(join(tmpdir(), "condotto-secret-")), "secret.txt");
+    writeFileSync(outside, "SECRET");
+    w.harness.beforeReply = async () => {
+      mkdirSync(join(worktree, OUTBOX_REL), { recursive: true });
+      symlinkSync(outside, join(worktree, OUTBOX_REL, "innocent.txt"));
+    };
+
+    await w.manager.handleEvent({ kind: "message", conv: conv("900.000006"), author: architect, text: "go", attachments: [] });
+
+    expect(w.surface.postedFiles).toEqual([]);
   });
 });

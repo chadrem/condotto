@@ -382,8 +382,8 @@ function parseRoles(toml: Record<string, unknown>, env: Record<string, string | 
       if (typeof e.principal !== "string" || !validPrincipal(e.principal)) {
         throw new Error(`${where}: "principal" must be surface-qualified (e.g. slack:U0123ABC)`);
       }
-      if (e.role !== "architect" && e.role !== "member" && e.role !== "observer") {
-        throw new Error(`${where}: "role" must be architect|member|observer`);
+      if (e.role !== "architect" && e.role !== "member") {
+        throw new Error(`${where}: "role" must be architect or member`);
       }
       put({ principal: e.principal, role: e.role, scope: typeof e.scope === "string" ? e.scope : "*" });
     });

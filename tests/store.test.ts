@@ -250,6 +250,9 @@ describe("store sessions", () => {
     // v8 dropped the approval-era columns and the table itself.
     expect(cols).not.toContain("default_auto_approve");
     expect(cols).not.toContain("trusted"); // v9
+    // v11 dropped the two repo columns nothing ever read.
+    expect(cols).not.toContain("safe_bash_allowlist");
+    expect(cols).not.toContain("policy_overrides");
   });
 });
 
@@ -433,7 +436,7 @@ describe("store schema migrations", () => {
   // The current schema version == the number of migrations in the runner. Bump
   // this constant in lockstep whenever a migration is appended — the tests below
   // pin the runner's behavior to it.
-  const CURRENT_SCHEMA_VERSION = 9;
+  const CURRENT_SCHEMA_VERSION = 11;
 
   const migPath = (name: string): string => join(mkdtempSync(join(tmpdir(), "condotto-mig-")), name);
   const userVersion = (path: string): number => {
@@ -442,6 +445,39 @@ describe("store schema migrations", () => {
     db.close();
     return v;
   };
+
+  test("v11 drops the tables no row was ever inserted into", () => {
+    const path = migPath("dead-tables.sqlite");
+    new Store(path).close();
+    const tables = new Database(path, { readonly: true })
+      .query<{ name: string }, []>(`SELECT name FROM sqlite_master WHERE type='table'`)
+      .all()
+      .map((t) => t.name);
+    expect(tables).not.toContain("surfaces");
+    expect(tables).not.toContain("channels");
+    expect(tables).not.toContain("approvals"); // v8
+    // The live ones survive.
+    expect(tables).toEqual(expect.arrayContaining(["repos", "sessions", "roles", "turns", "audit_log"]));
+  });
+
+  test("v10 folds an observer row into member", () => {
+    const path = migPath("observer.sqlite");
+    new Store(path).close();
+    const raw = new Database(path);
+    // A runtime grant could have written one before the role was removed. The v1
+    // CHECK still permits the string, which is what makes the row reachable at all.
+    raw.run(`INSERT INTO roles (principal, role, scope, source) VALUES ('slack:U1', 'observer', '*', 'grant')`);
+    // Rewind so v10 runs again. v11 re-runs too, so put back what it drops —
+    // same reversal the lossless test above does, for the same reason.
+    raw.run("ALTER TABLE repos ADD COLUMN safe_bash_allowlist TEXT NOT NULL DEFAULT '[]'");
+    raw.run("ALTER TABLE repos ADD COLUMN policy_overrides TEXT NOT NULL DEFAULT '{}'");
+    raw.run("PRAGMA user_version = 9");
+    raw.close();
+    const store = new Store(path);
+    expect(store.roleOf("slack:U1", "C1")).toBe("member");
+    expect(store.isArchitect("slack:U1", "C1")).toBe(false);
+    store.close();
+  });
 
   test("a fresh DB is stamped to the current schema version", () => {
     const path = migPath("fresh.sqlite");
@@ -495,6 +531,8 @@ describe("store schema migrations", () => {
     raw.run("ALTER TABLE sessions ADD COLUMN workflow_write INTEGER NOT NULL DEFAULT 0"); // v1-era, dropped at v8
     raw.run("ALTER TABLE repos ADD COLUMN default_auto_approve INTEGER"); // v1-era, dropped at v8
     raw.run("ALTER TABLE repos ADD COLUMN trusted INTEGER NOT NULL DEFAULT 0"); // v1-era, dropped at v9
+    raw.run("ALTER TABLE repos ADD COLUMN safe_bash_allowlist TEXT NOT NULL DEFAULT '[]'"); // v1-era, dropped at v11
+    raw.run("ALTER TABLE repos ADD COLUMN policy_overrides TEXT NOT NULL DEFAULT '{}'"); // v1-era, dropped at v11
     raw.run("PRAGMA user_version = 0"); // rewind the stamp to the pre-runner state
     raw.close();
     expect(userVersion(path)).toBe(0);

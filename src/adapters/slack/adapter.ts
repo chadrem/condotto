@@ -5,6 +5,7 @@ import type {
   CommandName,
   ConversationRef,
   InboundEvent,
+  OutboundFile,
   OutboundMessage,
   PostedRef,
   Principal,
@@ -20,6 +21,9 @@ import {
   resolveChoiceMessage,
 } from "./render";
 import { DisplayNameCache, slackUserSource } from "./users";
+
+/** A thread file should download fast or not at all; a turn is waiting on it. */
+const FILE_FETCH_TIMEOUT_MS = 30_000;
 
 /**
  * Authority the adapter consults for the ephemeral "architects only" response
@@ -244,6 +248,7 @@ export class SlackAdapter implements SurfaceAdapter {
    * land in the session transcript reversed.
    */
   private nameTail = new Map<string, Promise<void>>();
+  private botToken: string;
 
   constructor(
     tokens: { botToken: string; appToken: string },
@@ -254,6 +259,9 @@ export class SlackAdapter implements SurfaceAdapter {
     names?: DisplayNameCache,
   ) {
     this.names = names ?? null;
+    // Kept for file downloads: `url_private` is not public, and Bolt's client
+    // does not expose the token, so the raw fetch needs its own copy.
+    this.botToken = tokens.botToken;
     this.app = new App({
       token: tokens.botToken,
       appToken: tokens.appToken,
@@ -468,8 +476,13 @@ export class SlackAdapter implements SurfaceAdapter {
 
     const attachments: Attachment[] = Array.isArray(event.files)
       ? event.files.map((f: Record<string, any>) => ({
-          kind: String(f.mimetype ?? "").startsWith("image/") ? "image" as const : "file" as const,
+          kind: String(f.mimetype ?? "").startsWith("image/") ? ("image" as const) : ("file" as const),
           name: f.name ? String(f.name) : undefined,
+          // `url_private` needs the bot token; `permalink` is an HTML page, not
+          // the bytes, so it is a last resort that will usually fail the fetch.
+          ref: f.url_private ? String(f.url_private) : f.permalink ? String(f.permalink) : undefined,
+          mimeType: f.mimetype ? String(f.mimetype) : undefined,
+          sizeBytes: typeof f.size === "number" ? f.size : undefined,
         }))
       : [];
 
@@ -513,6 +526,55 @@ export class SlackAdapter implements SurfaceAdapter {
       text: renderMrkdwn(msg.text),
     });
     return { conv, messageId: String(res.ts) };
+  }
+
+  /**
+   * Pull the bytes of a file someone dropped in the thread.
+   *
+   * `url_private` is not public: it 302s to a login page unless the request
+   * carries the bot token, and the redirect target returns HTML with a 200. So a
+   * missing/`text/html` content type is treated as a failure rather than written
+   * to disk as a "file" — that silent HTML-instead-of-bytes case is the one this
+   * would otherwise get wrong.
+   */
+  async fetchAttachment(a: Attachment): Promise<Uint8Array | null> {
+    if (!a.ref) return null;
+    try {
+      const res = await fetch(a.ref, {
+        headers: { Authorization: `Bearer ${this.botToken}` },
+        redirect: "follow",
+        signal: AbortSignal.timeout(FILE_FETCH_TIMEOUT_MS),
+      });
+      if (!res.ok) {
+        this.log(`[slack] could not download ${a.name ?? "a file"}: HTTP ${res.status}`);
+        return null;
+      }
+      if ((res.headers.get("content-type") ?? "").includes("text/html")) {
+        this.log(`[slack] could not download ${a.name ?? "a file"}: got a login page, check the files:read scope`);
+        return null;
+      }
+      return new Uint8Array(await res.arrayBuffer());
+    } catch (err) {
+      this.log(`[slack] could not download ${a.name ?? "a file"}: ${err}`);
+      return null;
+    }
+  }
+
+  async postFile(conv: ConversationRef, file: OutboundFile): Promise<void> {
+    // `uploadV2` wants the bytes; handing it a path makes it read the file itself
+    // with no size ceiling, and the core has already bounded this one.
+    const bytes = await Bun.file(file.path).arrayBuffer();
+    const thread = threadTsOf(conv);
+    const common = {
+      file: Buffer.from(bytes),
+      filename: file.name,
+      ...(file.comment ? { initial_comment: renderMrkdwn(file.comment) } : {}),
+    };
+    // `thread_ts` and its absence are two different argument shapes to uploadV2,
+    // so they are two calls rather than one with an optional field.
+    await (thread
+      ? this.app.client.files.uploadV2({ channel_id: conv.channelId, thread_ts: thread, ...common })
+      : this.app.client.files.uploadV2({ channel_id: conv.channelId, ...common }));
   }
 
   async update(ref: PostedRef, msg: OutboundMessage): Promise<void> {

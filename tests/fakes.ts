@@ -1,5 +1,6 @@
 // Fake adapters exercising both ports without any platform dependency.
 import type {
+  Attachment,
   ChoicePrompt,
   ConversationRef,
   GateFn,
@@ -9,6 +10,7 @@ import type {
   HarnessSkill,
   HarnessTurnOptions,
   InboundEvent,
+  OutboundFile,
   OutboundMessage,
   PostedRef,
   SessionHandle,
@@ -31,6 +33,11 @@ export class FakeSurface implements SurfaceAdapter {
   posts: { conv: ConversationRef; text: string; messageId: string }[] = [];
   updates: { messageId: string; text: string }[] = [];
   choiceRequests: { conv: ConversationRef; prompt: ChoicePrompt }[] = [];
+  /** Files posted back to the thread, in order. */
+  postedFiles: { conv: ConversationRef; name: string; comment?: string; bytes: string }[] = [];
+  /** Bytes this fake will hand back per attachment `ref`; absent = a failed download. */
+  attachmentBytes = new Map<string, Uint8Array>();
+  fetched: string[] = [];
   private nextId = 1;
 
   async start(_emit: (e: InboundEvent) => void): Promise<void> {}
@@ -44,6 +51,20 @@ export class FakeSurface implements SurfaceAdapter {
 
   async update(ref: PostedRef, msg: OutboundMessage): Promise<void> {
     this.updates.push({ messageId: ref.messageId, text: msg.text });
+  }
+
+  async fetchAttachment(a: Attachment): Promise<Uint8Array | null> {
+    this.fetched.push(a.ref ?? "");
+    return this.attachmentBytes.get(a.ref ?? "") ?? null;
+  }
+
+  async postFile(conv: ConversationRef, file: OutboundFile): Promise<void> {
+    this.postedFiles.push({
+      conv,
+      name: file.name,
+      ...(file.comment ? { comment: file.comment } : {}),
+      bytes: await Bun.file(file.path).text(),
+    });
   }
 
 

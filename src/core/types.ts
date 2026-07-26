@@ -42,14 +42,12 @@ export function mentionToken(p: Principal | string): string {
 export const MENTION_TOKEN_RE = /@\[\[([a-z0-9_]+:[^\][\s]{1,64})\]\]/gi;
 
 /**
- * Command authority. Only an `architect` runs the agent or stops a session.
- * `member` and `observer` both converse: their messages are held and folded into
- * the next architect turn. Anyone not explicitly mapped defaults to `member`.
- *
- * The two non-architect roles are deliberately identical in behaviour — the
- * distinction is a label an operator can record, not a rule the code enforces.
+ * Command authority, and there are only two levels because there is only one
+ * decision: an `architect` sets the agent working; a `member` talks in the thread
+ * and their messages are held for the next architect turn. Anyone not explicitly
+ * mapped is a member.
  */
-export type Role = "architect" | "member" | "observer";
+export type Role = "architect" | "member";
 
 // ---------------------------------------------------------------------------
 // Conversations
@@ -68,17 +66,29 @@ export interface ConversationRef {
 /**
  * A file someone dropped in the thread.
  *
- * NOT WIRED THROUGH YET. The Slack adapter fills these in, the core carries them
- * on the event, and nothing reads them: `TurnInput` has no attachment field, so
- * the agent never learns a file was attached. `HarnessCapabilities.imageInput`
- * says the runtime would accept one. Whoever closes the gap needs a `TurnInput`
- * field, a fetch of `url` in the adapter (which needs the `files:read` scope the
- * README does not currently ask for), and a line in the README.
+ * `ref` is how the SURFACE finds the bytes again — a Slack `url_private`, a
+ * message-part id elsewhere. It is opaque here on purpose: the core hands it back
+ * to `fetchAttachment` and never parses it, which is what keeps a platform URL
+ * shape out of the core. `name` is whoever-uploaded-it's text and must be
+ * sanitized before it reaches a path or a prompt (`safeAttachmentName`).
  */
 export interface Attachment {
   kind: "image" | "file";
   name?: string;
-  url?: string;
+  /** Opaque surface handle for fetching the bytes. Absent = not retrievable. */
+  ref?: string;
+  mimeType?: string;
+  sizeBytes?: number;
+}
+
+/** A file Condotto is sending back to the thread. */
+export interface OutboundFile {
+  /** Absolute path on disk. Always inside the session's worktree. */
+  path: string;
+  /** Filename to show in the thread. */
+  name: string;
+  /** Optional line of text posted with it. */
+  comment?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -202,6 +212,19 @@ export interface SurfaceAdapter {
   start(emit: (e: InboundEvent) => void): Promise<void>;
   stop(): Promise<void>;
   post(conv: ConversationRef, msg: OutboundMessage): Promise<PostedRef>;
+  /**
+   * Download an inbound file. Returns null when the surface cannot produce the
+   * bytes — a revoked file, a permission the app was not granted, a timeout. The
+   * core treats null as "this one did not arrive" and carries on with the rest,
+   * because losing the MESSAGE over a failed download would be the worse trade.
+   * Only called when capabilities.attachments is true.
+   */
+  fetchAttachment(a: Attachment): Promise<Uint8Array | null>;
+  /**
+   * Upload a file into the conversation. Only called when
+   * capabilities.attachments is true.
+   */
+  postFile(conv: ConversationRef, file: OutboundFile): Promise<void>;
   /** Only called when capabilities.editMessages is true. */
   update(ref: PostedRef, msg: OutboundMessage): Promise<void>;
   /** Present a guided choice. Only called when capabilities.buttons. */

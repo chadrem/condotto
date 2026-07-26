@@ -313,19 +313,19 @@ scope = "C_LOCKED"
 
 [[roles]]
 principal = "slack:U10"
-role = "observer"
+role = "member"
 `);
     const cfg = loadConfig({ CONDOTTO_ARCHITECTS: "slack:U2" }, path);
     expect(cfg.roles).toContainEqual({ principal: "slack:U1", role: "architect", scope: "*" });
     expect(cfg.roles).toContainEqual({ principal: "slack:U2", role: "architect", scope: "*" });
     expect(cfg.roles).toContainEqual({ principal: "slack:U9", role: "member", scope: "C_LOCKED" });
-    expect(cfg.roles).toContainEqual({ principal: "slack:U10", role: "observer", scope: "*" });
+    expect(cfg.roles).toContainEqual({ principal: "slack:U10", role: "member", scope: "*" });
   });
 
   test("an invalid role in [[roles]] is rejected", () => {
     expect(() =>
       loadConfig({}, cfgFile(`[[roles]]\nprincipal = "slack:U1"\nrole = "superuser"\n`)),
-    ).toThrow(/architect\|member\|observer/);
+    ).toThrow(/architect or member/);
   });
 
   test("architects must be an array of strings", () => {
@@ -440,9 +440,11 @@ describe("subscriptionScaleWarning — warn, never refuse", () => {
     expect(subscriptionScaleWarning(cfgWithRoles(twoDrivers), "api_key")).toBeNull();
   });
 
-  test("observers do not count as drivers", () => {
-    const withObserver = `[[roles]]\nprincipal = "slack:U1"\nrole = "architect"\n\n[[roles]]\nprincipal = "slack:U2"\nrole = "observer"\n`;
-    expect(subscriptionScaleWarning(cfgWithRoles(withObserver), "subscription")).toBeNull();
+  test("a member counts as a driver — their messages reach the agent", () => {
+    // Held context still spends the credential on the architect's next turn, so a
+    // second person in the thread is a second person driving the subscription.
+    const architectPlusMember = `[[roles]]\nprincipal = "slack:U1"\nrole = "architect"\n\n[[roles]]\nprincipal = "slack:U2"\nrole = "member"\n`;
+    expect(subscriptionScaleWarning(cfgWithRoles(architectPlusMember), "subscription")).toContain("2 principals");
   });
 });
 

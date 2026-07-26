@@ -382,6 +382,35 @@ function migrateV9(db: Database): void {
   db.run(`ALTER TABLE repos DROP COLUMN trusted`);
 }
 
+/**
+ * Migration **v10**: fold `observer` into `member`.
+ *
+ * There is one decision — architect or not — so a third role was a label the code
+ * never read. A runtime `@Condotto grant … observer` row could still be on disk;
+ * rewrite it rather than leave a value the `Role` type no longer has. The v1 CHECK
+ * constraint still permits the string (SQLite cannot alter one without rebuilding
+ * the table, which is not worth it), but nothing writes it now.
+ */
+function migrateV10(db: Database): void {
+  db.run(`UPDATE roles SET role = 'member' WHERE role = 'observer'`);
+}
+
+/**
+ * Migration **v11**: drop the tables and columns nothing ever read or wrote.
+ *
+ * `surfaces` and `channels` were speculative v1 schema for multi-surface routing
+ * that the adapter/port split made unnecessary — no row was ever inserted into
+ * either. `repos.safe_bash_allowlist` died with the bash allowlist and
+ * `repos.policy_overrides` was never wired to anything. Empty tables are only
+ * noise, but noise in a schema reads as a feature that exists.
+ */
+function migrateV11(db: Database): void {
+  db.run(`DROP TABLE IF EXISTS channels`);
+  db.run(`DROP TABLE IF EXISTS surfaces`);
+  db.run(`ALTER TABLE repos DROP COLUMN safe_bash_allowlist`);
+  db.run(`ALTER TABLE repos DROP COLUMN policy_overrides`);
+}
+
 /** Add `column` to `table` only if absent (idempotent ALTER — SQLite has no
  *  `ADD COLUMN IF NOT EXISTS`). Used by the baseline migration to evolve tables
  *  a pre-runner DB already created. */
@@ -428,7 +457,9 @@ export class Store {
       migrateV7, // v7: drop repos.test_cmd/land_cmd/deploy_cmd (the agent runs its own).
       migrateV8, // v8: drop the approvals table + the auto-approve / worktree-write columns.
       migrateV9, // v9: drop repos.trusted — every repo loads its own project config.
-      // v10+: append new migrations here. They only ever run on a store already
+      migrateV10, // v10: fold the observer role into member.
+      migrateV11, // v11: drop the surfaces/channels tables and two unused repo columns.
+      // v12+: append new migrations here. They only ever run on a store already
       // at the prior version, so they can be plain forward DDL — no IF NOT EXISTS
       // gymnastics.
     ];
@@ -476,14 +507,14 @@ export class Store {
     this.db
       .query(
         `INSERT INTO repos
-           (id, name, path, default_branch, safe_bash_allowlist, cost_cap_usd,
+           (id, name, path, default_branch, cost_cap_usd,
             default_model, default_effort, memory,
             default_subagents, default_workflows)
-         VALUES ($id, $name, $path, $branch, $allow, $cap,
+         VALUES ($id, $name, $path, $branch, $cap,
                  $model, $effort, $memory,
                  $subagents, $workflows)
          ON CONFLICT(name) DO UPDATE SET
-           path = $path, default_branch = $branch, safe_bash_allowlist = $allow,
+           path = $path, default_branch = $branch,
            cost_cap_usd = $cap,
            default_model = $model, default_effort = $effort, memory = $memory,
            default_subagents = $subagents, default_workflows = $workflows`,
@@ -493,7 +524,6 @@ export class Store {
         name: repo.name,
         path: repo.path,
         branch: repo.defaultBranch,
-        allow: "[]", // retired 2026-07-26; the column stays to keep the baseline honest
         cap: repo.costCapUsd ?? null,
         model: repo.defaultModel ?? null,
         effort: repo.defaultEffort ?? null,

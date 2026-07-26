@@ -28,6 +28,7 @@
     "smoke:cancel": "bun run scripts/smoke-cancel.ts",
     "smoke:monorepo": "bun run scripts/smoke-monorepo.ts",
     "smoke:memory": "bun run scripts/smoke-memory.ts",
+    "smoke:attachments": "bun run scripts/smoke-attachments.ts",
     "smoke:plan": "bun run scripts/smoke-plan-mode.ts"
   },
   "dependencies": {

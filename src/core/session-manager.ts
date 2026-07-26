@@ -24,6 +24,14 @@ import {
 } from "./worktrees";
 import { MemoryManager, verifyMemoryTarget } from "./memory";
 import { checkSkillArgs, frameMessage, sanitizeSkillText } from "./framing";
+import {
+  ATTACHMENTS_REL,
+  MAX_ATTACHMENTS_PER_MESSAGE,
+  OUTBOX_REL,
+  clearOutbox,
+  landAttachments,
+  readOutbox,
+} from "./attachments";
 import { evaluate, memoryTargets, planTextFrom, type PolicyContext } from "./policy";
 import {
   DEFAULT_COST_CAP_USD,
@@ -196,6 +204,14 @@ function condottoSystemPrompt(opts: {
     `- You are confined to your worktree: you cannot read or write files outside it,`,
     `  and destructive or credential-touching commands are refused outright. Note the`,
     `  boundary is the WORKTREE ROOT, which may sit above your cwd — see Context.`,
+    `- Files people attach in the thread are saved for you under ${ATTACHMENTS_REL}/`,
+    `  and each message that carries one names its path. Open them with Read like`,
+    `  any other file — screenshots, logs, CSVs, whatever they sent.`,
+    `- To send a file back, write it to ${OUTBOX_REL}/ and finish your turn. Anything`,
+    `  in there is uploaded to the thread and then removed, so write it once, under`,
+    `  the name you want people to see. Use it for a diff, a report, a generated`,
+    `  image — anything better read as a file than pasted into chat. For a few lines`,
+    `  of output, just say them.`,
     ...(opts.memoryDir
       ? [
           `- ONE exception to that boundary: your memory directory, ${opts.memoryDir}.`,
@@ -1993,7 +2009,7 @@ export class SessionManager {
   }
 
   /**
-   * `@Condotto grant @user <architect|member|observer> [everywhere]`. An
+   * `@Condotto grant @user <architect|member> [everywhere]`. An
    * architect delegates authority to another surface-verified user. Channel-scoped
    * by default ("this project"); `everywhere`/`global` = all channels. Persisted as
    * a `source='grant'` row that survives the boot reseed (config rows don't). The
@@ -2009,12 +2025,12 @@ export class SessionManager {
       return;
     }
     const [target = "", roleTok = "", modifier] = args.trim().split(/\s+/);
-    const usage = "Usage: `@Condotto grant @user <architect|member|observer> [everywhere]`.";
+    const usage = "Usage: `@Condotto grant @user <architect|member> [everywhere]`.";
     if (!VALID_PRINCIPAL.test(target)) {
       await surface.post(conv, { text: `Couldn't find that user — @-mention them with Slack's autocomplete so it links to their account, e.g. \`@Condotto grant @abby architect\`. ${usage}` });
       return;
     }
-    if (roleTok !== "architect" && roleTok !== "member" && roleTok !== "observer") {
+    if (roleTok !== "architect" && roleTok !== "member") {
       await surface.post(conv, { text: usage });
       return;
     }
@@ -2030,7 +2046,7 @@ export class SessionManager {
     //       flips that row's `source` to 'grant' (setRole's ON CONFLICT), stripping
     //       config protection so a later `revoke` can delete it — a delegated
     //       architect could lock out the config-designated admin (review 2026-07-19).
-    //   (2) SHADOW-DEMOTE — a narrower-scope member/observer row overriding a
+    //   (2) SHADOW-DEMOTE — a narrower-scope member row overriding a
     //       broader-scope config architect (channel row beats '*'), surviving reboot.
     // Both are refused; the fix is a config edit. Additive elevations at a NEW scope
     // (e.g. granting a config-member architect in one channel) are still allowed.
@@ -2132,10 +2148,15 @@ export class SessionManager {
       return;
     }
 
+    // Files land in the worktree BEFORE the message is framed, and for a held
+    // message too: the file has to be on disk by the time the architect's next
+    // turn reads the path we are about to name.
+    const attachmentPaths = await this.landInbound(session, event);
     const framed = frameMessage({
       author: event.author,
       displayName: event.authorDisplayName,
       text: event.text,
+      attachmentPaths,
     });
     const entry = this.entryFor(session.id);
 
@@ -2486,12 +2507,99 @@ export class SessionManager {
         this.turnSlots.release();
         slotHeld = false;
       }
+      // Post anything the agent left in the outbox. After the reply, so the
+      // explanation arrives before the file, and outside the try above so a
+      // failed turn still delivers whatever it managed to produce.
+      await this.flushOutbox(sessionId, conv).catch((e) => this.log(`[session ${sessionId}] outbox: ${e}`));
       this.store.touchSession(sessionId);
       // Park only if still active — never resurrect a session stopped mid-turn.
       if (this.store.getSession(sessionId)?.status === "active") {
         this.store.updateSessionStatus(sessionId, "parked");
       }
     }
+  }
+
+  /**
+   * Download the files on an inbound message into the session's worktree and
+   * return their worktree-relative paths.
+   *
+   * Everything here is best-effort by design: a file that will not download must
+   * cost the message nothing. What the agent cannot open, it is simply not told
+   * about — a path named in the frame is a path that exists.
+   */
+  private async landInbound(
+    session: SessionRow,
+    event: Extract<InboundEvent, { kind: "message" }>,
+  ): Promise<string[]> {
+    const files = event.attachments ?? [];
+    if (files.length === 0) return [];
+    if (!this.surfaceFor(event.conv).capabilities.attachments) return [];
+
+    const surface = this.surfaceFor(event.conv);
+    const wanted = files.slice(0, MAX_ATTACHMENTS_PER_MESSAGE);
+    const fetched = await Promise.all(
+      wanted.map(async (a) => ({ name: a.name, bytes: await surface.fetchAttachment(a).catch(() => null) })),
+    );
+    const { landed, failed } = await landAttachments(session.worktree_path, fetched);
+
+    if (landed.length > 0) {
+      this.store.audit({
+        sessionId: session.id,
+        actor: principalKey(event.author),
+        event: "attachments_received",
+        detail: { files: landed.map((l) => l.name), ...(failed.length > 0 ? { failed } : {}) },
+      });
+    }
+    if (failed.length > 0) {
+      this.store.audit({
+        sessionId: session.id,
+        actor: principalKey(event.author),
+        event: "attachment_failed",
+        detail: { files: failed },
+      });
+      // Say so rather than let the agent look like it ignored the file.
+      await surface
+        .post(event.conv, {
+          text:
+            `⚠️ I couldn't read ${failed.length === 1 ? "the file" : `${failed.length} of the files`} ` +
+            `you attached (${failed.join(", ")}). Files over 25 MB don't come through, and the ` +
+            `Slack app needs the \`files:read\` scope.`,
+        })
+        .catch(() => {});
+    }
+    return landed.map((l) => l.relPath);
+  }
+
+  /**
+   * Post whatever the agent left in the outbox, then empty it.
+   *
+   * The directory is inside the worktree, so getting a file there was an ordinary
+   * confined write — no separate permission, and nothing the agent can reach this
+   * way that it could not already write. `readOutbox` refuses to follow a symlink,
+   * which is the one shape that would turn this into a way out of the tree.
+   */
+  private async flushOutbox(sessionId: string, conv: ConversationRef): Promise<void> {
+    const session = this.store.getSession(sessionId);
+    if (!session) return;
+    const surface = this.surfaceFor(conv);
+    if (!surface.capabilities.attachments) return;
+    const files = await readOutbox(session.worktree_path);
+    if (files.length === 0) return;
+    for (const f of files) {
+      try {
+        await surface.postFile(conv, { path: f.absPath, name: f.name });
+        this.store.audit({
+          sessionId,
+          actor: "agent",
+          event: "attachment_sent",
+          detail: { file: f.name, sizeBytes: f.sizeBytes },
+        });
+      } catch (err) {
+        this.store.audit({ sessionId, actor: "agent", event: "attachment_failed", detail: { file: f.name, error: String(err) } });
+        await surface.post(conv, { text: `⚠️ I made \`${f.name}\` but couldn't upload it to the thread.` }).catch(() => {});
+      }
+    }
+    await clearOutbox(session.worktree_path);
   }
 
 

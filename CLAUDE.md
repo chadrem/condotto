@@ -92,6 +92,22 @@ into `adapters/`, and surface wire tokens (`thread_ts`, `block_actions`, `<@`,
 `xoxb-`) anywhere outside `adapters/`. A domain type that merely mirrors an SDK
 shape is on you.
 
+## Files in and out of a thread
+
+Both directions go through the WORKTREE, never through the model's context
+(`core/attachments.ts`). An inbound file is downloaded by the surface adapter and
+written to `.condotto/attachments/`; the framed message names the path and the
+agent opens it with Read. An outbound file is one the agent wrote to
+`.condotto/outbox/`, which the session manager posts and then empties.
+
+Why it is worth keeping that shape: the existing worktree confinement is then the
+only boundary either direction needs. No second path around `policy.ts`, no base64
+in the prompt, and a screenshot and a 40 MB heap dump work identically. Two things
+hold it up, and both have tests — `safeAttachmentName` reduces an uploader's
+filename to one harmless segment (it reaches both a path and the prompt, outside
+the fence), and `readOutbox` refuses to follow a symlink, which is the one shape
+that would turn the outbox into a read of the host.
+
 ## Key invariants (enforce in code, not just schema)
 
 - `(surface_id, conversation_id)` maps to exactly one session, forever. One

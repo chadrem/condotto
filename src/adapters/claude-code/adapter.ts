@@ -1268,7 +1268,10 @@ export class ClaudeCodeAdapter implements HarnessAdapter {
     // token) and serves only as a usage-governance signal. Budgets work the same
     // either way — only the meaning of the number changes.
     costReporting: true,
-    imageInput: true, // the runtime accepts images; the TurnInput image path arrives with attachments
+    // The runtime accepts images. Condotto does not inline them: an attached file
+    // is written into the worktree and the agent opens it with Read, which works
+    // the same for a png and a 40 MB CSV (see core/attachments.ts).
+    imageInput: true,
     // The tokens the core validates an architect's model/effort against.
     supportedModels: SUPPORTED_MODELS, // ["opus","sonnet","fable"]
     supportedEfforts: SUPPORTED_EFFORTS, // ["low","medium","high","xhigh","max"]

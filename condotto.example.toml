@@ -57,13 +57,16 @@ mode = "api_key"
 # api_key = "sk-ant-..."   # Optional and NOT recommended — prefer ANTHROPIC_API_KEY
 #                          # in the environment. If set here, it outranks the env var.
 
-# Optional richer role mappings beyond the architects above — e.g. a member
-# locked to one channel's scope, or an observer. Most setups don't need this;
-# `architects` above is the quick path. Roles delegated at runtime with
-# `@Condotto grant` persist in SQLite and are NOT listed here.
+# Optional richer role mappings beyond the architects above — e.g. an architect
+# locked to one channel's scope. Most setups don't need this; `architects` above
+# is the quick path. Roles delegated at runtime with `@Condotto grant` persist in
+# SQLite and are NOT listed here.
+#
+# There are only two roles. An architect sets the agent working; everyone else is
+# a member, who talks in the thread and is carried into the next architect turn.
 # [[roles]]
 # principal = "slack:U0000AAA"
-# role = "member"          # architect | member | observer
+# role = "member"          # architect | member
 # scope = "C0123CHANNEL"   # a Slack channel id, or "*" for everywhere (default)
 
 # ---------------------------------------------------------------------------

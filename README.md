@@ -32,6 +32,7 @@ is your machine, your repo, your team.
 - [Run](#run)
 - [Your first session](#your-first-session)
 - [Commands](#commands)
+- [Files](#files)
 - [Monorepos](#monorepos)
 - [What holds the agent in](#what-holds-the-agent-in)
 - [Skills](#skills)
@@ -53,9 +54,11 @@ One daemon runs on your development machine. When you assign a thread, it:
 3. **Bounds every tool call.** A hook the agent cannot talk its way past checks
    each one. Inside the worktree, work proceeds. Leaving it, touching credentials,
    or `rm -rf`-ing the box is refused for everyone, always.
-4. **Parks** the session when the thread goes quiet and **resumes** it, same
+4. **Moves files both ways.** What you attach lands in the worktree for the agent
+   to open; what it produces comes back into the thread. See [Files](#files).
+5. **Parks** the session when the thread goes quiet and **resumes** it, same
    worktree and same memory of the conversation, whenever someone speaks again.
-5. **Writes everything down.** Every tool call lands in an audit log you can query.
+6. **Writes everything down.** Every tool call lands in an audit log you can query.
 
 Slack is the default surface and Claude Code the default engine, but the core is
 written against interfaces, so other chat platforms and other coding agents can be
@@ -159,6 +162,8 @@ Create the app at <https://api.slack.com/apps> using **From scratch**. Then:
    - `app_mentions:read`: the `@Condotto …` path
    - `channels:history`, `groups:history`: read thread messages. Add
      `im:history` / `mpim:history` only if you want DMs.
+   - `files:read`: open files people drop in a thread
+   - `files:write`: send files back
    - `users:read`: so the agent calls people by name instead of by user ID
 
    That is the whole list. Condotto asks for nothing else.
@@ -281,10 +286,13 @@ In a channel the bot has been invited to:
 4. **Ship it.** Ask. Committing, pushing and opening a PR are ordinary commands.
    `GH_TOKEN` survives the environment scrub, so the PR URL comes back in the
    thread.
-5. **Start fresh without losing work.** `@Condotto clear` forgets the conversation
+5. **Drop a file in.** Screenshots, logs, CSVs, a PDF spec. Condotto saves what
+   you attach into the worktree and tells the agent where it is, so it can just
+   open it. Ask for one back and it posts the file into the thread.
+6. **Start fresh without losing work.** `@Condotto clear` forgets the conversation
    and nothing else. Same worktree, same branch, same uncommitted changes. Reach
    for it when a long thread has drifted.
-6. **End it.** `@Condotto stop` keeps the worktree. `@Condotto stop clean` schedules
+7. **End it.** `@Condotto stop` keeps the worktree. `@Condotto stop clean` schedules
    it for teardown.
 
 ---
@@ -325,6 +333,29 @@ talk in the thread, and what they say is carried into the next architect turn as
 context, so the conversation reaches the agent whole. It just does not spend a turn
 on every line of two people talking. Granting someone architect is the whole
 decision: hand it to people you would hand a laptop and a git remote to.
+
+---
+
+## Files
+
+**Files you send.** Attach anything to a thread message and the agent can read it.
+Condotto downloads it, drops it in the session's worktree, and names the path in
+the message the agent sees. It works the same whether you attach it to a message
+that starts a turn or just leave it in the thread for later. A screenshot of a
+broken page, a failing CI log, a CSV of the rows that look wrong: all just files
+the agent opens.
+
+Up to 10 files per message, 25 MB each. If one does not come through, Condotto
+says so in the thread rather than letting the agent look like it ignored you.
+
+**Files it sends back.** Ask for a diff, a report, a generated chart. Anything the
+agent writes to `.condotto/outbox/` in its worktree is uploaded to the thread and
+then deleted, so nothing gets posted twice. It is told about this directory, so
+"send me that as a file" is enough.
+
+Both directions stay inside the worktree, which means they are bounded by the same
+rule as everything else. A symlink left in the outbox is skipped rather than
+followed, so the outbox cannot become a way to read your machine.
 
 ---
 
@@ -492,7 +523,8 @@ sqlite3 -header -column condotto.sqlite \
 
 Common events: `tool_call` (with `tool`, `decision`, and `agentId` when a subagent
 made the call), `message_in` / `message_out`, `message_held` for a message kept for
-the next architect turn, `session_assigned` / `session_stopped`, `role_granted` /
+the next architect turn, `attachments_received` / `attachment_sent` /
+`attachment_failed`, `session_assigned` / `session_stopped`, `role_granted` /
 `role_revoked`, `budget_exceeded`, `error`.
 
 Reading the live database is safe. WAL mode reads without blocking the writer. For
@@ -562,6 +594,7 @@ bun run smoke:create    # a real session and turn; smoke:resume proves park and 
 bun run smoke:workflows # multi-agent workflows fan out, and the boundary holds
 bun run smoke:plan      # plan mode: reads run, writes do not, the plan reaches the thread
 bun run smoke:monorepo  # sub-project cwd, cross-package edits, the boundary
+bun run smoke:attachments # the agent opens a file it was handed and sends one back
 bun run smoke:reset     # delete the scratch dir; the next run rebuilds it
 ```
 
