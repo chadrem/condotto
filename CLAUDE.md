@@ -145,9 +145,13 @@ Runtime is **Bun 1.2+**. TypeScript runs directly, no build step.
   default and the right posture for a team install. `subscription` uses keychain
   OAuth, or `claude setup-token` into `CLAUDE_CODE_OAUTH_TOKEN` when headless;
   supported, not deprecated, and scoped to a single operator driving their own
-  sessions. Under both modes the credential rides the SDK subprocess env and is
-  readable from the agent's shell, so the floor's hard-deny on commands naming
-  either variable is what guards it. Pinned by a regression test. Do not weaken.
+  sessions. The two spellings of `subscription` are NOT interchangeable for remote
+  control: a `setup-token` credential is inference-only and Anthropic's session
+  service refuses it, so publishing a thread needs a full `claude auth login` on the
+  host. Everything else works identically. Under both modes the credential rides the
+  SDK subprocess env and is readable from the agent's shell, so the floor's hard-deny
+  on commands naming either variable is what guards it. Pinned by a regression test.
+  Do not weaken.
 - Distribution: `bun build --compile` to a single binary, with the native
   `claude` runtime riding alongside as a sidecar.
 - **`Bun.TOML.parse` silently drops a table header preceded by a bare `#` line.**
