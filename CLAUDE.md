@@ -6,10 +6,8 @@ This file and `README.md` are the only documents. This one is for whoever is
 editing the code; `README.md` is the product overview, install and runbook. Keep
 each fact in exactly one of them.
 
-Do not add a third. One fact in four documents costs four edits per correction
-and the copies drift apart faster than they help. A new fact goes in the code
-comment nearest the thing it explains, or here if a future session would trip
-without it.
+Do not add a third. A new fact goes in the code comment nearest the thing it
+explains, or here if a future session would trip without it.
 
 ## What this repo is
 
@@ -25,8 +23,8 @@ plus a Slack adapter (`src/adapters/slack/`) and a Claude Code adapter
 ## The security model, in full
 
 Condotto runs on one team's machine, against their own repos, driven by people
-they trust. Nothing here ever asks a human anything — there is no approval step
-and no gate tier to add one back to. What follows is the whole model.
+they trust. Nothing here ever asks a human anything — there is no approval step.
+What follows is the whole model.
 
 - **Worktree containment.** Every path-bearing tool call resolves inside the
   session's worktree. The boundary is the worktree ROOT, which may sit above the
@@ -47,8 +45,11 @@ and no gate tier to add one back to. What follows is the whole model.
   or message content. This is the control that a trusted team does not replace:
   the attacker here is a string in a dependency README, not a person in Slack.
 - **Cost cap.** Off by default, money not security. `@Condotto budget <usd>` opts
-  a thread in; `budget off` opts back out. The backstop that does not depend on
-  Condotto being correct is the Console spend cap.
+  a thread in, `budget off` opts back out, and the row is authoritative once
+  `assign` has seeded it. The thread cap is checked BETWEEN turns; a thread that
+  has one also arms the SDK's per-turn `maxBudgetUsd` with the remaining headroom,
+  which is the only thing that stops a runaway mid-turn. The backstop that does
+  not depend on Condotto being correct is the Console spend cap.
 - **The audit log.** Free at runtime, and the only record of what the agent did.
 - **Agent memory.** Per (repo, channel), outside the worktree, the one named
   exception to containment. `verifyMemoryTarget` re-proves every target against
@@ -59,12 +60,11 @@ and no gate tier to add one back to. What follows is the whole model.
   the session manager posts the content into the thread. `@Condotto plan off` is
   how it ends — there is no button.
 
-**Deliberately outside the boundary, and it is worth knowing where:** a repo's
-checked-in hooks, a skill's inline `` !`cmd` ``, and skill arguments all expand
-BEFORE the model and before our hook, so `policy.ts` never sees them. That is
-accepted: they are your repo, your skills, your typing. It is only worth
-remembering because the agent can write files in the repo too, so in principle it
-could write itself a hook. Every write is in the audit log.
+**Outside the boundary by design:** a repo's checked-in hooks, a skill's inline
+`` !`cmd` ``, and skill arguments all expand BEFORE the model and before our hook,
+so `policy.ts` never sees them. Accepted — they are your repo and your typing —
+but remember the agent can write files in that repo, so in principle it could
+write itself a hook.
 
 ## Architecture (the shape to preserve)
 
@@ -86,25 +86,15 @@ seams:
 `thread_ts` in the core, no SDK type in `policy.ts`. Domain types (`Principal`,
 `ConversationRef`, `ToolCall`) live in the core. `bun run check:ports` (also run
 by `bun test`) catches the mechanical half: platform imports, relative imports
-into `adapters/`, and surface wire tokens (`thread_ts`, `block_actions`, `<@`,
-`xoxb-`) anywhere outside `adapters/`. A domain type that merely mirrors an SDK
-shape is on you.
+into `adapters/`, and the surface wire tokens listed in `scripts/check-ports.ts`
+anywhere outside `adapters/`. A domain type that merely mirrors an SDK shape is
+on you.
 
 ## Files in and out of a thread
 
-Both directions go through the WORKTREE, never through the model's context
-(`core/attachments.ts`). An inbound file is downloaded by the surface adapter and
-written to `.condotto/attachments/`; the framed message names the path and the
-agent opens it with Read. An outbound file is one the agent wrote to
-`.condotto/outbox/`, which the session manager posts and then empties.
-
-Why it is worth keeping that shape: the existing worktree confinement is then the
-only boundary either direction needs. No second path around `policy.ts`, no base64
-in the prompt, and a screenshot and a 40 MB heap dump work identically. Two things
-hold it up, and both have tests — `safeAttachmentName` reduces an uploader's
-filename to one harmless segment (it reaches both a path and the prompt, outside
-the fence), and `readOutbox` refuses to follow a symlink, which is the one shape
-that would turn the outbox into a read of the host.
+Both directions go through the WORKTREE, not the model's context, so worktree
+confinement is the only boundary either needs. Keep it that way. The reasoning and
+the two controls that hold it up are in `core/attachments.ts`'s header.
 
 ## Key invariants (enforce in code, not just schema)
 
@@ -121,7 +111,6 @@ that would turn the outbox into a read of the host.
 
 Runtime is **Bun 1.2+**. TypeScript runs directly, no build step.
 
-- Run: `bun run <file>`. Test: `bun test`, or `bun test <path>` for one file.
 - Deps: `@anthropic-ai/claude-agent-sdk` and `@slack/bolt`. SQLite is built in
   via `bun:sqlite`. **Bolt is pinned to v4 and must stay there**: Bolt 5 pulls
   `@slack/socket-mode@^3`, which Bun cannot run. On an existing clone always
@@ -147,9 +136,7 @@ Runtime is **Bun 1.2+**. TypeScript runs directly, no build step.
   wrong thing. Pinned by a test that loads the example file for real.
 
 Bun compatibility with the SDK is verified (Bun 1.3.14): spawn, streaming, hooks
-and resume all work. If a future SDK update trips on Bun, the hedges are to
-isolate the SDK in a Node child process behind the harness port, or run the
-daemon on Node.
+and resume all work.
 
 ## SDK gotchas
 
@@ -167,8 +154,8 @@ of the last three we relied on contradicted the SDK's own documentation.
 - **`tools: {type:'preset',preset:'claude_code'}` is a no-op**, byte-identical to
   omitting the option. Only an explicit list works.
 - A `tools` entry the runtime does not expose is ignored, not an error.
-  `TodoWrite` is absent in every configuration measured. `Agent` is exposed only
-  under its legacy name `Task`.
+  `TodoWrite` and `MultiEdit` are absent in every configuration measured. `Agent`
+  is exposed only under its legacy name `Task`.
 - **Without `systemPrompt: {type:'preset', preset:'claude_code'}`** the model gets
   no environment context and invents paths. Use the preset plus an append.
 - **`settings.plansDirectory` must be absolute.** A relative value resolves
@@ -182,8 +169,6 @@ of the last three we relied on contradicted the SDK's own documentation.
   NOT set it, deliberately: skills that shell out to gather context are the
   normal kind, and this is the "your repo, your skills" line the security model
   already draws. Turning it on is a product decision, not a bug fix.
-- **`disableAllHooks` governs filesystem hooks only.** The SDK-passed
-  programmatic `PreToolUse` hook still fires, which is what makes it safe to pin.
 - **Session storage is keyed by encoded cwd**:
   `~/.claude/projects/<cwd with every non-alphanumeric replaced by ->/<id>.jsonl`.
   Resuming requires the same cwd. Relocate with `CLAUDE_CONFIG_DIR`.

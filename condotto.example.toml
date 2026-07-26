@@ -161,9 +161,9 @@ max_concurrent_turns = 6    # cap on harness turns running at once across all
 #                                 #   writes lands in the system prompt of every later
 #                                 #   thread in that channel. Every write is audited,
 #                                 #   and the agent's shell cannot reach the directory.
-# cost_cap_usd = 25               # per-thread cost ceiling for this repo
-#                                 #   (overrides [defaults].cost_cap_usd). Omit for
-#                                 #   no ceiling, which is the default.
+# cost_cap_usd = 25               # per-thread cost ceiling for this repo. Omit to
+#                                 #   inherit [defaults].cost_cap_usd, which is
+#                                 #   itself unset (no ceiling) by default.
 # default_model = "sonnet"        # per-repo default model token (overrides [defaults]).
 # default_effort = "high"         # per-repo default effort (overrides [defaults]).
 

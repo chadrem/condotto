@@ -483,14 +483,21 @@ export class SessionManager {
     return session.effort ?? this.defaultEffort;
   }
   /**
-   * This session's cost ceiling, or null for no ceiling. The default is null: a
-   * cap that pauses healthy work mid-task is worse than no cap, so an architect
-   * opts in with `@Condotto budget <usd>`. One definition, because "unlimited"
-   * read as `0` or `Infinity` anywhere would be a silently unbounded thread or a
-   * permanently stalled one.
+   * This session's cost ceiling, or null for no ceiling. The default is no
+   * ceiling: a cap that pauses healthy work mid-task is worse than no cap, so an
+   * architect opts in with `@Condotto budget <usd>`.
+   *
+   * The row is read STRAIGHT — no `?? this.defaultCostCapUsd`. `assign` already
+   * resolves the daemon default into the row, so a NULL here means "explicitly no
+   * ceiling", which is exactly what `budget off` writes. Falling back would make
+   * `off` a no-op on any install that configured a default, while still telling
+   * the architect the ceiling was removed.
+   *
+   * One definition, because "unlimited" read as `0` or `Infinity` anywhere would
+   * be a silently unbounded thread or a permanently stalled one.
    */
   private budgetLimitFor(session: SessionRow): number | null {
-    return session.budget_limit_usd ?? this.defaultCostCapUsd;
+    return session.budget_limit_usd;
   }
 
   /**
@@ -932,7 +939,10 @@ export class SessionManager {
         harness_session_handle: null,
         branch: worktree.branch,
         status: "parked",
-        // Seed the per-thread cost ceiling: repo override, else daemon default.
+        // Seed the per-thread cost ceiling: repo override, else daemon default,
+        // else null for no ceiling. Resolved HERE and never again — `budgetLimitFor`
+        // reads the row straight, so `budget off` can mean "none" rather than
+        // "inherit". A later change to the daemon default reaches new threads only.
         budget_limit_usd: repo.cost_cap_usd ?? this.defaultCostCapUsd,
         // Seed model/effort; null = fall back to the daemon default at turn time.
         model: seedModel,

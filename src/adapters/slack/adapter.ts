@@ -404,7 +404,7 @@ export class SlackAdapter implements SurfaceAdapter {
             "`/condotto stop` (list this channel's sessions).\n" +
             "Inside a session thread (mention me): `@Condotto stop`, `@Condotto cancel` (stop the running turn), " +
             "`@Condotto clear` (forget the conversation, keep the worktree), " +
-            "`@Condotto status`, `@Condotto budget <usd>`.\n" +
+            "`@Condotto status`, `@Condotto budget <usd|off>`.\n" +
             "Tune the implementer: `@Condotto model <opus|sonnet|fable>`, `@Condotto effort <low…max>`, " +
             "`@Condotto subagents on|off`, `@Condotto workflows on|off`.\n" +
             "Plan before building: `@Condotto plan on|off` — I propose a plan and change nothing until you turn it off.\n" +

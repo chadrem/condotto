@@ -845,6 +845,28 @@ describe("cost budgets & runaway cap", () => {
     expect(w.store.listAudit(sid).some((a) => a.event === "budget_exceeded")).toBe(false);
   });
 
+  test("`budget off` really means none, even when the daemon default is a number", async () => {
+    // The case the first `budget off` test could not see: with costCap null the
+    // command looks correct however it is implemented. With a configured default,
+    // reading the row as "unset = inherit" makes `off` silently restore that
+    // default while telling the architect the ceiling is gone.
+    const w = makeWorld(undefined, { costCap: 25 });
+    const c = conv("e0x.000001");
+    await w.manager.handleEvent({ kind: "command", conv: c, author: architect, name: "assign", args: "testrepo" });
+    const sid = w.store.getSessionByConversation("fake", "e0x.000001")!.id;
+    expect(w.store.getSession(sid)!.budget_limit_usd).toBe(25); // seeded from the daemon default
+
+    await w.manager.handleEvent({ kind: "command", conv: c, author: architect, name: "budget", args: "off" });
+    w.store.insertTurn({ sessionId: sid, direction: "out", text: "prior", costUsd: 40 }); // past the old cap
+    await w.manager.handleEvent({ kind: "message", conv: c, author: architect, text: "go", attachments: [] });
+
+    expect(w.store.listAudit(sid).some((a) => a.event === "budget_exceeded")).toBe(false);
+    expect(w.harness.allTurns.at(-1)!.budgetUsd).toBeUndefined(); // no per-turn cap either
+    // And the settings block agrees with the message the architect was given.
+    await w.manager.handleEvent({ kind: "command", conv: c, author: architect, name: "help", args: "" });
+    expect(w.surface.posts.at(-1)!.text).toContain("cost budget no limit");
+  });
+
   test("a new turn passes the remaining budget to the harness as a per-turn cap", async () => {
     const w = makeWorld(undefined, { costCap: 5 });
     await w.manager.handleEvent({ kind: "command", conv: conv("e00.000001"), author: architect, name: "assign", args: "testrepo" });
