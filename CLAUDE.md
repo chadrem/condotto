@@ -176,3 +176,6 @@ of the last three we relied on contradicted the SDK's own documentation.
   developing Condotto itself. Slack development runs in the real company
   workspace by explicit architect decision; prefer a dedicated test channel.
 - **Commit directly to main.** No branches.
+- **Write commit messages like a person.** Short subject in plain English, then
+  at most two sentences of why. No headers, no bullets, no essay. Never a
+  `Claude-Session:` trailer or any other attribution.
