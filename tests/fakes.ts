@@ -321,16 +321,3 @@ export class FakeHarness implements HarnessAdapter {
   }
 }
 
-/** Fake land/deploy command runner — records calls, returns a canned result. */
-export class FakeCommandRunner {
-  calls: { command: string; cwd: string }[] = [];
-  result: { code: number | null; output: string; timedOut: boolean } = {
-    code: 0,
-    output: "[land] no-op",
-    timedOut: false,
-  };
-  async run(command: string, cwd: string): Promise<{ code: number | null; output: string; timedOut: boolean }> {
-    this.calls.push({ command, cwd });
-    return this.result;
-  }
-}

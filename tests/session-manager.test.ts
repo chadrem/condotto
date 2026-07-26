@@ -8,7 +8,7 @@ import { WorktreeManager } from "../src/core/worktrees";
 import { MemoryManager } from "../src/core/memory";
 import type { ConversationRef, Principal, ToolCall } from "../src/core/types";
 import { MENTION_TOKEN_RE, mentionToken } from "../src/core/types";
-import { FakeHarness, FakeSurface, FakeCommandRunner } from "./fakes";
+import { FakeHarness, FakeSurface } from "./fakes";
 
 let repoPath: string;
 let worktreesRoot: string;
@@ -54,7 +54,6 @@ interface World {
   store: Store;
   surface: FakeSurface;
   harness: FakeHarness;
-  runner: FakeCommandRunner;
   manager: SessionManager;
   worktreesRoot: string;
 }
@@ -83,25 +82,21 @@ function makeWorld(
     path: repoPath,
     defaultBranch: "main",
     safeBashAllowlist: ["git status"],
-    landCmd: "echo land-ran",
-    deployCmd: "echo deploy-ran",
     memory: opts.repoMemory === true,
   });
   s.setRole("fake:U_ARCH", "architect"); // command authority (assign/stop/approve)
   const surface = new FakeSurface(opts.identityStrength ?? "verified");
   const harness = new FakeHarness();
-  const runner = new FakeCommandRunner();
   const root = opts.worktreesRoot ?? worktreesRoot;
   const manager = new SessionManager(s, harness, new WorktreeManager(root), () => {}, {
     defaultCostCapUsd: opts.costCap ?? 10,
     maxConcurrentTurns: opts.maxConcurrentTurns,
-    commandRunner: runner,
     worktreeRetentionMs: opts.worktreeRetentionMs,
     startedAt: opts.startedAt,
     ...(opts.memoryRoot ? { memory: new MemoryManager(opts.memoryRoot) } : {}),
   });
   manager.registerSurface(surface);
-  return { store: s, surface, harness, runner, manager, worktreesRoot: root };
+  return { store: s, surface, harness, manager, worktreesRoot: root };
 }
 
 const member: Principal = { surface: "fake", externalId: "U_MEMBER" };
@@ -126,7 +121,6 @@ describe("assign", () => {
     const intro = w.surface.posts.at(-1)!.text;
     expect(intro).toContain("I'm on it");
     // The intro advertises the thread commands (discoverable in-thread, not just docs).
-    expect(intro).toContain("@Condotto land");
     expect(intro).toContain("@Condotto budget");
     expect(intro).toContain("@Condotto stop");
   });
@@ -314,17 +308,6 @@ describe("assign: monorepo sub-project", () => {
     expect(readdirSync(isolated).length).toBe(0);
   });
 
-  test("land runs in the sub-project, not at the worktree root", async () => {
-    const w = makeWorld();
-    await assign(w, "407.000001", "testrepo/apps/report");
-    await w.manager.handleEvent({ kind: "command", conv: conv("407.000001"), author: architect, name: "land", args: "" });
-    const requestId = w.surface.lastApprovalRequestId()!;
-    await w.manager.handleEvent({ kind: "approval_decision", requestId, decider: architect, decision: "approved" });
-
-    const row = w.store.getSessionByConversation("fake", "407.000001")!;
-    expect(w.runner.calls.at(-1)!.command).toBe("echo land-ran");
-    expect(w.runner.calls.at(-1)!.cwd).toBe(join(row.worktree_path, "apps", "report"));
-  });
 
   test("reactivation cannot re-point the session at different work", async () => {
     // The harness keys its transcript by encoded cwd, so honouring a different
@@ -893,14 +876,6 @@ describe("gating & approval loop", () => {
     expect((reqAudit!.detail as any).concern).toBe("production-data");
   });
 
-  test("the repo's test command auto-runs without approval", async () => {
-    const w = makeWorld();
-    // makeWorld's testrepo has allowlist ["git status"]; give it a test command.
-    w.store.upsertRepo({ name: "testrepo", path: repoPath, defaultBranch: "main", safeBashAllowlist: ["git status"], testCmd: "bun test" });
-    await assignWithScript(w, "b76.000001", [{ id: "tu-test", name: "Bash", input: { command: "bun test tests/foo.test.ts" } }]);
-    expect(w.surface.approvalRequests.length).toBe(0);
-    expect(w.harness.executed.map((c) => c.name)).toEqual(["Bash"]);
-  });
 
   test("a failed approval post expires the pending row instead of wedging the session (review #3)", async () => {
     const w = makeWorld();
@@ -935,71 +910,6 @@ describe("gating & approval loop", () => {
   });
 });
 
-describe("land / deploy (DESIGN §2 journey 4)", () => {
-  async function assign(w: World, id: string): Promise<string> {
-    await w.manager.handleEvent({ kind: "command", conv: conv(id), author: architect, name: "assign", args: "testrepo" });
-    return w.store.getSessionByConversation("fake", id)!.id;
-  }
-
-  test("an architect ordering land posts an approval; approval runs the exact repo command and audits a deploy", async () => {
-    const w = makeWorld();
-    await assign(w, "d00.000001");
-    await w.manager.handleEvent({ kind: "command", conv: conv("d00.000001"), author: architect, name: "land", args: "" });
-
-    // A condotto:land approval was posted — not run yet (gated, §4).
-    expect(w.surface.approvalRequests.length).toBe(1);
-    expect(w.surface.approvalRequests[0]!.req.toolName).toBe("condotto:land");
-    expect(w.runner.calls.length).toBe(0);
-
-    const requestId = w.surface.lastApprovalRequestId()!;
-    await w.manager.handleEvent({ kind: "approval_decision", requestId, decider: architect, decision: "approved" });
-
-    // The daemon ran EXACTLY the repo's configured command in the worktree.
-    expect(w.runner.calls.length).toBe(1);
-    expect(w.runner.calls[0]!.command).toBe("echo land-ran");
-    const session = w.store.getSessionByConversation("fake", "d00.000001")!;
-    expect(w.runner.calls[0]!.cwd).toBe(session.worktree_path);
-    expect(w.store.listAudit(session.id).some((a) => a.event === "deploy")).toBe(true);
-    expect(w.surface.transcript().some((t) => t.includes("succeeded"))).toBe(true);
-  });
-
-  test("denying a land runs nothing", async () => {
-    const w = makeWorld();
-    await assign(w, "d10.000001");
-    await w.manager.handleEvent({ kind: "command", conv: conv("d10.000001"), author: architect, name: "deploy", args: "" });
-    const requestId = w.surface.lastApprovalRequestId()!;
-    await w.manager.handleEvent({ kind: "approval_decision", requestId, decider: architect, decision: "denied" });
-    expect(w.runner.calls.length).toBe(0);
-    expect(w.surface.transcript().some((t) => t.includes("cancelled"))).toBe(true);
-  });
-
-  test("a member cannot order a deploy", async () => {
-    const w = makeWorld();
-    await assign(w, "d20.000001");
-    await w.manager.handleEvent({ kind: "command", conv: conv("d20.000001"), author: member, name: "deploy", args: "" });
-    expect(w.surface.approvalRequests.length).toBe(0);
-    expect(w.surface.posts.at(-1)?.text).toContain("Only architects can deploy");
-  });
-
-  test("land is refused when the repo has no land command", async () => {
-    const w = makeWorld();
-    w.store.upsertRepo({ name: "testrepo", path: repoPath, defaultBranch: "main", safeBashAllowlist: ["git status"] }); // clears land/deploy
-    await assign(w, "d30.000001");
-    await w.manager.handleEvent({ kind: "command", conv: conv("d30.000001"), author: architect, name: "land", args: "" });
-    expect(w.surface.approvalRequests.length).toBe(0);
-    expect(w.surface.posts.at(-1)?.text).toContain("No land command is configured");
-  });
-
-  test("a nonzero exit is reported as a failure", async () => {
-    const w = makeWorld();
-    w.runner.result = { code: 2, output: "boom", timedOut: false };
-    await assign(w, "d40.000001");
-    await w.manager.handleEvent({ kind: "command", conv: conv("d40.000001"), author: architect, name: "land", args: "" });
-    const requestId = w.surface.lastApprovalRequestId()!;
-    await w.manager.handleEvent({ kind: "approval_decision", requestId, decider: architect, decision: "approved" });
-    expect(w.surface.transcript().some((t) => t.includes("exited 2"))).toBe(true);
-  });
-});
 
 describe("cost budgets & runaway cap (DESIGN §4)", () => {
   async function assignAndSpend(w: World, id: string, spent: number): Promise<string> {
@@ -1555,8 +1465,6 @@ describe("harness capabilities — model & effort", () => {
       path: repoPath,
       defaultBranch: "main",
       safeBashAllowlist: ["git status"],
-      landCmd: "echo land-ran",
-      deployCmd: "echo deploy-ran",
       defaultModel: "fable",
       defaultEffort: "xhigh",
     });
@@ -1574,8 +1482,6 @@ describe("harness capabilities — model & effort", () => {
       path: repoPath,
       defaultBranch: "main",
       safeBashAllowlist: ["git status"],
-      landCmd: "echo land-ran",
-      deployCmd: "echo deploy-ran",
       defaultModel: "bogus-model",
     });
     await assign(w, "cap7.000001");
@@ -2072,8 +1978,6 @@ describe("trust-scoped project config", () => {
       path: repoPath,
       defaultBranch: "main",
       safeBashAllowlist: ["git status"],
-      landCmd: "echo land-ran",
-      deployCmd: "echo deploy-ran",
       trusted,
     });
   }
@@ -2728,8 +2632,6 @@ describe("skills — architect invocation", () => {
       path: repoPath,
       defaultBranch: "main",
       safeBashAllowlist: ["git status"],
-      landCmd: "echo land-ran",
-      deployCmd: "echo deploy-ran",
       trusted: true,
     });
     w.harness.skills = skills;
@@ -3055,14 +2957,6 @@ describe("plan mode — research first, implement after approval", () => {
     expect(w.harness.resumed.at(-1)!.system).not.toContain("Propose these actions normally");
   });
 
-  test("`land` is refused while planning — it would otherwise bypass the mode entirely", async () => {
-    const w = makeWorld();
-    await assign(w, "pm12.00001");
-    await plan(w, "pm12.00001", "on");
-    await w.manager.handleEvent({ kind: "command", conv: conv("pm12.00001"), author: architect, name: "land", args: "" });
-    expect(w.surface.posts.at(-1)!.text).toContain("plan mode");
-    expect(w.runner.calls.length).toBe(0);
-  });
 
   test("toggling plan mode expires a pending approval from the posture it left", async () => {
     const w = makeWorld();

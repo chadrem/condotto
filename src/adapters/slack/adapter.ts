@@ -166,8 +166,6 @@ export function parseMentionCommand(
   // here, not in that allowlist.
   if ((first === "clear" || first === "/clear") && words.length === 1) return { name: "clear", args: "" };
   if (first === "status" && words.length === 1) return { name: "status", args: "" };
-  if (first === "land" && words.length === 1) return { name: "land", args: "" };
-  if (first === "deploy" && words.length === 1) return { name: "deploy", args: "" };
   if (first === "budget" && words.length === 2) return { name: "budget", args: words[1]! };
   if (first === "model" && words.length === 2) return { name: "model", args: words[1]! };
   if (first === "effort" && words.length === 2) return { name: "effort", args: words[1]! };

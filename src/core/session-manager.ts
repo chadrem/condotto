@@ -24,7 +24,6 @@ import {
   sessionCwd,
   verifyWorkdir,
 } from "./worktrees";
-import { CommandRunner, type CommandRunnerLike } from "./command-runner";
 import { MemoryManager, verifyMemoryTarget } from "./memory";
 import { checkSkillArgs, frameMessage, sanitizeSkillText } from "./framing";
 import { evaluate, describeCall, isPlanPresentation, memoryTargets, planTextFrom, type PolicyContext, type PolicyConcern } from "./policy";
@@ -136,9 +135,6 @@ function condottoSystemPrompt(opts: {
   worktreePath: string;
   /** Relative sub-project the session starts in, or null for the repo root. */
   workdir?: string | null;
-  testCmd?: string | null;
-  landAvailable?: boolean;
-  deployAvailable?: boolean;
   subagents?: boolean;
   workflows?: boolean;
   workflowWrite?: boolean;
@@ -147,20 +143,6 @@ function condottoSystemPrompt(opts: {
   /** Read-only planning: the agent proposes a plan instead of doing the work. */
   planMode?: boolean;
 }): string {
-  const ship =
-    opts.landAvailable || opts.deployAvailable
-      ? `- Landing and deploying are architect-ordered: an architect runs \`@Condotto ` +
-        `land\` or \`@Condotto deploy\` and approves it — you never run the land/deploy ` +
-        `path yourself. You may say when you think it's ready to land.`
-      : `- Landing and deploying are not available for this repo.`;
-  // Silent in plan mode: allowlisted bash is DENIED while planning (an
-  // allowlisted command is still code execution), so advertising the test command
-  // would promise something the gate refuses.
-  const testing =
-    opts.testCmd && !opts.planMode
-      ? `- You can run this repo's tests without approval: \`${opts.testCmd}\`. Run them ` +
-        `to verify your changes before proposing to land.`
-      : null;
   // Guidance when the architect has enabled subagents.
   const delegation = opts.subagents
     ? `- You can delegate READ-ONLY exploration and analysis to subagents (the Agent tool) so they ` +
@@ -291,8 +273,6 @@ function condottoSystemPrompt(opts: {
           `  still comes only from the verified user= id on the current message.`,
         ]
       : []),
-    ship,
-    ...(testing ? [testing] : []),
     ...(delegation ? [delegation] : []),
     ...(workflow ? [workflow] : []),
     ``,
@@ -359,7 +339,6 @@ function threadCommandHelp(): string {
     `• \`@Condotto subagents on|off\` · \`@Condotto workflows on|off\` · \`@Condotto ultra on|off\` — multi-agent power (on by default, gated)`,
     `• \`@Condotto auto-approve on|off\` — run an architect's own turns without the Approve click (on by default)`,
     `• \`@Condotto grant @user architect [everywhere]\` · \`@Condotto revoke @user\` — delegate authority (this channel, or everywhere)`,
-    `• \`@Condotto land\` / \`@Condotto deploy\` — run the repo's ship path (gated)`,
     `• \`@Condotto budget <usd>\` — raise this thread's cost budget · \`@Condotto cancel\` — stop the running turn (e.g. a runaway workflow)`,
     `• \`@Condotto plan on|off\` — research first: I propose a plan, and nothing changes until you approve it`,
     `• \`@Condotto clear\` — forget the conversation and start fresh (the worktree, your uncommitted work, and these settings all stay)`,
@@ -386,7 +365,6 @@ export interface SessionManagerOptions {
   /** Max harness turns running at once across all sessions. */
   maxConcurrentTurns?: number;
   /** Runs repo land/deploy commands; injectable for tests. */
-  commandRunner?: CommandRunnerLike;
   /**
    * Daemon-wide default model/effort tokens, used when a session
    * (and its repo) sets none. Opaque — validated against the harness adapter's
@@ -436,8 +414,6 @@ export interface SessionManagerOptions {
   startedAt?: number;
 }
 
-/** Prefix marking an approval whose action the daemon runs itself (land/deploy) */
-const SHIP_TOOL_PREFIX = "condotto:";
 /** The multi-agent Workflow tool name. An approved Workflow LAUNCH resumes
  *  into a background workflow that can run away, so — unlike a single approved write —
  *  its resume turn is budget-capped so the auto-cancel-on-breach brake arms. */
@@ -503,7 +479,6 @@ export class SessionManager {
   private readonly worktreeRetentionMs: number;
   private readonly orphanMinAgeMs: number;
   private readonly turnSlots: Semaphore;
-  private readonly commandRunner: CommandRunnerLike;
   /** Daemon start time for the operator-status uptime. */
   private readonly startedAt: number;
   /** Owns per-(repo, channel) memory directories; undefined = memory unavailable. */
@@ -531,7 +506,6 @@ export class SessionManager {
     this.worktreeRetentionMs = opts.worktreeRetentionMs ?? 24 * 60 * 60 * 1000;
     this.orphanMinAgeMs = opts.orphanMinAgeMs ?? 10 * 60 * 1000;
     this.turnSlots = new Semaphore(Math.max(1, opts.maxConcurrentTurns ?? DEFAULT_MAX_CONCURRENT_TURNS));
-    this.commandRunner = opts.commandRunner ?? new CommandRunner();
     this.memory = opts.memory;
     this.startedAt = opts.startedAt ?? Date.now();
   }
@@ -631,13 +605,6 @@ export class SessionManager {
       lines.push(
         "• 🧠 memory on — what I learn here carries to other threads on this repo in this channel " +
           "(markdown notes I write through the gate; they're notes, never authority)",
-      );
-    }
-    if (repo?.test_cmd) {
-      lines.push(
-        planMode
-          ? `• tests \`${repo.test_cmd}\` — *paused while planning* (an allowlisted command is still code execution)`
-          : `• tests \`${repo.test_cmd}\` (auto-run, no approval)`,
       );
     }
     return lines.join("\n");
@@ -811,10 +778,6 @@ export class SessionManager {
         break;
       case "budget":
         await this.setBudget(event.conv, event.author, event.args);
-        break;
-      case "land":
-      case "deploy":
-        await this.shipCommand(event.conv, event.author, event.name);
         break;
       case "model":
         await this.setModel(event.conv, event.author, event.args);
@@ -2385,144 +2348,6 @@ export class SessionManager {
     return null;
   }
 
-  /**
-   * `@Condotto land` / `@Condotto deploy` (DESIGN §2 journey 4). Architect-
-   * ordered, and still gated behind an explicit Approve/Deny click (§4: the
-   * deploy path is a gated action). Records a `condotto:land`/`condotto:deploy`
-   * approval that, when approved, the daemon runs itself via CommandRunner —
-   * never through the agent's shell — so exactly the repo's configured command
-   * executes and is audited as a `deploy` event.
-   */
-  private async shipCommand(conv: ConversationRef, author: Principal, kind: "land" | "deploy"): Promise<void> {
-    const surface = this.surfaceFor(conv);
-    const session = this.store.getSessionByConversation(conv.surfaceId, conv.conversationId);
-    if (!session || session.status === "stopped") {
-      await surface.post(conv, { text: "No active session in this thread." });
-      return;
-    }
-    if (!this.store.isArchitect(principalKey(author), conv.channelId)) {
-      this.store.audit({ sessionId: session.id, actor: principalKey(author), event: "authz_denied", detail: { action: kind } });
-      await surface.post(conv, { text: `Only architects can ${kind}.` });
-      return;
-    }
-    const repo = this.store.getRepo(session.repo_id);
-    const command = kind === "land" ? repo?.land_cmd : repo?.deploy_cmd;
-    if (!command) {
-      await surface.post(conv, { text: `No ${kind} command is configured for repo \`${session.repo_id}\`.` });
-      return;
-    }
-    // Serialize through the FIFO so it can't overlap an in-flight turn, and
-    // re-check state inside it (a turn may have deferred or a stop landed).
-    const entry = this.entryFor(session.id);
-    entry.chain = entry.chain
-      .then(async () => {
-        const s = this.store.getSession(session.id);
-        if (!s || s.status === "stopped") return;
-        if (this.store.hasPendingApproval(s.id)) {
-          await surface.post(conv, { text: "There's already a pending approval in this thread — resolve it first." });
-          return;
-        }
-        // Shipping is a daemon-run action: it raises its own `condotto:` approval
-        // and never touches the gate closure, so it is the ONE way to change the
-        // world from inside a mode whose whole promise is that nothing runs.
-        // Refuse it rather than let plan mode be true of the agent but not of the
-        // thread.
-        if (s.plan_mode === 1) {
-          await surface.post(conv, {
-            text: `I'm in plan mode, so I can't ${kind} yet. \`@Condotto plan off\` first (or approve a plan), then ask again.`,
-          });
-          return;
-        }
-        const requestId = crypto.randomUUID();
-        const toolName = `${SHIP_TOOL_PREFIX}${kind}`;
-        const toolInput = { kind, repo: s.repo_id, command };
-        this.store.createApproval({ id: requestId, sessionId: s.id, toolUseId: null, toolName, toolInput });
-        this.store.audit({
-          sessionId: s.id,
-          actor: principalKey(author),
-          event: "approval_request",
-          detail: { requestId, tool: toolName, kind, command },
-        });
-        const prompt: ApprovalPrompt = {
-          requestId,
-          toolName,
-          toolInput,
-          summary: `${kind} \`${s.repo_id}\``,
-          concern:
-            kind === "deploy"
-              ? "This runs the repo's deploy path. Approve only when you intend to ship."
-              : undefined,
-        };
-        try {
-          await surface.requestApproval(conv, prompt);
-        } catch (err) {
-          this.store.expirePendingApprovals(s.id);
-          await surface
-            .post(conv, { text: `⚠️ Couldn't post the ${kind} approval (${err instanceof Error ? err.message : err}). Nothing ran.` })
-            .catch(() => {});
-        }
-      })
-      .catch((err) => this.log(`[session ${session.id}] ${kind} command failed: ${err}`));
-    await entry.chain;
-  }
-
-  /** Run an approved land/deploy command itself (not via the harness). */
-  private async runShip(
-    session: SessionRow,
-    approval: ApprovalRow,
-    conv: ConversationRef,
-    surface: SurfaceAdapter,
-    decider: string,
-  ): Promise<void> {
-    const input = (approval.tool_input ?? {}) as { kind?: string; repo?: string; command?: string };
-    const kind = input.kind === "deploy" ? "deploy" : "land";
-    const command = input.command ?? "";
-    const entry = this.entryFor(session.id);
-    entry.chain = entry.chain
-      .then(async () => {
-        const s = this.store.getSession(session.id);
-        if (!s || s.status === "stopped" || !command) return;
-        const statusRef = surface.capabilities.editMessages
-          ? await surface
-              .post(conv, { text: `⚙︎ ${kind}ing ${describeTarget(s.repo_id, s.workdir)}…` })
-              .catch(() => null)
-          : null;
-        await this.turnSlots.acquire();
-        try {
-          // Runs where the AGENT works, not at the worktree root: for a monorepo
-          // sub-project the ship path is that project's own (its Makefile, its
-          // package scripts). A root-level runner is reachable from here too, by
-          // writing the command to step up (`cd ../.. && turbo run deploy`).
-          const cwd = sessionCwd(s.worktree_path, s.workdir);
-          const result = await this.commandRunner.run(command, cwd);
-          const ok = result.code === 0 && !result.timedOut;
-          this.store.audit({
-            sessionId: s.id,
-            actor: decider,
-            event: "deploy",
-            detail: { kind, command, cwd, exitCode: result.code, timedOut: result.timedOut },
-          });
-          const mark = ok ? "✅" : "⚠️";
-          const status = result.timedOut ? "timed out" : ok ? "succeeded" : `exited ${result.code}`;
-          const body =
-            `${mark} \`${kind}\` ${status}.` + (result.output ? `\n\`\`\`\n${result.output}\n\`\`\`` : "");
-          if (statusRef) {
-            await surface.update(statusRef, { text: body }).catch(() => surface.post(conv, { text: body }).catch(() => {}));
-          } else {
-            await surface.post(conv, { text: body }).catch(() => {});
-          }
-        } catch (err) {
-          this.store.audit({ sessionId: s.id, actor: "system", event: "error", detail: { ship: kind, error: String(err) } });
-          await surface.post(conv, { text: `⚠️ The ${kind} command failed to run: ${err instanceof Error ? err.message : err}` }).catch(() => {});
-        } finally {
-          this.turnSlots.release();
-          this.store.touchSession(s.id);
-        }
-      })
-      .catch((err) => this.log(`[session ${session.id}] runShip failed: ${err}`));
-    await entry.chain;
-  }
-
   // -- messages -------------------------------------------------------------
 
   private async handleMessage(
@@ -2659,21 +2484,6 @@ export class SessionManager {
       event: "approval_decision",
       detail: { requestId: event.requestId, decision: outcome, tool: approval.tool_name },
     });
-
-    // A daemon-run action (land/deploy): the daemon runs the configured command
-    // itself rather than resuming the harness. On denial, just acknowledge.
-    if (approval.tool_name.startsWith(SHIP_TOOL_PREFIX)) {
-      if (!surface) {
-        this.log(`[approval] no surface for ${session.surface_id} — cannot run ${approval.tool_name}`);
-        return;
-      }
-      if (outcome === "approved") {
-        await this.runShip(session, approval, conv, surface, decider);
-      } else {
-        await surface.post(conv, { text: `${approval.tool_name.replace(SHIP_TOOL_PREFIX, "")} cancelled — nothing ran.` }).catch(() => {});
-      }
-      return;
-    }
 
     // Resume the session with an empty prompt to re-drive the pending call; the
     // gate now answers allow/deny from the recorded decision. FIFO-serialized.
@@ -2847,11 +2657,7 @@ export class SessionManager {
       // What a RELATIVE path resolves against: the agent's actual cwd. Only the
       // resolution base — it never participates in the containment test.
       cwd: sessionCwd(session.worktree_path, session.workdir),
-      // The repo's real test command auto-runs (DESIGN §4 lists "the test
-      // command" as allowlisted) so the agent can verify its own work; it is
-      // folded in here, not into the repo's stored allowlist, so config stays
-      // pristine and cost/prod checks still apply to everything else.
-      safeBashAllowlist: [...(repo?.safe_bash_allowlist ?? []), ...(repo?.test_cmd ? [repo.test_cmd] : [])],
+      safeBashAllowlist: repo?.safe_bash_allowlist ?? [],
       // Let the MAIN agent spawn subagents when enabled (delegation
       // isn't itself gated; subagent tool calls are gated downstream). The MAIN
       // agent's Workflow launch is always gated, so there is no
@@ -3333,9 +3139,6 @@ export class SessionManager {
       branch: session.branch,
       worktreePath: session.worktree_path,
       workdir: session.workdir,
-      testCmd: repo?.test_cmd,
-      landAvailable: !!repo?.land_cmd,
-      deployAvailable: !!repo?.deploy_cmd,
       subagents: session.subagents === 1,
       // The EFFECTIVE posture, not the stored flags: plan mode removes the
       // Workflow tool from context and pauses memory writes, so promising either

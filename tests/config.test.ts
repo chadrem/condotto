@@ -100,9 +100,10 @@ path = "/srv/api"
 [[repos]]
 name = "webapp"
 path = "/srv/webapp"
+# test_cmd/land_cmd/deploy_cmd are deliberately ignored since 2026-07-26; an
+# existing config that still declares them must still boot.
 test_cmd = "npm test"
 land_cmd = "make land"
-deploy_cmd = "make deploy"
 cost_cap_usd = 25
 
 [[repos]]
@@ -111,13 +112,12 @@ path = "/srv/bare"
 `);
     const cfg = loadConfig({}, path);
     const webapp = cfg.repos.find((r) => r.name === "webapp")!;
-    expect(webapp.testCmd).toBe("npm test");
-    expect(webapp.landCmd).toBe("make land");
-    expect(webapp.deployCmd).toBe("make deploy");
     expect(webapp.costCapUsd).toBe(25);
+    // The retired command keys parse as nothing at all rather than throwing, so
+    // an operator upgrading a binary is not met with a config error.
+    expect("testCmd" in webapp).toBe(false);
+    expect("landCmd" in webapp).toBe(false);
     const bare = cfg.repos.find((r) => r.name === "bare")!;
-    expect(bare.testCmd).toBeUndefined();
-    expect(bare.landCmd).toBeUndefined();
     expect(bare.costCapUsd).toBeUndefined();
   });
 

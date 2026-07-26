@@ -316,9 +316,10 @@ function parseRepoEntry(entry: unknown, where: string): RepoConfig {
     path: expandHome(e.path),
     defaultBranch: optString(e.default_branch, `${where}.default_branch`) ?? "main",
     safeBashAllowlist: allow ?? DEFAULT_SAFE_BASH_ALLOWLIST,
-    testCmd: optString(e.test_cmd, `${where}.test_cmd`),
-    landCmd: optString(e.land_cmd, `${where}.land_cmd`),
-    deployCmd: optString(e.deploy_cmd, `${where}.deploy_cmd`),
+    // `test_cmd`, `land_cmd` and `deploy_cmd` are deliberately NOT read
+    // (2026-07-26). The daemon-run command path existed because the agent's shell
+    // was gated; now the agent runs its own tests. An existing config that still
+    // declares them boots fine — the keys are ignored, not rejected.
     costCapUsd: optPosNumber(e.cost_cap_usd, `${where}.cost_cap_usd`),
     // Opaque model/effort tokens (validated by the harness adapter) and the
     // trust flag. `trusted` must be an explicit boolean true — a truthy

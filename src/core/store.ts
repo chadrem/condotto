@@ -76,16 +76,13 @@ export interface SessionRow {
 
 export class ConflictError extends Error {}
 
-/** A repo as read back from the store (includes test/land/deploy + cost cap). */
+/** A repo as read back from the store. */
 export interface RepoRow {
   id: string;
   name: string;
   path: string;
   default_branch: string;
   safe_bash_allowlist: string[];
-  test_cmd: string | null;
-  land_cmd: string | null;
-  deploy_cmd: string | null;
   cost_cap_usd: number | null;
   /** Per-repo default model/effort tokens; null = daemon-wide default. */
   default_model: string | null;
@@ -200,6 +197,9 @@ function migrateBaselineV1(db: Database): void {
         path TEXT NOT NULL,
         default_branch TEXT NOT NULL,
         safe_bash_allowlist TEXT NOT NULL DEFAULT '[]',
+        -- Dropped again at v7; kept here because the baseline must describe the
+        -- schema as it stood at v1, or a fresh store would run v7 against
+        -- columns that never existed.
         deploy_cmd TEXT,
         land_cmd TEXT,
         policy_overrides TEXT NOT NULL DEFAULT '{}'
@@ -288,8 +288,8 @@ function migrateBaselineV1(db: Database): void {
     `CREATE INDEX IF NOT EXISTS idx_approvals_tooluse ON approvals (session_id, tool_use_id);`,
   );
 
-  // Per-repo test command + cost cap, and a per-session cost ceiling.
-  // (deploy_cmd/land_cmd already exist from the earlier repos schema above.)
+  // Per-repo test command + cost cap, and a per-session cost ceiling. `test_cmd`
+  // is dropped again at v7 — see the note on `deploy_cmd` above.
   ensureColumn(db, "repos", "test_cmd", "TEXT");
   ensureColumn(db, "repos", "cost_cap_usd", "REAL");
   ensureColumn(db, "sessions", "budget_limit_usd", "REAL");
@@ -396,6 +396,24 @@ function migrateV6(db: Database): void {
   db.run(`ALTER TABLE sessions ADD COLUMN plan_mode INTEGER NOT NULL DEFAULT 0`);
 }
 
+/**
+ * Migration **v7** (2026-07-26 simplification): drop `repos.test_cmd`,
+ * `land_cmd` and `deploy_cmd`.
+ *
+ * The daemon-run command path existed only because the agent's shell was gated:
+ * running `bun test` yourself needed an approval click, so the repo declared it
+ * once and Condotto ran it. With the gate gone for architects, the agent just
+ * runs the command, and a second way to run commands is a second thing to
+ * maintain. An operator's `test_cmd`/`land_cmd`/`deploy_cmd` in `condotto.toml`
+ * is now ignored rather than an error — `parseRepo` never reads those keys, so
+ * an existing config still boots.
+ */
+function migrateV7(db: Database): void {
+  db.run(`ALTER TABLE repos DROP COLUMN test_cmd`);
+  db.run(`ALTER TABLE repos DROP COLUMN land_cmd`);
+  db.run(`ALTER TABLE repos DROP COLUMN deploy_cmd`);
+}
+
 /** Add `column` to `table` only if absent (idempotent ALTER — SQLite has no
  *  `ADD COLUMN IF NOT EXISTS`). Used by the baseline migration to evolve tables
  *  a pre-runner DB already created. */
@@ -439,7 +457,8 @@ export class Store {
       migrateV4, // v4: repos.memory for durable agent memory.
       migrateV5, // v5: repos.default_subagents/default_workflows for per-repo posture.
       migrateV6, // v6: sessions.plan_mode for the per-thread plan-mode posture.
-      // v7+: append new migrations here. They only ever run on a store already
+      migrateV7, // v7: drop repos.test_cmd/land_cmd/deploy_cmd (the agent runs its own).
+      // v8+: append new migrations here. They only ever run on a store already
       // at the prior version, so they can be plain forward DDL — no IF NOT EXISTS
       // gymnastics.
     ];
@@ -478,9 +497,6 @@ export class Store {
     path: string;
     defaultBranch: string;
     safeBashAllowlist?: string[];
-    testCmd?: string;
-    landCmd?: string;
-    deployCmd?: string;
     costCapUsd?: number;
     defaultModel?: string;
     defaultEffort?: string;
@@ -493,16 +509,15 @@ export class Store {
     this.db
       .query(
         `INSERT INTO repos
-           (id, name, path, default_branch, safe_bash_allowlist,
-            test_cmd, land_cmd, deploy_cmd, cost_cap_usd,
+           (id, name, path, default_branch, safe_bash_allowlist, cost_cap_usd,
             default_model, default_effort, trusted, default_auto_approve, memory,
             default_subagents, default_workflows)
-         VALUES ($id, $name, $path, $branch, $allow, $test, $land, $deploy, $cap,
+         VALUES ($id, $name, $path, $branch, $allow, $cap,
                  $model, $effort, $trusted, $autoApprove, $memory,
                  $subagents, $workflows)
          ON CONFLICT(name) DO UPDATE SET
            path = $path, default_branch = $branch, safe_bash_allowlist = $allow,
-           test_cmd = $test, land_cmd = $land, deploy_cmd = $deploy, cost_cap_usd = $cap,
+           cost_cap_usd = $cap,
            default_model = $model, default_effort = $effort, trusted = $trusted,
            default_auto_approve = $autoApprove, memory = $memory,
            default_subagents = $subagents, default_workflows = $workflows`,
@@ -513,9 +528,6 @@ export class Store {
         path: repo.path,
         branch: repo.defaultBranch,
         allow: JSON.stringify(repo.safeBashAllowlist ?? []),
-        test: repo.testCmd ?? null,
-        land: repo.landCmd ?? null,
-        deploy: repo.deployCmd ?? null,
         cap: repo.costCapUsd ?? null,
         model: repo.defaultModel ?? null,
         effort: repo.defaultEffort ?? null,
@@ -562,8 +574,7 @@ export class Store {
   getRepo(name: string): RepoRow | null {
     const row = this.db
       .query<RawRepoRow, { name: string }>(
-        `SELECT id, name, path, default_branch, safe_bash_allowlist,
-                test_cmd, land_cmd, deploy_cmd, cost_cap_usd,
+        `SELECT id, name, path, default_branch, safe_bash_allowlist, cost_cap_usd,
                 default_model, default_effort, trusted, default_auto_approve, memory,
                 default_subagents, default_workflows
          FROM repos WHERE name = $name`,
@@ -576,9 +587,6 @@ export class Store {
       path: row.path,
       default_branch: row.default_branch,
       safe_bash_allowlist: parseJsonArray(row.safe_bash_allowlist),
-      test_cmd: row.test_cmd,
-      land_cmd: row.land_cmd,
-      deploy_cmd: row.deploy_cmd,
       cost_cap_usd: row.cost_cap_usd,
       default_model: row.default_model,
       default_effort: row.default_effort,

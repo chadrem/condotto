@@ -275,28 +275,26 @@ describe("store sessions", () => {
     expect(store.getRepo("r")!.default_auto_approve).toBeNull();
   });
 
-  test("repo test/land/deploy commands and cost cap round-trip", () => {
-    const store = memoryStore();
-    store.upsertRepo({
-      name: "r",
-      path: "/tmp/r",
-      defaultBranch: "main",
-      testCmd: "bun test",
-      landCmd: "echo land",
-      deployCmd: "echo deploy",
-      costCapUsd: 3.5,
-    });
+  test("repo cost cap round-trips, and v7 has dropped the command columns", () => {
+    const path = join(mkdtempSync(join(tmpdir(), "condotto-repocols-")), "condotto.sqlite");
+    const store = new Store(path);
+    store.upsertRepo({ name: "r", path: "/tmp/r", defaultBranch: "main", costCapUsd: 3.5 });
     const r = store.getRepo("r")!;
-    expect(r.test_cmd).toBe("bun test");
-    expect(r.land_cmd).toBe("echo land");
-    expect(r.deploy_cmd).toBe("echo deploy");
     expect(r.cost_cap_usd).toBe(3.5);
     // Omitted fields are null, and upsert overwrites them back to null.
     store.upsertRepo({ name: "r", path: "/tmp/r", defaultBranch: "main" });
-    const r2 = store.getRepo("r")!;
-    expect(r2.test_cmd).toBeNull();
-    expect(r2.land_cmd).toBeNull();
-    expect(r2.cost_cap_usd).toBeNull();
+    expect(store.getRepo("r")!.cost_cap_usd).toBeNull();
+    // Migration v7 dropped test_cmd/land_cmd/deploy_cmd. The baseline still
+    // creates them (it has to describe the schema as of v1), so this asserts the
+    // drop actually ran rather than that they were never added.
+    store.close();
+    const cols = new Database(path, { readonly: true })
+      .query<{ name: string }, []>(`PRAGMA table_info(repos)`)
+      .all()
+      .map((c) => c.name);
+    expect(cols).not.toContain("test_cmd");
+    expect(cols).not.toContain("land_cmd");
+    expect(cols).not.toContain("deploy_cmd");
   });
 });
 
@@ -568,7 +566,7 @@ describe("store schema migrations", () => {
   // The current schema version == the number of migrations in the runner. Bump
   // this constant in lockstep whenever a migration is appended — the tests below
   // pin the runner's behavior to it.
-  const CURRENT_SCHEMA_VERSION = 6;
+  const CURRENT_SCHEMA_VERSION = 7;
 
   const migPath = (name: string): string => join(mkdtempSync(join(tmpdir(), "condotto-mig-")), name);
   const userVersion = (path: string): number => {
@@ -613,13 +611,19 @@ describe("store schema migrations", () => {
     // addition so re-migration re-adds it — exactly what the true upgrade does (a
     // v0 store that never had them). Without this the rewound store would still
     // carry the column and the plain ADD COLUMN would (wrongly) see a duplicate.
-    // EVERY future migration that adds a column must be dropped here too.
+    // EVERY future migration that ADDS a column must be dropped here too — and a
+    // migration that DROPS one must be re-added, since a real pre-runner store
+    // still had it and the drop has to run again on the way back up.
     raw.run("ALTER TABLE sessions DROP COLUMN cleanup_at"); // v2
     raw.run("ALTER TABLE sessions DROP COLUMN workdir"); // v3
     raw.run("ALTER TABLE repos DROP COLUMN memory"); // v4
     raw.run("ALTER TABLE repos DROP COLUMN default_subagents"); // v5
     raw.run("ALTER TABLE repos DROP COLUMN default_workflows"); // v5
     raw.run("ALTER TABLE sessions DROP COLUMN plan_mode"); // v6
+    // v7 dropped these; a v0 store had them, and the baseline's `CREATE TABLE IF
+    // NOT EXISTS` cannot re-add a column to a table that already exists.
+    raw.run("ALTER TABLE repos ADD COLUMN land_cmd TEXT"); // v1-era, dropped at v7
+    raw.run("ALTER TABLE repos ADD COLUMN deploy_cmd TEXT"); // v1-era, dropped at v7
     raw.run("PRAGMA user_version = 0"); // rewind the stamp to the pre-runner state
     raw.close();
     expect(userVersion(path)).toBe(0);

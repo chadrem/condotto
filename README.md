@@ -77,14 +77,14 @@ assigned, the daemon:
 2. Streams the thread's messages into that session, framed so message *content*
    can never impersonate a command.
 3. **Mechanically gates every tool call.** Reads and analysis run freely; writes,
-   arbitrary shell, network, production-data access, and the deploy path pause
+   arbitrary shell, network and production-data access pause
    un-executed until an architect approves (or, for an architect's own turn,
    auto-approve lets them through — see below). A hard-deny floor (escaping the
    worktree, touching credentials, `rm -rf` the box) can't be overridden by anyone.
 4. **Parks** the session when idle and **resumes** it — same worktree, same
    history — whenever the thread wakes up. One conversation maps to one session
    for its entire life.
-5. **Audits everything** — every tool call, approval, decision, and deploy — to an
+5. **Audits everything** — every tool call, approval and decision — to an
    append-only log in the SQLite store.
 
 Slack is the default surface and Claude Code the default harness, but the core is
@@ -300,7 +300,7 @@ The one file to know. Read [`condotto.example.toml`](condotto.example.toml) — 
 heavily commented — but at a glance:
 
 ```toml
-# Surface-qualified principals with command authority (approve, land/deploy,
+# Surface-qualified principals with command authority (approve,
 # grant). WITHOUT at least one, nobody can approve gated actions.
 architects = ["slack:U0123ABC"]
 
@@ -335,9 +335,6 @@ default_branch = "main"
 trusted = false                   # true loads the repo's own CLAUDE.md/skills/.claude — vouch first
 memory = false                    # true gives the agent durable memory for this repo — vouch first
 safe_bash_allowlist = ["git status", "bun test"]  # auto-allowed without approval
-test_cmd = "bun test"             # auto-run so the agent verifies its own work
-land_cmd = "make land"            # architect-ordered `@Condotto land`, run by the daemon (not the agent)
-deploy_cmd = "make deploy"        # architect-ordered `@Condotto deploy`, same handling
 # cost_cap_usd / default_model / default_effort / auto_approve / subagents / workflows  # per-repo overrides
 ```
 
@@ -353,11 +350,10 @@ not the same as setting them to `false`.
 only works in repos you name, and it refuses to start with none configured.
 
 A monorepo is **one** `[[repos]]` entry — you pick the sub-project when you assign
-(`/condotto assign webapp/apps/report`), not here. See [Monorepos](#monorepos) for
-what that means for `test_cmd` and `land_cmd`.
+(`/condotto assign webapp/apps/report`), not here. See [Monorepos](#monorepos).
 
-For your first session, point an entry at a throwaway clone and leave land/deploy
-as no-ops until you've watched the gate work:
+For your first session, point an entry at a throwaway clone and watch the gate
+work before you aim it at anything you care about:
 
 ```sh
 git init ~/tmp/condotto-testbed
@@ -368,10 +364,13 @@ git init ~/tmp/condotto-testbed
 [[repos]]
 name = "testbed"
 path = "~/tmp/condotto-testbed"
-land_cmd = "echo '[land] no-op'"
-deploy_cmd = "echo '[deploy] no-op'"
-# test_cmd = "bun test"   # add once the repo actually has tests
 ```
+
+> **Retired keys.** `test_cmd`, `land_cmd` and `deploy_cmd` are gone as of
+> 2026-07-26. Running the tests, landing and deploying are ordinary commands the
+> agent runs itself; a second, daemon-side way to run a command existed only
+> because the agent's shell used to need an approval click for everything. An old
+> config that still declares them boots fine — the keys are ignored.
 
 ---
 
@@ -430,8 +429,9 @@ you can assign):
    approve it. You get one decision about the whole change instead of thirty
    decisions about individual writes. Approve and it implements straight away;
    deny and say what you'd rather, and it re-plans. `@Condotto plan off` to leave.
-5. **Ship it:** `@Condotto land` (and `@Condotto deploy`) run the repo's configured
-   command **through the gate** — no-ops until you wire them to something real.
+5. **Ship it:** ask for it. Committing, pushing and opening a PR are ordinary
+   commands the agent runs through the gate, and `GH_TOKEN` survives the
+   environment scrub, so a PR URL comes back in the thread.
 6. **Start over without losing the work:** `@Condotto clear` forgets the
    conversation and nothing else. Same worktree, same branch, same uncommitted
    changes, same settings. Reach for it when a long thread has drifted, or when
@@ -452,7 +452,7 @@ you can assign):
 | `/condotto stop` | anyone | Lists this channel's sessions and points you to the in-thread stop. |
 
 **Who can do what.** *Assigning* a session is command authority — **architects
-only** (as are approvals, land/deploy, grant, and every setting). **Anyone** can
+only** (as are approvals, grant, and every setting). **Anyone** can
 *converse* in an assigned thread; a member's instructions are acknowledged but
 never executed without an architect's approval. To let a domain expert drive
 sessions themselves, an architect `@Condotto grant`s them architect rights (see
@@ -467,7 +467,6 @@ sessions themselves, an architect `@Condotto grant`s them architect rights (see
 | `@Condotto stop [clean]` | architect | End the session; `clean` also discards the worktree. |
 | `@Condotto cancel` | architect | Interrupt the running turn (e.g. a runaway workflow); the session lives on. |
 | `@Condotto clear` (or `/clear`) | architect | Forget the thread's conversation and start the agent fresh. The worktree, branch, uncommitted work, settings, memory and spend all survive. Pending approvals are discarded, and worktree-write goes back off. Refused while a turn is running — `cancel` first. |
-| `@Condotto land` / `@Condotto deploy` | architect | Run the repo's ship path (gated; daemon-run). |
 | `@Condotto budget <usd>` | architect | Raise this thread's cost ceiling. |
 | `@Condotto model <opus\|sonnet\|fable>` | architect | Set the implementer model (`opus` = Opus 5). |
 | `@Condotto effort <low…max>` | architect | Set reasoning effort. Changing it mid-thread drops the prompt cache, so prefer setting it early. |
@@ -504,16 +503,12 @@ sub-projects, because real monorepo changes rarely stay in one folder. The
 security boundary is unchanged: it is the worktree, and everything outside it is
 hard-denied exactly as before.
 
-Two things follow from the cwd being the sub-project:
-
-- **`land_cmd` / `deploy_cmd` run there**, not at the repo root. For a per-app
-  Makefile that's what you want. For a root-level runner, write the command to
-  step up: `cd ../.. && turbo run deploy`.
-- **`test_cmd` runs there too.** Set it to the sub-project's own test command.
-  If you'd rather run the root suite, add both `cd ../..` and that command to the
-  repo's `safe_bash_allowlist` — otherwise the compound command isn't fully
-  allowlisted and the agent's free verify-before-land loop starts asking for
-  approval on every run.
+One thing follows from the cwd being the sub-project: **commands run there**, not
+at the repo root. The agent runs the sub-project's own test command by default;
+ask it for the root suite and it steps up itself. If you want a command to skip
+the approval click, put it in the repo's `safe_bash_allowlist` exactly as the
+agent will type it — a compound command that is only half allowlisted still
+gates.
 
 A session's sub-project is fixed when it's assigned and can't be changed
 afterwards (the agent's conversation history is tied to its working directory).
@@ -668,11 +663,11 @@ how you reconstruct what the agent did and who approved it.
 Query it with any SQLite client — `sqlite3` ships with macOS and most Linux:
 
 ```sh
-# Recent gated / approval / deploy activity (newest first)
+# Recent gated / approval activity (newest first)
 sqlite3 -header -column condotto.sqlite \
   "SELECT ts, actor, event, substr(detail,1,70) AS detail
      FROM audit_log
-    WHERE event IN ('tool_call','approval_request','approval_decision','auto_approved','deploy','session_stopped')
+    WHERE event IN ('tool_call','approval_request','approval_decision','auto_approved','session_stopped')
     ORDER BY id DESC LIMIT 20;"
 
 # Who approved or denied what

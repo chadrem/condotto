@@ -18,8 +18,8 @@
 
 # ---------------------------------------------------------------------------
 # Architects — surface-qualified principals ("slack:U0123ABC") with command
-# authority: assign/stop sessions, approve gated actions, order land/deploy,
-# and auto-approve their own turns + delegate roles at runtime.
+# authority: assign/stop sessions, approve gated actions, auto-approve their own
+# turns, and delegate roles at runtime.
 # Find a user's ID in Slack: profile → ⋯ → "Copy member ID".
 # WITHOUT at least one architect, no one can approve gated actions.
 # Env override/append: CONDOTTO_ARCHITECTS (comma/space separated).
@@ -127,15 +127,13 @@ max_concurrent_turns = 6    # cap on harness turns running at once across all
 # MONOREPOS: declare the repo ONCE here; pick the sub-project when you assign —
 # `/condotto assign webapp/apps/report` starts the agent in `apps/report` (the
 # whole worktree stays readable and writable, so shared packages are still in
-# reach). Note that `test_cmd`/`land_cmd`/`deploy_cmd` below then run IN that
-# sub-project: set them to the sub-project's own commands, or write them to step
-# up to the root (`cd ../.. && turbo run deploy`). For a root test command, also
-# add `cd ../..` to `safe_bash_allowlist` or the compound command won't be fully
-# allowlisted and will start asking for approval.
+# reach). Commands the agent runs land IN that sub-project; it steps up to the
+# root itself when the job needs the root. If you want one to skip the approval
+# click, add it to `safe_bash_allowlist` exactly as the agent will type it.
 #
 # Starting out, point your first entry at a THROWAWAY clone rather than a repo you
-# care about, and wire `land_cmd`/`deploy_cmd` to `echo ...` until you've watched
-# the approval gate work. Sessions only ever see COMMITTED content (each runs in a
+# care about, and watch the approval gate work before you aim it at anything real.
+# Sessions only ever see COMMITTED content (each runs in a
 # fresh git worktree), so a repo's working tree, untracked files, and .gitignored
 # files are never visible to the agent.
 #
@@ -162,11 +160,6 @@ max_concurrent_turns = 6    # cap on harness turns running at once across all
 # safe_bash_allowlist = [         # commands auto-allowed without approval on this
 #   "git status", "bun test",     #   repo. Omit for a conservative read-only default.
 # ]
-# test_cmd = "bun test"           # the repo's test command — auto-run so the agent
-#                                 #   can verify its own work without approval.
-# land_cmd = "make land"          # architect-ordered `@Condotto land`, run by the
-#                                 #   daemon through the gate (never the agent shell).
-# deploy_cmd = "make deploy"      # architect-ordered `@Condotto deploy`, same handling.
 # cost_cap_usd = 25               # per-thread cost ceiling for this repo
 #                                 #   (overrides [defaults].cost_cap_usd).
 # default_model = "sonnet"        # per-repo default model token (overrides [defaults]).

@@ -40,9 +40,8 @@ export interface WorktreeInfo {
 // never-rewritten, and makes it obvious that the confinement boundary is unmoved.
 
 /**
- * The session's actual working directory. The single derivation used by the
- * harness cwd, the land/deploy command runner, and the policy resolution base, so
- * those three can never drift apart.
+ * The session's actual working directory. The single derivation used by both the
+ * harness cwd and the policy resolution base, so the two can never drift apart.
  */
 export function sessionCwd(worktreePath: string, workdir: string | null): string {
   return workdir ? resolve(worktreePath, workdir) : resolve(worktreePath);
@@ -168,8 +167,8 @@ export class WorktreeManager {
 
   /**
    * Keep `.condotto/` — the daemon's per-worktree scratch, currently plan-mode
-   * plan files — out of `git status`, so it can never ride an operator's
-   * `land_cmd` doing `git add -A` into a real commit.
+   * plan files — out of `git status`, so it can never ride a `git add -A` into a
+   * real commit.
    *
    * Written to the repo's COMMON `.git/info/exclude`, not a per-worktree one:
    * verified 2026-07-25 that git resolves excludes from the common dir, so a

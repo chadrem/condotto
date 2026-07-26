@@ -32,11 +32,13 @@ done.
 
 - [x] **Phase 0 — docs.** Delete DESIGN/PLAN/DECISIONS, fold the load-bearing SDK
       facts in here, make README self-contained.
-- [ ] **Phase 1 — test/land/deploy.** Delete `core/command-runner.ts`, the
+- [x] **Phase 1 — test/land/deploy.** Delete `core/command-runner.ts`, the
       `test_cmd`/`land_cmd`/`deploy_cmd` config keys, `@Condotto land`/`deploy`,
-      `runShip`, their approval cards and store columns. That path exists only
-      because shell was gated; the agent can just run the tests itself.
-      `safeBashAllowlist` dies with it.
+      `runShip` and their store columns (migration v7). That path existed only
+      because shell was gated; the agent runs its own tests now. Retired config
+      keys are ignored rather than rejected, so an old `condotto.toml` still
+      boots. `safeBashAllowlist` outlives it by one phase and dies in phase 2,
+      where it is a policy concept rather than a config one.
 - [ ] **Phase 2 — collapse `policy.ts`.** Two answers, allow or deny. Deny is the
       floor and nothing else. Delete the gate tier, `PolicyConcern`, production
       data detection, the bash allowlist, `workflowWrite`, and
@@ -63,7 +65,7 @@ done.
 
 **Still in the tree until those phases land:** the defer-based approval loop,
 Approve/Deny cards, auto-approve, the production-data gate, the safe bash
-allowlist, per-repo `trusted`, and daemon-run test/land/deploy. Expect to meet
+allowlist, and per-repo `trusted`. Expect to meet
 them in the code; they are on the way out, not load-bearing.
 
 ## What survives, and why

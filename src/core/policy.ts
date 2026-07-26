@@ -99,9 +99,8 @@ export interface PolicyContext {
    * The rule is "only genuine READS run", not "a gate becomes a deny", and the
    * difference is load-bearing. Two paths reach `allow` without ever passing
    * through `gate`, and both would execute during a supposedly read-only session:
-   *   - a fully-allowlisted bash command (`evaluateBash`) — and the session manager
-   *     folds the repo's `test_cmd` into that allowlist, so `bun test` is arbitrary
-   *     repo code that writes artifacts;
+   *   - a fully-allowlisted bash command (`evaluateBash`) — an allowlisted command
+   *     is still arbitrary code execution that can write artifacts;
    *   - a confined WRITE under the worktree-write opt-in (`evaluateConfined`), which
    *     a subagent reaches while subagents stay ON during planning.
    * So the collapse below is applied to the DECISION, not to the gate tier.

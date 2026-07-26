@@ -87,8 +87,6 @@ export type CommandName =
   // model turn is spent. The worktree-write opt-in is revoked (its consent was bound
   // to the context that just went away).
   | "clear"
-  | "land"
-  | "deploy"
   | "budget"
   | "help"
   // harness capability controls (architect-only). model/effort tune the
@@ -521,21 +519,7 @@ export interface RepoConfig {
   /** Commands that run without approval (exact or word-boundary prefix match). */
   safeBashAllowlist: string[];
   /**
-   * The repo's real test command. Auto-allowed as a Bash call so the agent
-   * can verify its own work without approval, and surfaced in the system prompt.
-   * `undefined` = no test command; the agent must gate any bash it runs.
-   */
-  testCmd?: string;
-  /**
-   * The repo's land/deploy path (DESIGN §2 journey 4). Architect-ordered
-   * (`@Condotto land` / `deploy`) and run by the daemon through the approval gate,
-   * never by the agent's shell. Build-time safety: these are `echo`/no-ops on the
-   * throwaway repo until later hardening. `undefined` = the action is unavailable.
-   */
-  landCmd?: string;
-  deployCmd?: string;
-  /**
-   * Per-thread cost ceiling in USD (DESIGN §4). A session whose cumulative
+   * Per-thread cost ceiling in USD. A session whose cumulative
    * `total_cost_usd` reaches this pauses and pings the architect; the ceiling is
    * seeded onto each session and an architect can raise it. `undefined` = fall
    * back to the daemon-wide default.
