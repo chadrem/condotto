@@ -905,7 +905,15 @@ context that no longer exists.
 every tool call allow/gate/deny (hard-deny first, then auto-allow read-only +
 confined and allowlisted bash, else gate); a `gate` becomes the SDK `defer` driven
 by the actual `deferred_tool_use`, with `canUseTool` as the deny-by-default
-batching backstop. Assign/stop/approvals are architect-only, verified server-side;
+batching backstop. The reachable tool surface is itself an allowlist: the adapter
+passes an explicit `tools` list, so a session has exactly the built-ins the policy
+engine has an arm for — search included, and the runtime's unclassified extras
+(`Cron*`, `SendMessage`, `RemoteTrigger`, `Enter`/`ExitWorktree`, …) excluded, which
+matters because they would otherwise gate into an unreadable raw-JSON card and
+`ExitWorktree` destroys a worktree. Availability (`tools`) and auto-approval
+(`allowedTools`) are separate SDK options; conflating them once cost the shipped
+posture its `Grep`/`Glob` (2026-07-26, Appendix B), and an allowlist fails CLOSED
+as the runtime's built-ins grow. Assign/stop/approvals are architect-only, verified server-side;
 roles are config-authoritative. Per-repo test/land/deploy run through the
 Approve/Deny gate via the core `CommandRunner` in the session's cwd (never the
 agent's shell; a no-op `echo` while a repo is being shaken out, a real land/deploy
