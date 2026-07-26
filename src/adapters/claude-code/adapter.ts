@@ -300,8 +300,8 @@ function toolPosture(h: HarnessTurnOptions | undefined): {
 //
 //  1. Provenance. `slash_commands` is a flat `string[]`; it cannot say WHICH file
 //     a name resolves to. Since a repo skill and an operator skill may share a
-//     name and the list de-duplicates, "is this the `ship` I mean?" is answerable
-//     only here, at enumeration time.
+//     name and the list de-duplicates, "which file is this?" is answerable only
+//     here, at enumeration time.
 //  2. Built-ins stay out. The runtime's list carries ~45 built-ins that grow with
 //     every CLI release — `/clear`, `/model`, `/compact`, `/rewind`, and whatever
 //     ships next. A denylist over that set fails OPEN on upgrade, silently. An
@@ -1132,7 +1132,7 @@ class ClaudeCodeSession implements HarnessSession {
       //
       // NEVER a skill turn either, and for the opposite reason. A skill turn also
       // carries `text: ""`, so guarding on `input.text` alone would refuse to
-      // recover it; but "recovering" it means re-dispatching `/ship` into a brand
+      // recover it; but "recovering" it means re-dispatching the skill into a brand
       // new session, running a side-effecting command a SECOND time. An error the
       // architect can see and re-issue is strictly better than a silent double run.
       if (

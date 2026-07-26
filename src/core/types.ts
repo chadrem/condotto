@@ -118,7 +118,7 @@ export type CommandName =
   | "subagents"
   | "workflows"
   // Dispatch a harness skill / slash command on an architect's behalf
-  // (`@Condotto /ship <args>`). Args are "<name> [raw args…]". This is the only
+  // (`@Condotto /<name> <args>`). Args are "<name> [raw args…]". This is the only
   // path to a skill the AGENT cannot invoke: a skill marked
   // `disable-model-invocation` is withheld from the model and reachable only by a
   // human naming it. The core validates the name and normalizes the argument text
@@ -364,8 +364,8 @@ export interface HarnessTurnOptions {
  *
  * `path` is the resolved absolute source file. It exists because provenance cannot
  * be recovered later: the harness reports a flat list of names that de-duplicates
- * shadowed entries, so "which `ship` will run" is answerable only at enumeration
- * time. The core shows it to the architect; it never interprets it.
+ * shadowed entries, so which FILE a name resolves to is answerable only at
+ * enumeration time. The core shows it to the architect; it never interprets it.
  */
 export interface HarnessSkill {
   name: string;

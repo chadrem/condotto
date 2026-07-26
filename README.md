@@ -429,20 +429,31 @@ Claude account.
 
 ## Skills
 
-Your [Claude Code skills](https://code.claude.com/docs/en/skills) work in a thread.
-`@Condotto /ship`, or `@Condotto skills` to see what is there. Mention Condotto
-first, because Slack eats a message that begins with `/`.
+Your own [Claude Code skills](https://code.claude.com/docs/en/skills) work in a
+thread. `@Condotto skills` lists what this session can run; `@Condotto /<name>`
+runs one. Mention Condotto first, because Slack eats a message that begins with
+`/`.
 
-Condotto picks them up from the repo's `.claude/skills` and from your own
-`~/.claude/skills`. The listing names the exact file, because `ship` in your repo
-and `ship` in your home directory are different programs.
+Condotto looks in four places: `.claude/skills` and `.claude/commands` in the repo,
+and the same two under your home directory. The listing shows the exact file behind
+each name, so you can tell a repo skill from one of your own.
 
-This is also the only way to reach a skill marked `disable-model-invocation: true`.
-That flag withholds a skill from the model, and it is the flag teams put on the
-skills that matter most: `ship`, `ready`, `commit`. Naming one yourself is a
-different route, which is why it is architects only.
+Running one yourself is architects only, and it is the only way to reach a skill
+marked `disable-model-invocation: true`. That flag withholds a skill from the
+model; naming it yourself is a different route in, so the flag does not apply.
 
-A skill runs as an ordinary turn: same model, same budget, same boundary.
+A skill runs as an ordinary turn: same model, same budget, same boundary. One
+thing worth knowing is flagged in the listing — a skill that uses `` !`cmd` `` to
+gather context runs that command during expansion, before the turn starts and so
+before the boundary applies. That is normal for skills and it is your own file;
+the listing says so once rather than surprising you.
+
+Some skills are left out of the listing entirely, and the daemon log says which
+and why. A skill is not offered if it declares `context: fork`, `model` or
+`effort` in its frontmatter (each would override something the thread controls),
+if it inlines a file from outside the worktree with `@`, or if the same name
+exists in two of the four directories — which one would win is unstated, so
+Condotto refuses rather than guessing. Rename one and it comes back.
 
 ---
 

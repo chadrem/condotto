@@ -97,8 +97,8 @@ export function sanitizeDisplayName(name: string): string {
 //
 // Arguments to an architect-invoked skill are substituted into the skill's body at
 // `$ARGUMENTS` during expansion, before the model and before the PreToolUse hook.
-// They are not screened. An architect typing `@Condotto /ship v2.1` is an architect
-// running their own skill with their own arguments, which is the whole feature.
+// They are not screened. An architect typing `@Condotto /release v2.1` is an
+// architect running their own skill with their own arguments, which is the feature.
 //
 // Two limits remain, and neither is about safety:
 //   * a length cap, because an argument line is a commit message, not an essay;

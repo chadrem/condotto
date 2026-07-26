@@ -1845,8 +1845,9 @@ export class SessionManager {
       return;
     }
     // A skill runs as a full turn, so in plan mode every consequential thing it
-    // tries is denied. A `ship`-shaped skill would half-run and report a success it
-    // never achieved — worse than refusing, because the thread would believe it.
+    // tries is denied. A skill that writes or runs anything would half-run and
+    // report a success it never achieved — worse than refusing, because the
+    // thread would believe it.
     if (session.plan_mode === 1) {
       await surface.post(conv, {
         text: "I'm in plan mode, so a skill would only half-run — its writes and commands get refused. `@Condotto plan off` first.",
