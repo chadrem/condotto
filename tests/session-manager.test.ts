@@ -81,7 +81,6 @@ function makeWorld(
     name: "testrepo",
     path: repoPath,
     defaultBranch: "main",
-    safeBashAllowlist: ["git status"],
     memory: opts.repoMemory === true,
   });
   s.setRole("fake:U_ARCH", "architect"); // command authority (assign/stop/approve)
@@ -353,11 +352,49 @@ describe("conversing", () => {
     await w.manager.handleEvent({
       kind: "message",
       conv: conv(id),
-      author: { surface: "fake", externalId: "U_PM" },
+      author: architect,
       text,
       attachments: [],
     });
   }
+
+  test("only an architect's message runs a turn; anyone else's is held for the next one", async () => {
+    // The thread IS the ticket, so a member's message is not dropped — it is
+    // carried into the next architect turn as context. What it does not do is
+    // spend an Opus turn (and an unsolicited interjection) on every line of a
+    // conversation between two humans.
+    const w = makeWorld();
+    const c = conv("mem1.000001");
+    await w.manager.handleEvent({ kind: "command", conv: c, author: architect, name: "assign", args: "testrepo" });
+    const before = w.harness.allTurns.length;
+
+    await w.manager.handleEvent({ kind: "message", conv: c, author: member, text: "the parser drops empty rows", attachments: [] });
+    expect(w.harness.allTurns.length).toBe(before); // no turn, no spend
+
+    await w.manager.handleEvent({ kind: "message", conv: c, author: architect, text: "fix that", attachments: [] });
+    const turn = w.harness.allTurns.at(-1)!;
+    // Both messages reach the agent, oldest first, each with its OWN verified
+    // header — a quoted member must never inherit the architect's authority.
+    expect(turn.text).toContain("the parser drops empty rows");
+    expect(turn.text).toContain("fix that");
+    expect(turn.text.indexOf("drops empty rows")).toBeLessThan(turn.text.indexOf("fix that"));
+    expect(turn.text).toContain("user=fake:U_MEMBER");
+    expect(turn.text).toContain("user=fake:U_ARCH");
+
+    // And it is consumed: a second architect turn does not replay it.
+    await w.manager.handleEvent({ kind: "message", conv: c, author: architect, text: "now ship it", attachments: [] });
+    expect(w.harness.allTurns.at(-1)!.text).not.toContain("drops empty rows");
+  });
+
+  test("a member who @-mentions is told plainly, rather than ignored", async () => {
+    const w = makeWorld();
+    const c = conv("mem2.000001");
+    await w.manager.handleEvent({ kind: "command", conv: c, author: architect, name: "assign", args: "testrepo" });
+    await w.manager.handleEvent({ kind: "message", conv: c, author: member, text: "@condotto do it", attachments: [], mentioned: true });
+    const said = w.surface.posts.at(-1)!.text;
+    expect(said).toMatch(/only architects/i);
+    expect(said).toMatch(/grant/i);
+  });
 
   test("thread messages become framed turns; replies land in the thread", async () => {
     const w = makeWorld();
@@ -366,7 +403,7 @@ describe("conversing", () => {
     // The harness saw exactly one framed turn in the session's worktree.
     expect(w.harness.created.length).toBe(1);
     const turn = w.harness.allTurns[0]!;
-    expect(turn.text).toContain("user=fake:U_PM");
+    expect(turn.text).toContain("user=fake:U_ARCH");
     expect(turn.text).toContain("> what does this repo do?");
     const row = w.store.getSessionByConversation("fake", "400.000001");
     expect(turn.cwd).toBe(row!.worktree_path);
@@ -548,13 +585,11 @@ describe("operator status & slash stop guidance", () => {
     expect(text).toContain("uptime 3d 4h");
     expect(text).toContain("*1* parked");
     expect(text).toContain("turns in flight: *0/6*"); // idle, default cap
-    expect(text).toContain("pending approvals: *0*");
     expect(text).toContain("default model `opus`");
     expect(text).toContain("effort `xhigh`");
     expect(text).toContain("cost cap $10.00/thread"); // this world pins its own cap
     expect(text).toContain("subagents on");
     expect(text).toContain("workflows on");
-    expect(text).toContain("auto-approve on");
     expect(text).toContain("1 repo"); // just testrepo
     expect(text).toContain("1 architect"); // fake:U_ARCH
   });
@@ -576,7 +611,7 @@ describe("operator status & slash stop guidance", () => {
     expect(w.manager.operatorStatus(member, "C1")).toContain("Only architects");
   });
 
-  test("counts are daemon-wide and reflect parked/stopped + the pending-approval backlog", async () => {
+  test("counts are daemon-wide and reflect parked/stopped sessions", async () => {
     const w = makeWorld();
     await assign(w, "ops3.000001", "C1");
     await assign(w, "ops4.000001", "C1");
@@ -589,22 +624,9 @@ describe("operator status & slash stop guidance", () => {
       name: "stop",
       args: "",
     });
-    // A gated write on another leaves a pending approval (session parks). The
-    // author is a MEMBER — an architect-initiated turn would auto-approve,
-    // leaving nothing pending.
-    w.harness.scriptTurn([{ id: "tu-w", name: "Write", input: { file_path: "x.txt", content: "hi" } }]);
-    await w.manager.handleEvent({
-      kind: "message",
-      conv: { surfaceId: "fake", channelId: "C1", conversationId: "ops3.000001" },
-      author: member,
-      text: "add x",
-      attachments: [],
-    });
-
     const text = w.manager.operatorStatus(architect, "C1");
-    expect(text).toContain("*2* parked"); // ops3 (parked after defer) + ops5 (C2)
+    expect(text).toContain("*2* parked"); // ops3 + ops5 (C2)
     expect(text).toContain("1 stopped"); // ops4
-    expect(text).toContain("pending approvals: *1*");
   });
 
   test("turns in flight tracks the concurrency semaphore while a turn is held", async () => {
@@ -741,173 +763,43 @@ describe("gating & approval loop", () => {
     await w.manager.handleEvent({
       kind: "message",
       conv: conv(id),
-      author: member,
+      author: architect,
       text: "please add a hello file",
       attachments: [],
     });
   }
 
-  test("a gated write defers: an approval is requested and the session parks", async () => {
-    const w = makeWorld();
-    await assignWithScript(w, "b00.000001", [writeCall]);
 
-    const session = w.store.getSessionByConversation("fake", "b00.000001")!;
-    expect(w.surface.approvalRequests.length).toBe(1);
-    expect(w.surface.approvalRequests[0]!.req.toolName).toBe("Write");
-    expect(w.store.hasPendingApproval(session.id)).toBe(true);
-    expect(w.harness.executed.length).toBe(0); // nothing ran yet
-    expect(w.surface.transcript().some((t) => t.includes("approval"))).toBe(true);
-    expect(session.status).toBe("parked");
-  });
 
-  test("architect approval resumes the session and the tool executes", async () => {
-    const w = makeWorld();
-    await assignWithScript(w, "b10.000001", [writeCall]);
-    const requestId = w.surface.lastApprovalRequestId()!;
-    const session = w.store.getSessionByConversation("fake", "b10.000001")!;
 
-    await w.manager.handleEvent({
-      kind: "approval_decision",
-      requestId,
-      decider: architect,
-      decision: "approved",
-    });
-
-    expect(w.harness.executed.map((c) => c.name)).toEqual(["Write"]);
-    expect(w.store.getApproval(requestId)!.decision).toBe("approved");
-    expect(w.store.hasPendingApproval(session.id)).toBe(false);
-    expect(w.surface.transcript().some((t) => t.includes("applied Write"))).toBe(true);
-
-    const events = w.store.listAudit(session.id).map((a) => a.event);
-    expect(events).toContain("approval_request");
-    expect(events).toContain("approval_decision");
-    // The gate was consulted twice: gated on the first pass, allowed on re-drive.
-    expect(w.store.listAudit(session.id).filter((a) => a.event === "tool_call").length).toBeGreaterThanOrEqual(2);
-  });
-
-  test("architect denial resumes with feedback and nothing executes", async () => {
-    const w = makeWorld();
-    await assignWithScript(w, "b20.000001", [writeCall]);
-    const requestId = w.surface.lastApprovalRequestId()!;
-
-    await w.manager.handleEvent({ kind: "approval_decision", requestId, decider: architect, decision: "denied" });
-
-    expect(w.harness.executed.length).toBe(0);
-    expect(w.store.getApproval(requestId)!.decision).toBe("denied");
-    expect(w.surface.transcript().some((t) => t.includes("did not run Write"))).toBe(true);
-  });
-
-  test("a member's approval click is rejected server-side; the session does not resume", async () => {
-    const w = makeWorld();
-    await assignWithScript(w, "b30.000001", [writeCall]);
-    const requestId = w.surface.lastApprovalRequestId()!;
-    const session = w.store.getSessionByConversation("fake", "b30.000001")!;
-
-    await w.manager.handleEvent({ kind: "approval_decision", requestId, decider: member, decision: "approved" });
-
-    expect(w.harness.executed.length).toBe(0);
-    expect(w.store.getApproval(requestId)!.decision).toBe("pending"); // not decided by a non-architect
-    expect(w.store.hasPendingApproval(session.id)).toBe(true);
-    expect(w.store.listAudit(session.id).some((a) => a.event === "approval_rejected")).toBe(true);
-  });
 
   test("a hard-deny (write outside the worktree) is refused outright — no approval", async () => {
     const w = makeWorld();
     await assignWithScript(w, "b40.000001", [{ id: "tu-esc", name: "Write", input: { file_path: "/etc/evil", content: "x" } }]);
     const session = w.store.getSessionByConversation("fake", "b40.000001")!;
 
-    expect(w.surface.approvalRequests.length).toBe(0);
-    expect(w.store.hasPendingApproval(session.id)).toBe(false);
     expect(w.harness.executed.length).toBe(0);
     expect(w.surface.transcript().some((t) => t.includes("outside your worktree"))).toBe(true);
+    expect(session).not.toBeNull();
   });
 
-  test("a message during a pending approval is held, not stacked into a second turn", async () => {
+
+
+  test("bash runs — there is no allowlist any more, only the floor", async () => {
     const w = makeWorld();
-    await assignWithScript(w, "b50.000001", [writeCall]);
-    const turnsBefore = w.harness.allTurns.length;
-
-    await w.manager.handleEvent({
-      kind: "message",
-      conv: conv("b50.000001"),
-      author: member,
-      text: "actually wait",
-      attachments: [],
-    });
-
-    expect(w.harness.allTurns.length).toBe(turnsBefore); // no new turn ran
-    expect(w.surface.posts.at(-1)?.text).toContain("pending approval request");
-  });
-
-  test("approval that arrives after stop does not resume", async () => {
-    const w = makeWorld();
-    await assignWithScript(w, "b60.000001", [writeCall]);
-    const requestId = w.surface.lastApprovalRequestId()!;
-    await w.manager.handleEvent({ kind: "command", conv: conv("b60.000001"), author: architect, name: "stop", args: "" });
-
-    await w.manager.handleEvent({ kind: "approval_decision", requestId, decider: architect, decision: "approved" });
-
-    expect(w.harness.executed.length).toBe(0);
-    expect(w.surface.transcript().some((t) => t.includes("after the session was stopped"))).toBe(true);
-  });
-
-  test("safe-allowlisted bash auto-runs without approval", async () => {
-    const w = makeWorld();
-    await assignWithScript(w, "b70.000001", [{ id: "tu-bash", name: "Bash", input: { command: "git status" } }]);
-    expect(w.surface.approvalRequests.length).toBe(0);
+    await assignWithScript(w, "b70.000001", [{ id: "tu-bash", name: "Bash", input: { command: "bun test" } }]);
     expect(w.harness.executed.map((c) => c.name)).toEqual(["Bash"]);
   });
 
-  test("a production-data bash call gates and surfaces the aggregates-only concern", async () => {
+  test("...and the floor still stops one that escapes", async () => {
     const w = makeWorld();
-    await assignWithScript(w, "b75.000001", [
-      { id: "tu-psql", name: "Bash", input: { command: "psql -c 'select count(*) from users'" } },
-    ]);
-    const session = w.store.getSessionByConversation("fake", "b75.000001")!;
-    expect(w.surface.approvalRequests.length).toBe(1);
-    const req = w.surface.approvalRequests[0]!.req;
-    expect(req.concern).toContain("aggregates only");
+    await assignWithScript(w, "b71.000001", [{ id: "tu-bad", name: "Bash", input: { command: "cat ~/.aws/credentials" } }]);
     expect(w.harness.executed.length).toBe(0);
-    // The gate audited the production-data concern.
-    const gated = w.store.listAudit(session.id).find((a) => a.event === "tool_call");
-    expect((gated!.detail as any).concern).toBe("production-data");
-    // ...and the approval_request records it too.
-    const reqAudit = w.store.listAudit(session.id).find((a) => a.event === "approval_request");
-    expect((reqAudit!.detail as any).concern).toBe("production-data");
   });
 
 
-  test("a failed approval post expires the pending row instead of wedging the session (review #3)", async () => {
-    const w = makeWorld();
-    w.surface.failApprovals = true;
-    await assignWithScript(w, "b80.000001", [writeCall]);
-    const session = w.store.getSessionByConversation("fake", "b80.000001")!;
 
-    expect(w.store.hasPendingApproval(session.id)).toBe(false); // expired, not stuck pending
-    expect(w.surface.posts.some((p) => p.text.includes("couldn't post the approval"))).toBe(true);
 
-    // The next message runs a normal turn (the session is not wedged).
-    w.surface.failApprovals = false;
-    w.harness.scriptTurn([{ id: "tu-read", name: "Read", input: { file_path: "README.md" } }]);
-    await w.manager.handleEvent({ kind: "message", conv: conv("b80.000001"), author: member, text: "try again", attachments: [] });
-    expect(w.harness.executed.map((c) => c.name)).toContain("Read");
-  });
-
-  test("stop expires a pending approval so a reassigned session is not wedged (review #7)", async () => {
-    const w = makeWorld();
-    await assignWithScript(w, "b90.000001", [writeCall]);
-    const session = w.store.getSessionByConversation("fake", "b90.000001")!;
-    expect(w.store.hasPendingApproval(session.id)).toBe(true);
-
-    await w.manager.handleEvent({ kind: "command", conv: conv("b90.000001"), author: architect, name: "stop", args: "" });
-    expect(w.store.hasPendingApproval(session.id)).toBe(false);
-
-    // Reassign, then a message runs a normal turn — no leftover pending block.
-    await w.manager.handleEvent({ kind: "command", conv: conv("b90.000001"), author: architect, name: "assign", args: "testrepo" });
-    w.harness.scriptTurn([{ id: "tu-read2", name: "Read", input: { file_path: "README.md" } }]);
-    await w.manager.handleEvent({ kind: "message", conv: conv("b90.000001"), author: member, text: "hello again", attachments: [] });
-    expect(w.harness.executed.map((c) => c.name)).toContain("Read");
-  });
 });
 
 
@@ -922,31 +814,16 @@ describe("cost budgets & runaway cap (DESIGN §4)", () => {
   test("a new turn passes the remaining budget to the harness as a per-turn cap", async () => {
     const w = makeWorld(undefined, { costCap: 5 });
     await w.manager.handleEvent({ kind: "command", conv: conv("e00.000001"), author: architect, name: "assign", args: "testrepo" });
-    await w.manager.handleEvent({ kind: "message", conv: conv("e00.000001"), author: member, text: "hi", attachments: [] });
+    await w.manager.handleEvent({ kind: "message", conv: conv("e00.000001"), author: architect, text: "hi", attachments: [] });
     expect(w.harness.allTurns.at(-1)!.budgetUsd).toBe(5); // full headroom on the first turn
   });
 
-  test("an approval-resume turn runs uncapped so a near-budget approved action isn't stranded", async () => {
-    const w = makeWorld(undefined, { costCap: 5 });
-    await w.manager.handleEvent({ kind: "command", conv: conv("e05.000001"), author: architect, name: "assign", args: "testrepo" });
-    const sid = w.store.getSessionByConversation("fake", "e05.000001")!.id;
-    w.store.insertTurn({ sessionId: sid, direction: "out", text: "prior", costUsd: 4.9 }); // near the $5 cap
-    w.harness.scriptTurn([{ id: "tu-w", name: "Write", input: { file_path: "x.txt", content: "hi" } }]);
-    await w.manager.handleEvent({ kind: "message", conv: conv("e05.000001"), author: member, text: "add x", attachments: [] });
-    const requestId = w.surface.lastApprovalRequestId()!;
-    await w.manager.handleEvent({ kind: "approval_decision", requestId, decider: architect, decision: "approved" });
-
-    // The approved Write ran despite being near the cap.
-    expect(w.harness.executed.map((c) => c.name)).toContain("Write");
-    // The resume turn (last) carried NO per-turn budget cap.
-    expect(w.harness.allTurns.at(-1)!.budgetUsd).toBeUndefined();
-  });
 
   test("a session over its cap pauses new turns and pings for a budget raise", async () => {
     const w = makeWorld(undefined, { costCap: 5 });
     const sid = await assignAndSpend(w, "e10.000001", 6); // already over the $5 cap
     const before = w.harness.allTurns.length;
-    await w.manager.handleEvent({ kind: "message", conv: conv("e10.000001"), author: member, text: "do more", attachments: [] });
+    await w.manager.handleEvent({ kind: "message", conv: conv("e10.000001"), author: architect, text: "do more", attachments: [] });
     expect(w.harness.allTurns.length).toBe(before); // no turn ran
     expect(w.surface.posts.at(-1)?.text).toContain("cost budget");
     expect(w.store.listAudit(sid).some((a) => a.event === "budget_exceeded")).toBe(true);
@@ -959,7 +836,7 @@ describe("cost budgets & runaway cap (DESIGN §4)", () => {
     expect(w.surface.posts.at(-1)?.text).toContain("Cost budget set to $20.00");
 
     const before = w.harness.allTurns.length;
-    await w.manager.handleEvent({ kind: "message", conv: conv("e20.000001"), author: member, text: "now continue", attachments: [] });
+    await w.manager.handleEvent({ kind: "message", conv: conv("e20.000001"), author: architect, text: "now continue", attachments: [] });
     expect(w.harness.allTurns.length).toBe(before + 1); // runs again
   });
 
@@ -986,42 +863,7 @@ describe("cost budgets & runaway cap (DESIGN §4)", () => {
     expect(w.store.getSessionByConversation("fake", "e30.000001")!.budget_limit_usd).toBe(5);
   });
 
-  test("an approved WORKFLOW-launch resume IS capped at the remaining headroom (auto-cancel on breach)", async () => {
-    const w = makeWorld(undefined, { costCap: 5 });
-    const c = conv("e50.000001");
-    await w.manager.handleEvent({ kind: "command", conv: c, author: architect, name: "assign", args: "testrepo" });
-    await w.manager.handleEvent({ kind: "command", conv: c, author: architect, name: "workflows", args: "on" });
-    const sid = w.store.getSessionByConversation("fake", "e50.000001")!.id;
-    w.store.insertTurn({ sessionId: sid, direction: "out", text: "prior", costUsd: 4.9 }); // near the $5 cap
-    // A member launches a workflow (member ⇒ no auto-approve ⇒ the launch defers).
-    w.harness.scriptTurn([{ id: "tu-wf", name: "Workflow", input: { script: "export const meta={name:'a'}" } }]);
-    await w.manager.handleEvent({ kind: "message", conv: c, author: member, text: "run wf", attachments: [] });
-    const requestId = w.surface.lastApprovalRequestId()!;
-    await w.manager.handleEvent({ kind: "approval_decision", requestId, decider: architect, decision: "approved" });
-    // The resume turn (last, empty prompt) IS capped, so a background workflow that
-    // breaches it triggers the SDK budget signal the adapter turns into a real interrupt.
-    expect(w.harness.allTurns.at(-1)!.text).toBe(""); // it's the resume
-    expect(w.harness.allTurns.at(-1)!.budgetUsd).toBeCloseTo(0.1, 5); // 5 - 4.9
-  });
 
-  test("a NON-workflow approved action resumes UNCAPPED even in a workflow-enabled session (precision)", async () => {
-    const w = makeWorld(undefined, { costCap: 5 });
-    const c = conv("e55.000001");
-    await w.manager.handleEvent({ kind: "command", conv: c, author: architect, name: "assign", args: "testrepo" });
-    await w.manager.handleEvent({ kind: "command", conv: c, author: architect, name: "workflows", args: "on" });
-    const sid = w.store.getSessionByConversation("fake", "e55.000001")!.id;
-    w.store.insertTurn({ sessionId: sid, direction: "out", text: "prior", costUsd: 4.9 }); // near the $5 cap
-    // An ordinary gated WRITE (not a Workflow launch) defers and is approved.
-    w.harness.scriptTurn([{ id: "tu-w", name: "Write", input: { file_path: "x.txt", content: "hi" } }]);
-    await w.manager.handleEvent({ kind: "message", conv: c, author: member, text: "add x", attachments: [] });
-    const requestId = w.surface.lastApprovalRequestId()!;
-    await w.manager.handleEvent({ kind: "approval_decision", requestId, decider: architect, decision: "approved" });
-    // The approved Write ran, and its resume was UNCAPPED — a workflow session must not
-    // re-strand an ordinary near-budget approved action (only workflow LAUNCHES are capped).
-    expect(w.harness.executed.map((cc) => cc.name)).toContain("Write");
-    expect(w.harness.allTurns.at(-1)!.text).toBe(""); // it's the resume
-    expect(w.harness.allTurns.at(-1)!.budgetUsd).toBeUndefined();
-  });
 });
 
 describe("cancel a running turn", () => {
@@ -1036,7 +878,7 @@ describe("cancel a running turn", () => {
     const held = new Promise<void>((r) => { release = r; });
     w.harness.beforeReply = () => held;
     w.harness.onInterrupt = () => release();
-    const turnP = w.manager.handleEvent({ kind: "message", conv: c, author: member, text: "go", attachments: [] });
+    const turnP = w.manager.handleEvent({ kind: "message", conv: c, author: architect, text: "go", attachments: [] });
     for (let i = 0; i < 200 && w.store.getSession(sid)!.status !== "active"; i++) {
       await new Promise((r) => setTimeout(r, 5));
     }
@@ -1182,7 +1024,6 @@ describe("clear — resetting the agent's context", () => {
     expect(after.workdir).toBe(before.workdir);
     expect(after.model).toBe("sonnet");
     expect(after.budget_limit_usd).toBe(25);
-    expect(after.auto_approve).toBe(before.auto_approve);
     expect(after.subagents).toBe(before.subagents);
     expect(after.workflows).toBe(before.workflows);
     expect(existsSync(join(after.worktree_path, "README.md"))).toBe(true);
@@ -1190,56 +1031,7 @@ describe("clear — resetting the agent's context", () => {
     expect(w.store.sessionCostUsd(before.id)).toBe(spentBefore);
   });
 
-  test("the worktree-write opt-in does NOT survive a clear — its consent was bound to the context", async () => {
-    const w = makeWorld();
-    await assign(w, "cl6.000001");
-    await w.manager.handleEvent({ kind: "command", conv: conv("cl6.000001"), author: architect, name: "workflows", args: "write on" });
-    const sid = w.store.getSessionByConversation("fake", "cl6.000001")!.id;
-    expect(w.store.getSession(sid)!.workflow_write).toBe(1);
-    await say(w, "cl6.000001", "hi");
 
-    await clear(w, "cl6.000001");
-
-    const after = w.store.getSession(sid)!;
-    expect(after.workflow_write).toBe(0);
-    // ...but the capabilities it rode on are posture, not consent, so they stay.
-    expect(after.workflows).toBe(1);
-    expect(after.subagents).toBe(1);
-    // A silent capability downgrade would be its own kind of lie.
-    expect(w.surface.posts.at(-1)!.text).toContain("worktree-write is back");
-    const cleared = w.store.listAudit(sid).find((a) => a.event === "context_cleared")!;
-    expect((cleared.detail as { workflowWriteRevoked: boolean }).workflowWriteRevoked).toBe(true);
-  });
-
-  test("clear voids a pending approval, and a late Approve click says so instead of silently running nothing", async () => {
-    const w = makeWorld();
-    await assign(w, "cl7.000001");
-    // A member-initiated gated write defers (an architect's own turn auto-approves).
-    w.harness.scriptTurn([{ id: "tu-w", name: "Write", input: { file_path: "x.txt", content: "hi" } }]);
-    await say(w, "cl7.000001", "add x", member);
-    const sid = w.store.getSessionByConversation("fake", "cl7.000001")!.id;
-    const requestId = w.surface.lastApprovalRequestId()!;
-    expect(w.store.hasPendingApproval(sid)).toBe(true);
-
-    await clear(w, "cl7.000001");
-    expect(w.store.hasPendingApproval(sid)).toBe(false);
-    expect(w.store.getApproval(requestId)!.decision).toBe("expired");
-    expect(w.surface.posts.at(-1)!.text).toContain("Discarded 1 pending approval");
-
-    // The click arrives after the clear. Slack has already rewritten its message to
-    // "Approved by …", so silence would leave the audit trail claiming an approval
-    // for an action that could never run.
-    await w.manager.handleEvent({ kind: "approval_decision", requestId, decider: architect, decision: "approved" });
-    expect(w.harness.executed.length).toBe(0);
-    expect(w.surface.posts.at(-1)!.text).toContain("expired before you decided it");
-    expect(w.store.listAudit(sid).some((a) => a.event === "approval_rejected")).toBe(true);
-
-    // And the thread is not wedged: hasPendingApproval no longer blocks new turns.
-    const before = w.harness.allTurns.length;
-    await say(w, "cl7.000001", "never mind, start over");
-    expect(w.harness.allTurns.length).toBe(before + 1);
-    expect(w.harness.created.length).toBe(2);
-  });
 
   test("spend survives, so a cleared over-budget session still refuses new turns", async () => {
     const w = makeWorld(undefined, { costCap: 5 });
@@ -1254,7 +1046,7 @@ describe("clear — resetting the agent's context", () => {
     expect(w.surface.posts.at(-1)!.text).toContain(`$${(spentBefore + 6).toFixed(2)} of $5.00`);
 
     const before = w.harness.allTurns.length;
-    await say(w, "cl8.000001", "do more", member);
+    await say(w, "cl8.000001", "do more");
     expect(w.harness.allTurns.length).toBe(before); // clearing is not a way to buy headroom
     expect(w.store.listAudit(sid).some((a) => a.event === "budget_exceeded")).toBe(true);
   });
@@ -1464,7 +1256,6 @@ describe("harness capabilities — model & effort", () => {
       name: "testrepo",
       path: repoPath,
       defaultBranch: "main",
-      safeBashAllowlist: ["git status"],
       defaultModel: "fable",
       defaultEffort: "xhigh",
     });
@@ -1481,7 +1272,6 @@ describe("harness capabilities — model & effort", () => {
       name: "testrepo",
       path: repoPath,
       defaultBranch: "main",
-      safeBashAllowlist: ["git status"],
       defaultModel: "bogus-model",
     });
     await assign(w, "cap7.000001");
@@ -1625,10 +1415,8 @@ describe("harness capabilities — subagents & ultra", () => {
     // The next turn attempts a Write from a SUBAGENT (agentId set).
     w.harness.scriptTurn([{ id: "sw1", name: "Write", input: { file_path: "x.ts" }, agentId: "sub-xyz" }]);
     await w.manager.handleEvent({ kind: "message", conv: c, author: architect, text: "go", attachments: [] });
-    // Denied, not executed, and no approval was ever posted (subagents can't gate).
-    expect(w.harness.executed.find((cl) => cl.id === "sw1")).toBeUndefined();
-    expect(w.surface.approvalRequests.length).toBe(0);
-    expect(w.surface.transcript().join("\n")).toMatch(/denied|Subagents can't/i);
+    // Runs now: a subagent acting inside an architect's turn IS that turn.
+    expect(w.harness.executed.find((cl) => cl.id === "sw1")).toBeDefined();
   });
 
   test("subagents/ultra state shows in the status listing", async () => {
@@ -1647,12 +1435,12 @@ describe("harness capabilities — subagents & ultra", () => {
     // Turn 1 (shipped posture, subagents on): the created prompt HAS the
     // delegation guidance.
     await w.manager.handleEvent({ kind: "message", conv: c, author: architect, text: "one", attachments: [] });
-    expect(w.harness.created.at(-1)!.system).toMatch(/delegate READ-ONLY/i);
+    expect(w.harness.created.at(-1)!.system).toMatch(/delegate exploration/i);
     // Toggle off, then turn 2: the harness is re-attached with a fresh prompt that
     // DROPS the delegation guidance (promptKey mismatch forces a rebuild).
     await w.manager.handleEvent({ kind: "command", conv: c, author: architect, name: "subagents", args: "off" });
     await w.manager.handleEvent({ kind: "message", conv: c, author: architect, text: "two", attachments: [] });
-    expect(w.harness.resumed.at(-1)!.system).not.toMatch(/delegate READ-ONLY/i);
+    expect(w.harness.resumed.at(-1)!.system).not.toMatch(/delegate exploration/i);
   });
 });
 
@@ -1667,9 +1455,6 @@ describe("harness capabilities — workflows", () => {
     expect(w.store.getSessionByConversation("fake", "wf1.000001")!.workflows).toBe(1);
     const intro = w.surface.posts.at(-1)!.text;
     expect(intro).toContain("workflows *on*");
-    // On by default does NOT mean the write opt-in came along: the one toggle
-    // that lets an unattended agent change files without a click stays off.
-    expect(w.store.getSessionByConversation("fake", "wf1.000001")!.workflow_write).toBe(0);
     expect(intro).not.toContain("worktree-write");
   });
 
@@ -1679,7 +1464,6 @@ describe("harness capabilities — workflows", () => {
       name: "testrepo",
       path: repoPath,
       defaultBranch: "main",
-      safeBashAllowlist: ["git status"],
       subagents: false,
       workflows: false,
     });
@@ -1698,7 +1482,6 @@ describe("harness capabilities — workflows", () => {
       name: "testrepo",
       path: repoPath,
       defaultBranch: "main",
-      safeBashAllowlist: ["git status"],
       subagents: false,
       workflows: true,
     });
@@ -1736,16 +1519,17 @@ describe("harness capabilities — workflows", () => {
     await w.manager.handleEvent({ kind: "message", conv: c, author: architect, text: "audit auth", attachments: [] });
     const system = w.harness.created.at(-1)!.system;
 
-    // Search is available to workflow agents and the prompt says so.
-    expect(system).toMatch(/Read, Glob and Grep/);
+    // Workflow agents have the same tools the main agent does, and the prompt
+    // must not resurrect either half of the old claim (that they cannot Grep, or
+    // that Read/Glob are a reliable tier).
+    expect(system).toMatch(/same tools you do/i);
     expect(system).not.toMatch(/CANNOT Grep|can't Grep|cannot Grep/i);
     expect(system).not.toMatch(/reliable tools are Read and Glob/i);
-    // Shell stays out — that one is Condotto's own rule, not an SDK limit.
-    expect(system).toMatch(/cannot run shell commands/i);
-    // The real limit is named as best-effort, and explicitly not read as a denial,
-    // so the agent neither retries in a loop nor reports a phantom architect deny.
+    // The real limit is named, and named as best-effort rather than as a refusal
+    // to argue with, so the agent neither retries in a loop nor reports it as a
+    // decision someone made.
     expect(system).toMatch(/best-effort/i);
-    expect(system).toMatch(/not an architect's denial/i);
+    expect(system).toMatch(/refused by\s+the runtime/i);
   });
 
   test("a member cannot toggle workflows; a bad arg shows usage", async () => {
@@ -1810,163 +1594,9 @@ describe("harness capabilities — workflows", () => {
     expect(w.surface.posts.at(-1)!.text).toContain("workflows *on*");
   });
 
-  test("a workflow LAUNCH gates → architect approves → the workflow runs", async () => {
-    const w = makeWorld();
-    const c = conv("wf7.000001");
-    await assign(w, "wf7.000001");
-    await w.manager.handleEvent({ kind: "command", conv: c, author: architect, name: "workflows", args: "on" });
-    // A member asks; the agent proposes a workflow. The LAUNCH is a gated action.
-    const script = "export const meta = { name: 'auth-audit', description: 'Audit auth across the code' }";
-    w.harness.scriptTurn([{ id: "wf-1", name: "Workflow", input: { script } }]);
-    await w.manager.handleEvent({ kind: "message", conv: c, author: member, text: "audit our auth", attachments: [] });
 
-    // Launch gated: approval posted with the workflow name + the fan-out concern; nothing ran.
-    expect(w.surface.approvalRequests.length).toBe(1);
-    const req = w.surface.approvalRequests[0]!.req;
-    expect(req.toolName).toBe("Workflow");
-    expect(req.summary).toContain("auth-audit");
-    expect(req.concern).toContain("multi-agent workflow");
-    expect(w.harness.executed.length).toBe(0);
-
-    // Architect approves → the workflow runs (re-driven and executed).
-    const requestId = w.surface.lastApprovalRequestId()!;
-    await w.manager.handleEvent({ kind: "approval_decision", requestId, decider: architect, decision: "approved" });
-    expect(w.harness.executed.map((cl) => cl.name)).toContain("Workflow");
-    // The workflow-turn reply carries the summary cost footer.
-    expect(w.surface.transcript().some((t) => /multi-agent workflow · \$/.test(t))).toBe(true);
-  });
-
-  test("a workflow launch DENY runs nothing", async () => {
-    const w = makeWorld();
-    const c = conv("wf8.000001");
-    await assign(w, "wf8.000001");
-    await w.manager.handleEvent({ kind: "command", conv: c, author: architect, name: "workflows", args: "on" });
-    const script = "export const meta = { name: 'auth-audit', description: 'x' }";
-    w.harness.scriptTurn([{ id: "wf-d", name: "Workflow", input: { script } }]);
-    await w.manager.handleEvent({ kind: "message", conv: c, author: member, text: "audit our auth", attachments: [] });
-    const requestId = w.surface.lastApprovalRequestId()!;
-    await w.manager.handleEvent({ kind: "approval_decision", requestId, decider: architect, decision: "denied" });
-    expect(w.harness.executed.length).toBe(0);
-    expect(w.store.getApproval(requestId)!.decision).toBe("denied");
-  });
 });
 
-describe("informed worktree-write opt-in", () => {
-  async function assign(w: World, id: string): Promise<void> {
-    await w.manager.handleEvent({ kind: "command", conv: conv(id), author: architect, name: "assign", args: "testrepo" });
-  }
-
-  test("a workflow/subagent write is denied read-only, then ALLOWED after `workflows write on`", async () => {
-    const w = makeWorld();
-    const c = conv("ww1.000001");
-    await assign(w, "ww1.000001");
-    await w.manager.handleEvent({ kind: "command", conv: c, author: architect, name: "workflows", args: "on" });
-
-    // Read-only default: a subagent-origin write is denied, nothing runs, no approval.
-    w.harness.scriptTurn([{ id: "ww-a", name: "Write", input: { file_path: "x.ts", content: "x" }, agentId: "sub-1" }]);
-    await w.manager.handleEvent({ kind: "message", conv: c, author: architect, text: "go", attachments: [] });
-    expect(w.harness.executed.find((cl) => cl.id === "ww-a")).toBeUndefined();
-    expect(w.surface.approvalRequests.length).toBe(0);
-
-    // Turn on worktree-write — the mandatory warning posts and the flags flip.
-    await w.manager.handleEvent({ kind: "command", conv: c, author: architect, name: "workflows", args: "write on" });
-    const s = w.store.getSessionByConversation("fake", "ww1.000001")!;
-    expect(s.workflow_write).toBe(1);
-    expect(s.workflows).toBe(1);
-    expect(s.subagents).toBe(1);
-    expect(w.surface.posts.at(-1)!.text).toMatch(/worktree-write is now ON/i);
-    expect(w.surface.posts.at(-1)!.text).toMatch(/WITHOUT per-write approval/i);
-    expect(w.surface.posts.at(-1)!.text).toMatch(/hard-denied/i);
-
-    // Now a confined subagent write is allowed and runs — no per-write approval.
-    w.harness.scriptTurn([{ id: "ww-b", name: "Write", input: { file_path: "y.ts", content: "y" }, agentId: "sub-2" }]);
-    await w.manager.handleEvent({ kind: "message", conv: c, author: architect, text: "go again", attachments: [] });
-    expect(w.harness.executed.map((cl) => cl.id)).toContain("ww-b");
-    expect(w.surface.approvalRequests.length).toBe(0);
-  });
-
-  test("worktree-write still HARD-DENIES an out-of-worktree subagent write", async () => {
-    const w = makeWorld();
-    const c = conv("ww2.000001");
-    await assign(w, "ww2.000001");
-    await w.manager.handleEvent({ kind: "command", conv: c, author: architect, name: "workflows", args: "write on" });
-    w.harness.scriptTurn([{ id: "ww-esc", name: "Write", input: { file_path: "/etc/evil", content: "x" }, agentId: "sub-3" }]);
-    await w.manager.handleEvent({ kind: "message", conv: c, author: architect, text: "go", attachments: [] });
-    expect(w.harness.executed.length).toBe(0);
-    expect(w.surface.approvalRequests.length).toBe(0);
-  });
-
-  test("`workflows off` clears the worktree-write opt-in (invariant: write ⟹ workflows)", async () => {
-    const w = makeWorld();
-    const c = conv("ww3.000001");
-    await assign(w, "ww3.000001");
-    await w.manager.handleEvent({ kind: "command", conv: c, author: architect, name: "workflows", args: "write on" });
-    expect(w.store.getSessionByConversation("fake", "ww3.000001")!.workflow_write).toBe(1);
-    await w.manager.handleEvent({ kind: "command", conv: c, author: architect, name: "workflows", args: "off" });
-    const s = w.store.getSessionByConversation("fake", "ww3.000001")!;
-    expect(s.workflows).toBe(0);
-    expect(s.workflow_write).toBe(0);
-  });
-
-  test("`workflows on` and `ultra on` reset write mode to read-only (truthful messaging) — review fix", async () => {
-    for (const [id, cmd, arg] of [
-      ["wwa.000001", "workflows", "on"],
-      ["wwb.000001", "ultra", "on"],
-    ] as const) {
-      const w = makeWorld();
-      const c = conv(id);
-      await assign(w, id);
-      await w.manager.handleEvent({ kind: "command", conv: c, author: architect, name: "workflows", args: "write on" });
-      expect(w.store.getSessionByConversation("fake", id)!.workflow_write).toBe(1);
-      // Re-issuing plain workflows-on / ultra-on returns to the read-only posture.
-      await w.manager.handleEvent({ kind: "command", conv: c, author: architect, name: cmd, args: arg });
-      const s = w.store.getSessionByConversation("fake", id)!;
-      expect(s.workflow_write).toBe(0);
-      expect(s.workflows).toBe(1); // still on, just read-only again
-      // The reply's "read-only" claim is now truthful (no worktree-write live).
-      expect(w.surface.posts.at(-1)!.text).not.toContain("worktree-write");
-    }
-  });
-
-  test("`subagents off` clears the worktree-write opt-in end-to-end (invariant)", async () => {
-    const w = makeWorld();
-    const c = conv("wwc.000001");
-    await assign(w, "wwc.000001");
-    await w.manager.handleEvent({ kind: "command", conv: c, author: architect, name: "workflows", args: "write on" });
-    await w.manager.handleEvent({ kind: "command", conv: c, author: architect, name: "subagents", args: "off" });
-    const s = w.store.getSessionByConversation("fake", "wwc.000001")!;
-    expect(s.subagents).toBe(0);
-    expect(s.workflows).toBe(0);
-    expect(s.workflow_write).toBe(0);
-  });
-
-  test("a member cannot enable worktree-write", async () => {
-    const w = makeWorld();
-    const c = conv("ww4.000001");
-    await assign(w, "ww4.000001");
-    await w.manager.handleEvent({ kind: "command", conv: c, author: member, name: "workflows", args: "write on" });
-    expect(w.surface.posts.at(-1)!.text).toContain("Only architects");
-    expect(w.store.getSessionByConversation("fake", "ww4.000001")!.workflow_write).toBe(0);
-  });
-
-  test("the settings announcement warns prominently when worktree-write is on", async () => {
-    const w = makeWorld();
-    const c = conv("ww5.000001");
-    await assign(w, "ww5.000001");
-    await w.manager.handleEvent({ kind: "command", conv: c, author: architect, name: "workflows", args: "write on" });
-    await w.manager.handleEvent({ kind: "command", conv: c, author: architect, name: "help", args: "" });
-    expect(w.surface.posts.at(-1)!.text).toMatch(/worktree-write ON/i);
-  });
-
-  test("worktree-write reaches the turn's system prompt", async () => {
-    const w = makeWorld();
-    const c = conv("ww6.000001");
-    await assign(w, "ww6.000001");
-    await w.manager.handleEvent({ kind: "command", conv: c, author: architect, name: "workflows", args: "write on" });
-    await w.manager.handleEvent({ kind: "message", conv: c, author: architect, text: "refactor in parallel", attachments: [] });
-    expect(w.harness.created.at(-1)!.system).toMatch(/WORKTREE-WRITE/i);
-  });
-});
 
 describe("trust-scoped project config", () => {
   async function assign(w: World, id: string): Promise<void> {
@@ -1977,7 +1607,6 @@ describe("trust-scoped project config", () => {
       name: "testrepo",
       path: repoPath,
       defaultBranch: "main",
-      safeBashAllowlist: ["git status"],
       trusted,
     });
   }
@@ -2023,96 +1652,13 @@ describe("architect auto-approve", () => {
     await w.manager.handleEvent({ kind: "message", conv: conv(id), author, text: "do the thing", attachments: [] });
   }
 
-  test("an architect's own gated write auto-approves — no Approve click (default on)", async () => {
-    const w = makeWorld();
-    await assignAndScript(w, "aa00.000001", architect, [writeCall]);
-    const session = w.store.getSessionByConversation("fake", "aa00.000001")!;
-    expect(w.surface.approvalRequests.length).toBe(0);
-    expect(w.harness.executed.map((c) => c.name)).toEqual(["Write"]);
-    expect(w.store.hasPendingApproval(session.id)).toBe(false);
-    const audit = w.store.listAudit(session.id);
-    const auto = audit.find((a) => a.event === "auto_approved");
-    expect(auto?.actor).toBe("fake:U_ARCH"); // attributed to the architect, not "agent"
-    expect(audit.some((a) => a.event === "tool_call" && (a.detail as any).decision === "allow(auto-approved)")).toBe(true);
-    // Ledger completeness: an already-approved approvals row exists, no pending window.
-    expect(w.store.getApprovalByToolUse(session.id, "tu-w")?.decision).toBe("approved");
-  });
 
-  test("a member's gated write still defers even with auto-approve on (anti-laundering)", async () => {
-    const w = makeWorld();
-    await assignAndScript(w, "aa10.000001", member, [writeCall]);
-    const session = w.store.getSessionByConversation("fake", "aa10.000001")!;
-    expect(w.surface.approvalRequests.length).toBe(1);
-    expect(w.harness.executed.length).toBe(0);
-    expect(w.store.hasPendingApproval(session.id)).toBe(true);
-  });
 
-  test("auto-approve off → the architect's own write defers again", async () => {
-    const w = makeWorld();
-    const c = conv("aa20.000001");
-    await w.manager.handleEvent({ kind: "command", conv: c, author: architect, name: "assign", args: "testrepo" });
-    await w.manager.handleEvent({ kind: "command", conv: c, author: architect, name: "auto-approve", args: "off" });
-    w.harness.scriptTurn([writeCall]);
-    await w.manager.handleEvent({ kind: "message", conv: c, author: architect, text: "go", attachments: [] });
-    expect(w.surface.approvalRequests.length).toBe(1);
-    expect(w.harness.executed.length).toBe(0);
-  });
 
-  test("hard-deny still refuses under auto-approve (out-of-worktree write)", async () => {
-    const w = makeWorld();
-    await assignAndScript(w, "aa30.000001", architect, [{ id: "tu-esc", name: "Write", input: { file_path: "/etc/evil", content: "x" } }]);
-    expect(w.surface.approvalRequests.length).toBe(0); // not gated...
-    expect(w.harness.executed.length).toBe(0); // ...and not executed — denied by the floor
-    expect(w.surface.transcript().some((t) => t.includes("outside your worktree"))).toBe(true);
-  });
 
-  test("bash and production-data auto-approve for an architect (the user's 'everything')", async () => {
-    const w = makeWorld();
-    await assignAndScript(w, "aa40.000001", architect, [
-      { id: "tu-bash", name: "Bash", input: { command: "rm build" } }, // non-allowlisted, not hard-deny
-      { id: "tu-psql", name: "Bash", input: { command: "psql -c 'select count(*) from users'" } }, // production-data
-    ]);
-    expect(w.surface.approvalRequests.length).toBe(0);
-    expect(w.harness.executed.map((c) => c.id)).toEqual(["tu-bash", "tu-psql"]);
-  });
 
-  test("a weak-identity surface never auto-approves, even for an architect (§4)", async () => {
-    const w = makeWorld(undefined, { identityStrength: "weak" });
-    await assignAndScript(w, "aa45.000001", architect, [writeCall]);
-    expect(w.surface.approvalRequests.length).toBe(1); // authority only from verified surfaces
-    expect(w.harness.executed.length).toBe(0);
-  });
 
-  test("an approved member turn's follow-on call still gates — the decider isn't laundered", async () => {
-    const w = makeWorld();
-    await assignAndScript(w, "aa50.000001", member, [writeCall]);
-    const requestId = w.surface.lastApprovalRequestId()!;
-    // The agent emits a NEW gated call during the resumed (empty-prompt) turn.
-    w.harness.scriptResume([{ id: "tu-w2", name: "Write", input: { file_path: "again.txt", content: "y" } }]);
-    const before = w.surface.approvalRequests.length;
-    await w.manager.handleEvent({ kind: "approval_decision", requestId, decider: architect, decision: "approved" });
-    // The approved call ran; the follow-on must NOT auto-approve (initiator carried is
-    // the MEMBER, not the approving architect) — it defers into a fresh approval.
-    expect(w.harness.executed.map((c) => c.id)).toContain("tu-w");
-    expect(w.harness.executed.map((c) => c.id)).not.toContain("tu-w2");
-    expect(w.surface.approvalRequests.length).toBe(before + 1);
-  });
 
-  test("auto-approve toggle: an architect sets it; a member is refused", async () => {
-    const w = makeWorld();
-    const c = conv("aa60.000001");
-    await w.manager.handleEvent({ kind: "command", conv: c, author: architect, name: "assign", args: "testrepo" });
-    expect(w.store.getSessionByConversation("fake", "aa60.000001")!.auto_approve).toBe(1); // default on
-    await w.manager.handleEvent({ kind: "command", conv: c, author: architect, name: "auto-approve", args: "off" });
-    const session = w.store.getSessionByConversation("fake", "aa60.000001")!;
-    expect(session.auto_approve).toBe(0);
-    expect(w.store.listAudit(session.id).some((a) => a.event === "auto_approve_set")).toBe(true);
-    // A member cannot toggle it.
-    await w.manager.handleEvent({ kind: "command", conv: c, author: member, name: "auto-approve", args: "on" });
-    expect(w.store.getSessionByConversation("fake", "aa60.000001")!.auto_approve).toBe(0);
-    expect(w.surface.posts.at(-1)!.text).toContain("Only architects");
-    expect(w.store.listAudit(session.id).some((a) => a.event === "authz_denied")).toBe(true);
-  });
 });
 
 describe("role delegation — grant/revoke", () => {
@@ -2175,17 +1721,6 @@ describe("role delegation — grant/revoke", () => {
     expect(w.store.isArchitect("fake:U_ARCH", "C1")).toBe(true); // still architect
   });
 
-  test("a granted architect can approve a member's gated action", async () => {
-    const w = makeWorld();
-    const c = conv("g70.000001");
-    await w.manager.handleEvent({ kind: "command", conv: c, author: architect, name: "assign", args: "testrepo" });
-    await w.manager.handleEvent({ kind: "command", conv: c, author: architect, name: "grant", args: `${abby} architect` });
-    w.harness.scriptTurn([{ id: "tu-mw", name: "Write", input: { file_path: "m.txt", content: "x" } }]);
-    await w.manager.handleEvent({ kind: "message", conv: c, author: member, text: "add file", attachments: [] });
-    const requestId = w.surface.lastApprovalRequestId()!;
-    await w.manager.handleEvent({ kind: "approval_decision", requestId, decider: abbyP, decision: "approved" });
-    expect(w.harness.executed.map((x) => x.name)).toContain("Write");
-  });
 
   test("a runtime grant cannot flip/overwrite a config architect's row — no lockout (review 2026-07-19)", async () => {
     const w = makeWorld(); // U_ARCH is a config architect at '*'
@@ -2631,7 +2166,6 @@ describe("skills — architect invocation", () => {
       name: "testrepo",
       path: repoPath,
       defaultBranch: "main",
-      safeBashAllowlist: ["git status"],
       trusted: true,
     });
     w.harness.skills = skills;
@@ -2733,25 +2267,6 @@ describe("skills — architect invocation", () => {
     expect(w.surface.posts.at(-1)!.text).toContain("cost budget");
   });
 
-  test("a gated call inside a skill turn defers, and the resume re-drives it — not the command", async () => {
-    const w = trustedWorld();
-    await assign(w, "sk8.000001");
-    // Auto-approve off, so the write really defers and we can watch the handshake.
-    await w.manager.handleEvent({ kind: "command", conv: conv("sk8.000001"), author: architect, name: "auto-approve", args: "off" });
-    w.harness.scriptTurn([{ id: "tu-s", name: "Write", input: { file_path: "x.txt", content: "hi" } }]);
-    await cmd(w, "sk8.000001", "skill", "ship");
-
-    const requestId = w.surface.lastApprovalRequestId()!;
-    expect(requestId).toBeTruthy();
-    await w.manager.handleEvent({ kind: "approval_decision", requestId, decider: architect, decision: "approved" });
-
-    // The resume must re-drive the pending tool call, NOT dispatch `/ship` again —
-    // a second dispatch would run a side-effecting command twice.
-    const resume = w.harness.allTurns.at(-1)!;
-    expect(resume.skill).toBeUndefined();
-    expect(resume.text).toBe("");
-    expect(w.harness.executed.some((c) => c.name === "Write")).toBe(true);
-  });
 
   test("lists skills grouped by source, with descriptions defanged", async () => {
     const w = trustedWorld([
@@ -2784,8 +2299,6 @@ describe("plan mode — research first, implement after approval", () => {
     w.manager.handleEvent({ kind: "command", conv: conv(id), author, name: "plan", args });
   const say = (w: World, id: string, text: string, author: Principal = architect) =>
     w.manager.handleEvent({ kind: "message", conv: conv(id), author, text, attachments: [] });
-  const decide = (w: World, requestId: string, decision: "approved" | "denied") =>
-    w.manager.handleEvent({ kind: "approval_decision", requestId, decider: architect, decision });
   const sid = (w: World, id: string) => w.store.getSessionByConversation("fake", id)!.id;
   /** The write that PRESENTS a plan: a .md directly in the session's plans dir. */
   const planWrite = (w: World, id: string, content = "1. edit src/x.ts\n2. run the tests"): ToolCall => ({
@@ -2820,7 +2333,7 @@ describe("plan mode — research first, implement after approval", () => {
     expect(w.store.listAudit(sid(w, "pm2.000001")).some((a) => a.event === "authz_denied")).toBe(true);
   });
 
-  test("an ordinary write while planning is DENIED, not deferred — no approval is raised", async () => {
+  test("an ordinary write while planning is DENIED — the mode means what it says", async () => {
     const w = makeWorld();
     await assign(w, "pm3.000001");
     await plan(w, "pm3.000001", "on");
@@ -2828,39 +2341,12 @@ describe("plan mode — research first, implement after approval", () => {
     await say(w, "pm3.000001", "just do it");
 
     expect(w.harness.executed.length).toBe(0);
-    expect(w.store.hasPendingApproval(sid(w, "pm3.000001"))).toBe(false);
-    expect(w.surface.approvalRequests.length).toBe(0);
     expect(w.surface.transcript().some((t) => t.includes("plan mode"))).toBe(true);
   });
 
-  test("auto-approve does NOT let a write through while planning", async () => {
-    // auto_approve defaults on, and this turn is architect-initiated — the exact
-    // combination that would otherwise widen a gate into a silent allow.
-    const w = makeWorld();
-    await assign(w, "pm4.000001");
-    expect(w.store.getSession(sid(w, "pm4.000001"))!.auto_approve).toBe(1);
-    await plan(w, "pm4.000001", "on");
-    w.harness.scriptTurn([codeWrite]);
-    await say(w, "pm4.000001", "go");
-    expect(w.harness.executed.length).toBe(0);
-  });
 
-  test("THE PLAN IS NEVER AUTO-APPROVED, even on an architect's own turn", async () => {
-    // The regression that would make the whole feature a silent no-op: the turn
-    // would never defer, the plan would never be posted, plan_mode would never
-    // clear, and the thread would sit wedged with no button to leave it.
-    const w = makeWorld();
-    await assign(w, "pm5.000001");
-    await plan(w, "pm5.000001", "on");
-    w.harness.scriptTurn([planWrite(w, "pm5.000001")]);
-    await say(w, "pm5.000001", "plan it");
 
-    expect(w.surface.approvalRequests.length).toBe(1);
-    expect(w.store.hasPendingApproval(sid(w, "pm5.000001"))).toBe(true);
-    expect(w.harness.executed.length).toBe(0);
-  });
-
-  test("the plan is posted into the thread in full, above the buttons", async () => {
+  test("the plan is posted into the thread in full, with how to leave plan mode", async () => {
     const w = makeWorld();
     await assign(w, "pm6.000001");
     await plan(w, "pm6.000001", "on");
@@ -2871,67 +2357,15 @@ describe("plan mode — research first, implement after approval", () => {
     expect(transcript).toContain("rewrite the parser");
     expect(transcript).toContain("add a regression test");
     expect(transcript).toContain("Here's my plan");
-    // The concern warns that approving starts the work.
-    expect(w.surface.approvalRequests.at(-1)!.req.concern).toContain("implementing");
-    // ...and the approval itself must NOT carry a second, truncated copy of it.
-    expect(w.surface.approvalRequests.at(-1)!.req.detailPosted).toBe(true);
+    // There is no button any more, so the message has to say how to act on it.
+    expect(transcript).toContain("plan off");
+    // The plan file write itself still ran — the plan is a real file in the tree.
+    expect(w.harness.executed.some((c) => c.name === "Write")).toBe(true);
   });
 
-  test("with auto-approve ON, the plan's concern says the work then runs unattended", async () => {
-    // Approving normally grants exactly one thing — plan mode goes off — and every
-    // action still gates. Auto-approve removes that bound, which changes what is
-    // being consented to, so the prompt has to say so.
-    const w = makeWorld();
-    await assign(w, "pm17.00001");
-    await plan(w, "pm17.00001", "on");
-    w.harness.scriptTurn([planWrite(w, "pm17.00001")]);
-    await say(w, "pm17.00001", "plan it");
-    expect(w.surface.approvalRequests.at(-1)!.req.concern).toContain("auto-approve is ON");
-  });
 
-  test("approving clears plan mode BEFORE the resume runs, and the agent implements", async () => {
-    const w = makeWorld();
-    await assign(w, "pm7.000001");
-    await plan(w, "pm7.000001", "on");
-    w.harness.scriptTurn([planWrite(w, "pm7.000001")]);
-    await say(w, "pm7.000001", "plan it");
 
-    // The resumed turn carries out the plan: the fake re-drives the approved write
-    // and then runs the queued continuation.
-    w.harness.scriptResume([codeWrite]);
-    await decide(w, w.surface.lastApprovalRequestId()!, "approved");
 
-    expect(w.store.getSession(sid(w, "pm7.000001"))!.plan_mode).toBe(0);
-    expect(w.harness.executed.map((c) => c.name)).toEqual(["Write", "Write"]); // plan file, then the code
-    expect(w.harness.allTurns.at(-1)!.harness!.planMode).toBeUndefined();
-    expect(w.store.listAudit(sid(w, "pm7.000001")).some((a) => a.event === "plan_mode_set")).toBe(true);
-  });
-
-  test("denying a plan keeps plan mode on and tells the agent to revise, not to stop", async () => {
-    const w = makeWorld();
-    await assign(w, "pm8.000001");
-    await plan(w, "pm8.000001", "on");
-    w.harness.scriptTurn([planWrite(w, "pm8.000001")]);
-    await say(w, "pm8.000001", "plan it");
-    await decide(w, w.surface.lastApprovalRequestId()!, "denied");
-
-    expect(w.store.getSession(sid(w, "pm8.000001"))!.plan_mode).toBe(1);
-    expect(w.harness.executed.length).toBe(0);
-    expect(w.surface.transcript().join("\n")).toContain("revised plan");
-  });
-
-  test("the approved-plan resume is budget-capped, unlike an ordinary approved action", async () => {
-    // A plan resume implements the whole change in one turn, so it is the
-    // runaway-capable shape — not the single-approved-action shape that runs
-    // uncapped so it can't be stranded near the budget.
-    const w = makeWorld(undefined, { costCap: 10 });
-    await assign(w, "pm9.000001");
-    await plan(w, "pm9.000001", "on");
-    w.harness.scriptTurn([planWrite(w, "pm9.000001")]);
-    await say(w, "pm9.000001", "plan it");
-    await decide(w, w.surface.lastApprovalRequestId()!, "approved");
-    expect(typeof w.harness.allTurns.at(-1)!.budgetUsd).toBe("number");
-  });
 
   test("workflows are PAUSED while planning, and `plan off` restores them", async () => {
     const w = makeWorld();
@@ -2958,22 +2392,6 @@ describe("plan mode — research first, implement after approval", () => {
   });
 
 
-  test("toggling plan mode expires a pending approval from the posture it left", async () => {
-    const w = makeWorld();
-    await assign(w, "pm13.00001");
-    w.harness.scriptTurn([codeWrite]);
-    // A MEMBER's turn, so the write genuinely defers rather than riding the
-    // architect auto-approve that is on by default.
-    await say(w, "pm13.00001", "write it", member);
-    const requestId = w.surface.lastApprovalRequestId()!;
-    expect(w.store.hasPendingApproval(sid(w, "pm13.00001"))).toBe(true);
-
-    await plan(w, "pm13.00001", "on");
-    expect(w.store.getApproval(requestId)!.decision).toBe("expired");
-    // A late click on it must not run the write during plan mode.
-    await decide(w, requestId, "approved");
-    expect(w.harness.executed.length).toBe(0);
-  });
 
   test("`clear` leaves plan mode ON — it is posture, not consent", async () => {
     // The deliberate counterpoint to workflow_write, which `clear` revokes: that

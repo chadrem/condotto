@@ -64,11 +64,6 @@ describe("parseMentionCommand — grant/revoke/auto-approve", () => {
     expect(parse("revoke <@U0ABBY> everywhere")).toEqual({ name: "revoke", args: "slack:U0ABBY everywhere" });
   });
 
-  test("auto-approve on|off parses; a bare auto-approve is not a command", () => {
-    expect(parse("auto-approve on")).toEqual({ name: "auto-approve", args: "on" });
-    expect(parse("auto-approve off")).toEqual({ name: "auto-approve", args: "off" });
-    expect(parse("auto-approve")).toBeNull(); // falls through to conversation/help
-  });
 });
 
 describe("slashEphemeralText — /condotto console routing", () => {

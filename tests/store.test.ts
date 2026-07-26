@@ -106,14 +106,6 @@ describe("store sessions", () => {
     store.audit({ sessionId: "s1", actor: "agent", event: "tool_call", detail: { tool: "Read" } });
   });
 
-  test("repo safe_bash_allowlist round-trips", () => {
-    const store = memoryStore();
-    store.upsertRepo({ name: "r", path: "/tmp/r", defaultBranch: "main", safeBashAllowlist: ["git status", "ls"] });
-    expect(store.getRepo("r")?.safe_bash_allowlist).toEqual(["git status", "ls"]);
-    // Default when omitted is an empty allowlist (nothing auto-allowed).
-    store.upsertRepo({ name: "r2", path: "/tmp/r2", defaultBranch: "main" });
-    expect(store.getRepo("r2")?.safe_bash_allowlist).toEqual([]);
-  });
 
   test("pruneReposNotIn drops undeclared repos but keeps ones a session still uses", () => {
     const store = memoryStore();
@@ -175,19 +167,6 @@ describe("store sessions", () => {
     expect(row.model).toBeNull();
   });
 
-  test("auto_approve defaults ON and the setter round-trips", () => {
-    const store = memoryStore();
-    store.createSession({ ...baseSession, id: "s1", conversation_id: "1.1" });
-    // On by default (matches the column DEFAULT 1 and the shipped posture).
-    expect(store.getSession("s1")!.auto_approve).toBe(1);
-    store.setSessionAutoApprove("s1", false);
-    expect(store.getSession("s1")!.auto_approve).toBe(0);
-    store.setSessionAutoApprove("s1", true);
-    expect(store.getSession("s1")!.auto_approve).toBe(1);
-    // An explicit seed value at creation wins over the default.
-    store.createSession({ ...baseSession, id: "s2", conversation_id: "2.2", auto_approve: 0 });
-    expect(store.getSession("s2")!.auto_approve).toBe(0);
-  });
 
   test("plan_mode defaults off, round-trips, and is not seedable at creation", () => {
     const store = memoryStore();
@@ -206,28 +185,13 @@ describe("store sessions", () => {
     const store = memoryStore();
     store.createSession({ ...baseSession, id: "s1", conversation_id: "1.1" });
     store.setSessionWorkflows("s1", true);
-    store.setSessionWorkflowWrite("s1", true);
     store.setSessionPlanMode("s1", true);
     const on = store.getSession("s1")!;
     // Workflows are PAUSED at turn time, not cleared, so `plan off` restores them.
     expect(on.workflows).toBe(1);
-    expect(on.workflow_write).toBe(1);
     expect(on.subagents).toBe(1);
   });
 
-  test("workflow_write defaults off and turning workflows off clears it (invariant)", () => {
-    const store = memoryStore();
-    store.createSession({ ...baseSession, id: "s1", conversation_id: "1.1" });
-    expect(store.getSession("s1")!.workflow_write).toBe(0);
-    store.setSessionWorkflows("s1", true);
-    store.setSessionWorkflowWrite("s1", true);
-    expect(store.getSession("s1")!.workflow_write).toBe(1);
-    // Turning workflows off must also clear the worktree-write opt-in.
-    store.setSessionWorkflows("s1", false);
-    const row = store.getSession("s1")!;
-    expect(row.workflows).toBe(0);
-    expect(row.workflow_write).toBe(0);
-  });
 
   test("repo default model/effort and trust flag round-trip", () => {
     const store = memoryStore();
@@ -264,16 +228,6 @@ describe("store sessions", () => {
     expect(bare.default_workflows).toBeNull();
   });
 
-  test("repo default_auto_approve round-trips; undefined = null", () => {
-    const store = memoryStore();
-    store.upsertRepo({ name: "r", path: "/tmp/r", defaultBranch: "main", autoApprove: false });
-    expect(store.getRepo("r")!.default_auto_approve).toBe(0);
-    store.upsertRepo({ name: "r", path: "/tmp/r", defaultBranch: "main", autoApprove: true });
-    expect(store.getRepo("r")!.default_auto_approve).toBe(1);
-    // Omitting it = fall back to the daemon default (null, not a pinned 0).
-    store.upsertRepo({ name: "r", path: "/tmp/r", defaultBranch: "main" });
-    expect(store.getRepo("r")!.default_auto_approve).toBeNull();
-  });
 
   test("repo cost cap round-trips, and v7 has dropped the command columns", () => {
     const path = join(mkdtempSync(join(tmpdir(), "condotto-repocols-")), "condotto.sqlite");
@@ -295,6 +249,8 @@ describe("store sessions", () => {
     expect(cols).not.toContain("test_cmd");
     expect(cols).not.toContain("land_cmd");
     expect(cols).not.toContain("deploy_cmd");
+    // v8 dropped the approval-era columns and the table itself.
+    expect(cols).not.toContain("default_auto_approve");
   });
 });
 
@@ -330,17 +286,15 @@ describe("store worktree GC", () => {
     expect(due.map((s) => s.id)).toEqual(["due"]);
   });
 
-  test("deleteSession removes the row + its turns/approvals but keeps the audit trail", () => {
+  test("deleteSession removes the row + its turns but keeps the audit trail", () => {
     const store = memoryStore();
     store.createSession({ ...baseSession, id: "d1", conversation_id: "1" });
     store.insertTurn({ sessionId: "d1", direction: "out", text: "hi", costUsd: 0.5 });
-    store.createApproval({ id: "ap1", sessionId: "d1", toolUseId: "t1", toolName: "Write", toolInput: {} });
     store.audit({ sessionId: "d1", actor: "system", event: "worktree_cleaned" });
 
     store.deleteSession("d1");
 
     expect(store.getSession("d1")).toBeNull();
-    expect(store.getApproval("ap1")).toBeNull();
     expect(store.sessionCostUsd("d1")).toBe(0); // turns gone
     // The security/decision trail survives the discard (audit_log has no FK).
     expect(store.listAudit("d1").some((e) => e.event === "worktree_cleaned")).toBe(true);
@@ -399,81 +353,6 @@ describe("store roles", () => {
   });
 });
 
-describe("store approvals", () => {
-  function withSession(): Store {
-    const store = memoryStore();
-    store.createSession({ ...baseSession, id: "s1", conversation_id: "1.1" });
-    return store;
-  }
-
-  test("create → lookup by id and by tool_use_id; opaque input round-trips", () => {
-    const store = withSession();
-    const input = { file_path: "src/x.ts", content: "hi", nested: { a: [1, 2] } };
-    store.createApproval({ id: "req-1", sessionId: "s1", toolUseId: "tu-1", toolName: "Write", toolInput: input });
-
-    const byId = store.getApproval("req-1");
-    expect(byId?.decision).toBe("pending");
-    expect(byId?.tool_use_id).toBe("tu-1");
-    expect(byId?.tool_input).toEqual(input);
-
-    const byTool = store.getApprovalByToolUse("s1", "tu-1");
-    expect(byTool?.id).toBe("req-1");
-    expect(store.getApprovalByToolUse("s1", "nope")).toBeNull();
-  });
-
-  test("createApproval persists initiated_by; default is null", () => {
-    const store = withSession();
-    store.createApproval({ id: "req-i", sessionId: "s1", toolUseId: "tu-1", toolName: "Write", toolInput: {}, initiatedBy: "slack:U_MEMBER" });
-    expect(store.getApproval("req-i")?.initiated_by).toBe("slack:U_MEMBER");
-    store.createApproval({ id: "req-n", sessionId: "s1", toolUseId: "tu-2", toolName: "Write", toolInput: {} });
-    expect(store.getApproval("req-n")?.initiated_by).toBeNull();
-  });
-
-  test("recordAutoApproval inserts an already-approved row without a pending window", () => {
-    const store = withSession();
-    store.recordAutoApproval({ sessionId: "s1", toolUseId: "tu-auto", toolName: "Write", toolInput: { file_path: "x.ts" }, initiator: "slack:U_ARCH" });
-    // No transient 'pending' row — hasPendingApproval must stay false.
-    expect(store.hasPendingApproval("s1")).toBe(false);
-    const row = store.getApprovalByToolUse("s1", "tu-auto")!;
-    expect(row.decision).toBe("approved");
-    expect(row.decided_by).toBe("slack:U_ARCH");
-    expect(row.initiated_by).toBe("slack:U_ARCH");
-  });
-
-  test("decideApproval transitions once; a second decision is a no-op", () => {
-    const store = withSession();
-    store.createApproval({ id: "req-1", sessionId: "s1", toolUseId: "tu-1", toolName: "Write", toolInput: {} });
-
-    expect(store.decideApproval("req-1", "slack:U_ARCH", "approved")).toBe(true);
-    expect(store.getApproval("req-1")?.decision).toBe("approved");
-    expect(store.getApproval("req-1")?.decided_by).toBe("slack:U_ARCH");
-    // Second click (Slack at-least-once / double-click) does not re-transition.
-    expect(store.decideApproval("req-1", "slack:U_OTHER", "denied")).toBe(false);
-    expect(store.getApproval("req-1")?.decision).toBe("approved");
-  });
-
-  test("getApprovalByToolUse returns the most recent when a tool_use_id repeats", () => {
-    const store = withSession();
-    store.createApproval({ id: "req-1", sessionId: "s1", toolUseId: "tu-1", toolName: "Write", toolInput: {} });
-    store.decideApproval("req-1", "slack:U_ARCH", "denied");
-    store.createApproval({ id: "req-2", sessionId: "s1", toolUseId: "tu-1", toolName: "Write", toolInput: {} });
-    expect(store.getApprovalByToolUse("s1", "tu-1")?.id).toBe("req-2");
-    expect(store.getApprovalByToolUse("s1", "tu-1")?.decision).toBe("pending");
-  });
-
-  test("expirePendingApprovals clears the wedge and leaves decided ones alone", () => {
-    const store = withSession();
-    store.createApproval({ id: "p1", sessionId: "s1", toolUseId: "tu-1", toolName: "Write", toolInput: {} });
-    store.createApproval({ id: "d1", sessionId: "s1", toolUseId: "tu-2", toolName: "Bash", toolInput: {} });
-    store.decideApproval("d1", "slack:U_ARCH", "approved");
-    expect(store.hasPendingApproval("s1")).toBe(true);
-
-    expect(store.expirePendingApprovals("s1")).toBe(1);
-    expect(store.hasPendingApproval("s1")).toBe(false);
-    expect(store.getApproval("p1")!.decision).toBe("expired");
-    expect(store.getApproval("d1")!.decision).toBe("approved"); // untouched
-  });
-});
 
 describe("store session activation", () => {
   test("tryActivate activates a parked session but never resurrects a stopped one (review #6)", () => {
@@ -566,7 +445,7 @@ describe("store schema migrations", () => {
   // The current schema version == the number of migrations in the runner. Bump
   // this constant in lockstep whenever a migration is appended — the tests below
   // pin the runner's behavior to it.
-  const CURRENT_SCHEMA_VERSION = 7;
+  const CURRENT_SCHEMA_VERSION = 8;
 
   const migPath = (name: string): string => join(mkdtempSync(join(tmpdir(), "condotto-mig-")), name);
   const userVersion = (path: string): number => {
@@ -624,6 +503,9 @@ describe("store schema migrations", () => {
     // NOT EXISTS` cannot re-add a column to a table that already exists.
     raw.run("ALTER TABLE repos ADD COLUMN land_cmd TEXT"); // v1-era, dropped at v7
     raw.run("ALTER TABLE repos ADD COLUMN deploy_cmd TEXT"); // v1-era, dropped at v7
+    raw.run("ALTER TABLE sessions ADD COLUMN auto_approve INTEGER NOT NULL DEFAULT 1"); // v1-era, dropped at v8
+    raw.run("ALTER TABLE sessions ADD COLUMN workflow_write INTEGER NOT NULL DEFAULT 0"); // v1-era, dropped at v8
+    raw.run("ALTER TABLE repos ADD COLUMN default_auto_approve INTEGER"); // v1-era, dropped at v8
     raw.run("PRAGMA user_version = 0"); // rewind the stamp to the pre-runner state
     raw.close();
     expect(userVersion(path)).toBe(0);

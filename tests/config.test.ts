@@ -210,31 +210,7 @@ path = "/srv/bare"
     );
   });
 
-  test("safe_bash_allowlist defaults to the conservative set and can be overridden", () => {
-    const def = loadConfig({}, cfgFile(""));
-    expect(def.repos[0]!.safeBashAllowlist).toContain("git status");
-    expect(def.repos[0]!.safeBashAllowlist).not.toContain("cat"); // reads go through confined tools
 
-    const path = tomlFile(`[[repos]]\nname = "webapp"\npath = "/srv/webapp"\nsafe_bash_allowlist = ["bun test"]\n`);
-    const cfg = loadConfig({}, path);
-    expect(cfg.repos.find((r) => r.name === "webapp")!.safeBashAllowlist).toEqual(["bun test"]);
-  });
-
-  test("per-repo auto_approve requires an explicit boolean", () => {
-    const path = tomlFile(`
-[[repos]]
-name = "on"
-path = "/srv/on"
-auto_approve = false
-
-[[repos]]
-name = "unset"
-path = "/srv/unset"
-`);
-    const cfg = loadConfig({}, path);
-    expect(cfg.repos.find((r) => r.name === "on")!.autoApprove).toBe(false);
-    expect(cfg.repos.find((r) => r.name === "unset")!.autoApprove).toBeUndefined();
-  });
 });
 
 describe("loadConfig defaults + env overrides", () => {
@@ -262,17 +238,6 @@ describe("loadConfig defaults + env overrides", () => {
     expect(() => loadConfig({}, cfgFile(`[defaults]\nmax_concurrent_turns = 0\n`))).toThrow(/positive integer/);
   });
 
-  test("auto-approve defaults ON, is settable in-file, and env overrides it", () => {
-    expect(loadConfig({}, cfgFile("")).defaultAutoApprove).toBe(true);
-    expect(loadConfig({}, cfgFile(`[defaults]\nauto_approve = false\n`)).defaultAutoApprove).toBe(false);
-    for (const off of ["off", "false", "0", "no", "OFF"]) {
-      expect(loadConfig({ CONDOTTO_AUTO_APPROVE: off }, cfgFile("")).defaultAutoApprove).toBe(false);
-    }
-    // Env "on" beats a file `false`.
-    expect(
-      loadConfig({ CONDOTTO_AUTO_APPROVE: "on" }, cfgFile(`[defaults]\nauto_approve = false\n`)).defaultAutoApprove,
-    ).toBe(true);
-  });
 
   test("default model/effort defaults to Opus + xhigh, settable in-file, env overrides", () => {
     const def = loadConfig({}, cfgFile(""));

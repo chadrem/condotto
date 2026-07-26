@@ -56,13 +56,6 @@ export interface CondottoConfig {
    */
   defaultSubagents: boolean;
   defaultWorkflows: boolean;
-  /**
-   * Daemon-wide default for the architect self-approve setting, used when a
-   * repo sets no `auto_approve`. On by default (DESIGN §4 sanctions
-   * per-thread widening; the architect dials it off per thread/repo). Override
-   * with `[defaults].auto_approve = false` or `CONDOTTO_AUTO_APPROVE=off`.
-   */
-  defaultAutoApprove: boolean;
 }
 
 /** Surface (Slack) credentials — owned by the composition root, never the core. */
@@ -116,42 +109,15 @@ export const DEFAULT_EFFORT = "xhigh";
  *
  * These are on-by-default because the product's job is a thread that works
  * itself, not because the confinement around them relaxed — it did not. A
- * subagent-, workflow-, or escaped-origin call is still evaluated by
- * `evaluateConfined`: read-only, no shell, no network, no memory, and every
- * gated mutation still routes through the main agent's approval loop. The one
- * toggle that genuinely widens what an unattended agent can do to files —
- * the worktree-write opt-in — stays off, session-only, and un-configurable.
+ * subagent or workflow agent is confined to the worktree exactly as the main
+ * agent is, and the floor applies to it identically. Fanning out changes how much
+ * gets read at once, not what may be reached.
  */
 export const DEFAULT_SUBAGENTS = true;
 export const DEFAULT_WORKFLOWS = true;
 
 /** Default location and env override for the single config file. */
 export const DEFAULT_CONFIG_PATH = "condotto.toml";
-
-/**
- * Commands auto-allowed without approval on any repo. Deliberately conservative:
- * only read-only git subcommands and version/identity checks — commands whose
- * behavior can't grant file access outside the worktree.
- *
- * NOTE (deviation from DESIGN.md §4's examples, logged in DECISIONS.md): `cat`
- * and `ls` are intentionally NOT here. Auto-allowing them via Bash would bypass
- * worktree read-confinement (Bash arg confinement is only heuristic), so
- * file reads go through the confined Read/Grep tools instead. A repo may add its
- * own commands (incl. its test command) via `safe_bash_allowlist` if it accepts
- * the risk. Positive Bash-arg confinement is future hardening.
- */
-export const DEFAULT_SAFE_BASH_ALLOWLIST = [
-  "git status",
-  "git diff",
-  "git log",
-  "git show",
-  "git branch",
-  "git stash list",
-  "pwd",
-  "which",
-  "node --version",
-  "bun --version",
-];
 
 function expandHome(p: string): string {
   if (p === "~") return homedir();
@@ -287,7 +253,6 @@ const REPO_KEYS = [
   "name",
   "path",
   "default_branch",
-  "safe_bash_allowlist",
   "test_cmd",
   "land_cmd",
   "deploy_cmd",
@@ -295,7 +260,6 @@ const REPO_KEYS = [
   "default_model",
   "default_effort",
   "trusted",
-  "auto_approve",
   "subagents",
   "workflows",
   "memory",
@@ -310,12 +274,10 @@ function parseRepoEntry(entry: unknown, where: string): RepoConfig {
   if (typeof e.path !== "string" || e.path.length === 0) {
     throw new Error(`${where}: "path" is required`);
   }
-  const allow = optStringArray(e.safe_bash_allowlist, `${where}.safe_bash_allowlist`);
   return {
     name: e.name,
     path: expandHome(e.path),
     defaultBranch: optString(e.default_branch, `${where}.default_branch`) ?? "main",
-    safeBashAllowlist: allow ?? DEFAULT_SAFE_BASH_ALLOWLIST,
     // `test_cmd`, `land_cmd` and `deploy_cmd` are deliberately NOT read
     // (2026-07-26). The daemon-run command path existed because the agent's shell
     // was gated; now the agent runs its own tests. An existing config that still
@@ -331,7 +293,6 @@ function parseRepoEntry(entry: unknown, where: string): RepoConfig {
     trusted: optBool(e.trusted, `${where}.trusted`) === true,
     // Per-repo default for architect self-approve. Only an explicit boolean
     // pins it; anything else (absent) = fall back to the daemon-wide default.
-    autoApprove: optBool(e.auto_approve, `${where}.auto_approve`),
     // Per-repo harness posture, same tri-state rule: an explicit boolean pins
     // it, absent falls through to the daemon default. Lets a sandbox repo run
     // the full multi-agent posture while a repo you care about stays quieter.
@@ -458,7 +419,6 @@ const PATHS_KEYS = ["db", "worktrees_root", "memory_root"] as const;
 const DEFAULTS_KEYS = [
   "model",
   "effort",
-  "auto_approve",
   "subagents",
   "workflows",
   "cost_cap_usd",
@@ -502,16 +462,10 @@ export function loadConfig(
   warnUnknownKeys(defaults, DEFAULTS_KEYS, "[defaults]");
 
   // The three daemon-wide toggles, all on unless explicitly disabled: architect
-  // self-approve, and the subagents/workflows harness posture. Together with
+  // the subagents/workflows harness posture. Together with
   // `[defaults].effort = "xhigh"` the latter two ARE the `ultra` preset, which is
   // why there is no separate `ultra` key — it would need a conflict rule against
   // an `effort` set alongside it.
-  const defaultAutoApprove = resolveBoolDefault(
-    env.CONDOTTO_AUTO_APPROVE,
-    defaults.auto_approve,
-    "[defaults].auto_approve",
-    true,
-  );
   const defaultSubagents = resolveBoolDefault(
     env.CONDOTTO_SUBAGENTS,
     defaults.subagents,
@@ -547,7 +501,6 @@ export function loadConfig(
     defaultModel: envStr(env.CONDOTTO_DEFAULT_MODEL) ?? optString(defaults.model, "[defaults].model") ?? DEFAULT_MODEL,
     defaultEffort:
       envStr(env.CONDOTTO_DEFAULT_EFFORT) ?? optString(defaults.effort, "[defaults].effort") ?? DEFAULT_EFFORT,
-    defaultAutoApprove,
     defaultSubagents,
     defaultWorkflows,
   };

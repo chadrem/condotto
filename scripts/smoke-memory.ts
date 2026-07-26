@@ -105,7 +105,6 @@ async function session(label: string, channelId: string) {
   const policyCtx: PolicyContext = {
     worktree: wt.path,
     cwd: wt.path,
-    safeBashAllowlist: ["git status", "pwd", "ls", "cat"],
     memoryRoot: prepared.path,
   };
 
@@ -120,8 +119,8 @@ async function session(label: string, channelId: string) {
       denied.push(`${call.name} ${target.slice(0, 60)}`);
       return { decision: "deny", reason: d.reason };
     }
-    if (d.action === "gate") gated.push(`${call.name} ${target.slice(0, 60)}`);
-    return { decision: "allow" }; // stands in for an architect's Approve click
+    gated.push(`${call.name} ${target.slice(0, 60)}`);
+    return { decision: "allow" };
   };
 
   const s = await adapter.create({

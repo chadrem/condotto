@@ -157,7 +157,6 @@ async function main(): Promise<void> {
     maxConcurrentTurns: config.maxConcurrentTurns,
     defaultModel: config.defaultModel,
     defaultEffort: config.defaultEffort,
-    defaultAutoApprove: config.defaultAutoApprove,
     defaultSubagents: config.defaultSubagents,
     defaultWorkflows: config.defaultWorkflows,
   });
@@ -173,8 +172,7 @@ async function main(): Promise<void> {
     `[daemon] cost cap $${config.defaultCostCapUsd}/thread (default), ` +
       `max ${config.maxConcurrentTurns} concurrent turns, ` +
       `default model ${config.defaultModel} @ ${config.defaultEffort} effort, ` +
-      `subagents ${config.defaultSubagents ? "ON" : "off"} / workflows ${config.defaultWorkflows ? "ON" : "off"}, ` +
-      `architect auto-approve ${config.defaultAutoApprove ? "ON" : "off"} by default`,
+      `subagents ${config.defaultSubagents ? "ON" : "off"} / workflows ${config.defaultWorkflows ? "ON" : "off"}`,
   );
 
   // Worktree GC: sweep once at boot — before any surface is live, so a

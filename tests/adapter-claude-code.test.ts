@@ -61,19 +61,6 @@ describe("claude-code adapter: multi-result buffering", () => {
     expect((replies[0] as any).workflow).toBeFalsy();
   });
 
-  test("a defer after a 'launched' success delivers ONLY the deferred (stale reply dropped)", async () => {
-    const q = fakeQuery(async function* () {
-      yield { type: "result", subtype: "success", result: "launched; waiting…", total_cost_usd: 0.01 };
-      yield { type: "result", terminal_reason: "tool_deferred", deferred_tool_use: { id: "t9", name: "Write", input: { file_path: "x" } }, total_cost_usd: 0.03 };
-    });
-    const events = await collect(new ClaudeCodeAdapter(q), allowGate);
-    expect(events.filter((e) => e.kind === "reply").length).toBe(0);
-    const deferred = events.filter((e) => e.kind === "deferred");
-    expect(deferred.length).toBe(1);
-    expect((deferred[0] as any).call.name).toBe("Write");
-    expect((deferred[0] as any).costUsd).toBe(0.03);
-  });
-
   test("an error after a 'launched' success delivers ONLY the error", async () => {
     const q = fakeQuery(async function* () {
       yield { type: "result", subtype: "success", result: "launched…", total_cost_usd: 0.01 };
@@ -88,12 +75,11 @@ describe("claude-code adapter: multi-result buffering", () => {
 });
 
 describe("claude-code adapter: gate wiring", () => {
-  test("the PreToolUse hook forwards agent_id and maps allow/deny/gate→defer", async () => {
+  test("the PreToolUse hook forwards agent_id/escaped and maps allow and deny", async () => {
     const seen: { name: string; agentId?: string; escaped?: boolean }[] = [];
     const gate: GateFn = async (call) => {
       seen.push({ name: call.name, agentId: call.agentId, escaped: call.escaped });
       if (call.name === "Read") return { decision: "allow" };
-      if (call.name === "Write") return { decision: "gate" };
       return { decision: "deny", reason: "nope" };
     };
     let readOut: any, writeOut: any, bashOut: any;
@@ -106,7 +92,8 @@ describe("claude-code adapter: gate wiring", () => {
     });
     await collect(new ClaudeCodeAdapter(q), gate);
     expect(readOut.hookSpecificOutput.permissionDecision).toBe("allow");
-    expect(writeOut.hookSpecificOutput.permissionDecision).toBe("defer"); // gate → defer
+    expect(writeOut.hookSpecificOutput.permissionDecision).toBe("deny");
+    expect(writeOut.hookSpecificOutput.permissionDecisionReason).toBe("nope");
     expect(bashOut.hookSpecificOutput.permissionDecision).toBe("deny");
     // agent_id plumbs into ToolCall.agentId; hook calls are NOT tagged escaped.
     expect(seen.find((c) => c.name === "Read")!.agentId).toBe("sub-1");
@@ -130,7 +117,7 @@ describe("claude-code adapter: gate wiring", () => {
     expect(readRes.updatedInput).toEqual({ file_path: "a" });
     expect(writeRes.behavior).toBe("deny");
     expect(writeRes.message).toBe("confined");
-    // Every canUseTool call is tagged escaped (un-deferrable path) with an empty id.
+    // Every canUseTool call is tagged escaped (the backstop path) with an empty id.
     expect(seen.every((c) => c.escaped === true && c.id === "")).toBe(true);
     expect(seen.map((c) => c.name)).toEqual(["Read", "Write"]);
   });

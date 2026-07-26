@@ -22,11 +22,11 @@
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { existsSync, mkdirSync, rmSync } from "node:fs";
-import { DEFAULT_SAFE_BASH_ALLOWLIST, loadConfig } from "../src/core/config";
+import { loadConfig } from "../src/core/config";
 
 export interface SmokeEnv {
   /** The repo to run against — the fixture unless CONDOTTO_SMOKE_REPO overrides. */
-  repo: { name: string; path: string; defaultBranch: string; safeBashAllowlist: string[] };
+  repo: { name: string; path: string; defaultBranch: string };
   /** Worktrees root for this run. */
   worktreesRoot: string;
   /** Path for a handoff file, e.g. statePath("gate.json"). */
@@ -180,7 +180,6 @@ export async function smokeEnv(): Promise<SmokeEnv> {
         name: repo.name,
         path: repo.path,
         defaultBranch: repo.defaultBranch,
-        safeBashAllowlist: repo.safeBashAllowlist,
       },
       worktreesRoot: config.worktreesRoot,
       statePath,
@@ -196,7 +195,6 @@ export async function smokeEnv(): Promise<SmokeEnv> {
       name: "tiny-ledger",
       path: repoPath,
       defaultBranch: "main",
-      safeBashAllowlist: DEFAULT_SAFE_BASH_ALLOWLIST,
     },
     worktreesRoot: join(root, "worktrees"),
     statePath,

@@ -32,33 +32,23 @@ export interface SessionRow {
   /** Per-thread cost ceiling in USD; null = use the daemon-wide default. */
   budget_limit_usd: number | null;
   /**
-   * Harness capability state. model/effort are opaque tokens (null =
-   * fall back to the daemon-wide default); subagents/workflows/workflow_write are
-   * 0/1 flags gating the multi-agent tools (default 0 — architect opt-in). Invariant
-   * (enforced in the session manager): workflow_write ⟹ workflows ⟹ subagents.
+   * Harness capability state. model/effort are opaque tokens (null = fall back to
+   * the daemon-wide default); subagents/workflows are 0/1 flags for the
+   * multi-agent tools. Invariant (enforced in the session manager):
+   * workflows ⟹ subagents.
    */
   model: string | null;
   effort: string | null;
   subagents: number;
   workflows: number;
-  /** The informed worktree-write opt-in for workflow/escaped calls. */
-  workflow_write: number;
-  /**
-   * Architect self-approve: when 1, a gated tool call on a turn initiated by
-   * an architect runs without the Approve click (the hard-deny floor still
-   * applies). Default 1 (on) — an architect toggles it per thread with
-   * `@Condotto auto-approve on|off`.
-   */
-  auto_approve: number;
   /**
    * Plan mode: when 1, the session investigates and proposes a plan instead of
    * doing the work. Only genuine reads run (`PolicyContext.planMode`); the plan
-   * arrives as a gated `ExitPlanMode` call, and approving it flips this back to 0
-   * and resumes straight into implementation.
+   * arrives as the plan-file write, which is posted into the thread.
    *
-   * In-thread only, like `workflow_write`: architect-set with `@Condotto plan
-   * on|off`, never seeded from config or from a repo default. It is a per-TASK
-   * mode, not a posture an operator sets once for a repo.
+   * In-thread only: architect-set with `@Condotto plan on|off`, never seeded from
+   * config or a repo default. It is a per-TASK mode, not a posture an operator
+   * sets once for a repo.
    */
   plan_mode: number;
   /**
@@ -82,7 +72,6 @@ export interface RepoRow {
   name: string;
   path: string;
   default_branch: string;
-  safe_bash_allowlist: string[];
   cost_cap_usd: number | null;
   /** Per-repo default model/effort tokens; null = daemon-wide default. */
   default_model: string | null;
@@ -92,11 +81,6 @@ export interface RepoRow {
   /** Durable agent memory: 1 gives the repo a Condotto-owned memory root. */
   memory: number;
   /**
-   * Per-repo default for architect self-approve, seeded onto each new
-   * session. 1 = on, 0 = off, null = fall back to the daemon-wide default.
-   */
-  default_auto_approve: number | null;
-  /**
    * Per-repo default harness posture, seeded onto each new session. 1 = on,
    * 0 = off, null = fall back to the daemon-wide default. `workflows` implies
    * `subagents`; the seed in the session manager asserts that.
@@ -105,9 +89,7 @@ export interface RepoRow {
   default_workflows: number | null;
 }
 
-interface RawRepoRow extends Omit<RepoRow, "safe_bash_allowlist"> {
-  safe_bash_allowlist: string;
-}
+interface RawRepoRow extends RepoRow {}
 
 interface RawSessionRow extends Omit<SessionRow, "harness_session_handle"> {
   harness_session_handle: string | null;
@@ -132,8 +114,6 @@ function parseJsonArray(json: string | null): string[] {
   }
 }
 
-export type ApprovalDecision = "pending" | "approved" | "denied" | "expired";
-
 /**
  * Where a role mapping came from. `config` rows are wiped + reseeded from
  * `condotto.toml` (`architects`/`[[roles]]`) / `CONDOTTO_ARCHITECTS` on every boot
@@ -141,40 +121,6 @@ export type ApprovalDecision = "pending" | "approved" | "denied" | "expired";
  * delegations that survive restart.
  */
 export type RoleSource = "config" | "grant";
-
-export interface ApprovalRow {
-  id: string; // == requestId, carried in the surface's approval control
-  session_id: string;
-  tool_use_id: string | null;
-  tool_name: string;
-  tool_input: unknown;
-  requested_at: string;
-  decided_by: string | null;
-  decision: ApprovalDecision;
-  decided_at: string | null;
-  /**
-   * The principalKey of the human whose turn caused this gated call. Carried
-   * so a defer→resume continuation is governed by the ORIGINAL initiator (never the
-   * approving decider), which prevents laundering a member's turn into architect
-   * auto-approval. Null on older rows and on daemon-run ship approvals.
-   */
-  initiated_by: string | null;
-}
-
-interface RawApprovalRow extends Omit<ApprovalRow, "tool_input"> {
-  tool_input: string;
-}
-
-function inflateApproval(row: RawApprovalRow | null): ApprovalRow | null {
-  if (!row) return null;
-  let toolInput: unknown = {};
-  try {
-    toolInput = JSON.parse(row.tool_input);
-  } catch {
-    toolInput = {};
-  }
-  return { ...row, tool_input: toolInput };
-}
 
 /**
  * Schema baseline — migration **v1** of the ordered `user_version` runner.
@@ -368,7 +314,7 @@ function migrateV4(db: Database): void {
  * configurable per repo, so a sandbox repo can run the full multi-agent posture
  * while a repo you care about stays quieter.
  *
- * NULLABLE with no DEFAULT, exactly like `default_auto_approve`: null means "no
+ * NULLABLE with no DEFAULT: null means "no
  * per-repo opinion — use the daemon-wide default", which is a distinct state
  * from an explicit `false`. Existing repos migrate to null and are therefore
  * governed by `[defaults]`, which is what an operator upgrading a binary
@@ -388,8 +334,7 @@ function migrateV5(db: Database): void {
  * above: plan mode has no "no opinion" state to express. It is in-thread only —
  * never seeded from `condotto.toml`, never a per-repo default — because it is a
  * per-TASK mode ("plan this one out first"), not a posture an operator sets once
- * for a repo. Same reasoning as `workflow_write`, the other setting the codebase
- * refuses to inherit. Existing sessions upgrade to off, which is what an operator
+ * for a repo. Existing sessions upgrade to off, which is what an operator
  * swapping a binary expects.
  */
 function migrateV6(db: Database): void {
@@ -412,6 +357,29 @@ function migrateV7(db: Database): void {
   db.run(`ALTER TABLE repos DROP COLUMN test_cmd`);
   db.run(`ALTER TABLE repos DROP COLUMN land_cmd`);
   db.run(`ALTER TABLE repos DROP COLUMN deploy_cmd`);
+}
+
+/**
+ * Migration **v8** (2026-07-26 simplification): the approval loop is gone, so
+ * everything that recorded one goes with it — the `approvals` table,
+ * `sessions.auto_approve`, `repos.default_auto_approve`, and
+ * `sessions.workflow_write`.
+ *
+ * The rows are DROPPED rather than kept for history. An approval record is only
+ * meaningful as part of a mechanism that can still act on it; once nothing reads
+ * them they are a table of decisions about a system that no longer works that
+ * way, and leaving them would invite exactly the misreading the deletion is
+ * meant to prevent. The `audit_log` keeps every tool call, which is the record
+ * that still means something.
+ *
+ * `workflow_write` goes because there is nothing left for it to widen: a workflow
+ * agent's write is evaluated exactly like the main agent's.
+ */
+function migrateV8(db: Database): void {
+  db.run(`DROP TABLE IF EXISTS approvals`);
+  db.run(`ALTER TABLE sessions DROP COLUMN auto_approve`);
+  db.run(`ALTER TABLE sessions DROP COLUMN workflow_write`);
+  db.run(`ALTER TABLE repos DROP COLUMN default_auto_approve`);
 }
 
 /** Add `column` to `table` only if absent (idempotent ALTER — SQLite has no
@@ -458,7 +426,8 @@ export class Store {
       migrateV5, // v5: repos.default_subagents/default_workflows for per-repo posture.
       migrateV6, // v6: sessions.plan_mode for the per-thread plan-mode posture.
       migrateV7, // v7: drop repos.test_cmd/land_cmd/deploy_cmd (the agent runs its own).
-      // v8+: append new migrations here. They only ever run on a store already
+      migrateV8, // v8: drop the approvals table + the auto-approve / worktree-write columns.
+      // v9+: append new migrations here. They only ever run on a store already
       // at the prior version, so they can be plain forward DDL — no IF NOT EXISTS
       // gymnastics.
     ];
@@ -496,12 +465,10 @@ export class Store {
     name: string;
     path: string;
     defaultBranch: string;
-    safeBashAllowlist?: string[];
     costCapUsd?: number;
     defaultModel?: string;
     defaultEffort?: string;
     trusted?: boolean;
-    autoApprove?: boolean;
     subagents?: boolean;
     workflows?: boolean;
     memory?: boolean;
@@ -510,16 +477,16 @@ export class Store {
       .query(
         `INSERT INTO repos
            (id, name, path, default_branch, safe_bash_allowlist, cost_cap_usd,
-            default_model, default_effort, trusted, default_auto_approve, memory,
+            default_model, default_effort, trusted, memory,
             default_subagents, default_workflows)
          VALUES ($id, $name, $path, $branch, $allow, $cap,
-                 $model, $effort, $trusted, $autoApprove, $memory,
+                 $model, $effort, $trusted, $memory,
                  $subagents, $workflows)
          ON CONFLICT(name) DO UPDATE SET
            path = $path, default_branch = $branch, safe_bash_allowlist = $allow,
            cost_cap_usd = $cap,
            default_model = $model, default_effort = $effort, trusted = $trusted,
-           default_auto_approve = $autoApprove, memory = $memory,
+           memory = $memory,
            default_subagents = $subagents, default_workflows = $workflows`,
       )
       .run({
@@ -527,13 +494,11 @@ export class Store {
         name: repo.name,
         path: repo.path,
         branch: repo.defaultBranch,
-        allow: JSON.stringify(repo.safeBashAllowlist ?? []),
+        allow: "[]", // retired 2026-07-26; the column stays to keep the baseline honest
         cap: repo.costCapUsd ?? null,
         model: repo.defaultModel ?? null,
         effort: repo.defaultEffort ?? null,
         trusted: repo.trusted ? 1 : 0,
-        // undefined = leave to the daemon default; only an explicit bool pins it.
-        autoApprove: repo.autoApprove === undefined ? null : repo.autoApprove ? 1 : 0,
         memory: repo.memory ? 1 : 0,
         subagents: repo.subagents === undefined ? null : repo.subagents ? 1 : 0,
         workflows: repo.workflows === undefined ? null : repo.workflows ? 1 : 0,
@@ -574,8 +539,8 @@ export class Store {
   getRepo(name: string): RepoRow | null {
     const row = this.db
       .query<RawRepoRow, { name: string }>(
-        `SELECT id, name, path, default_branch, safe_bash_allowlist, cost_cap_usd,
-                default_model, default_effort, trusted, default_auto_approve, memory,
+        `SELECT id, name, path, default_branch, cost_cap_usd,
+                default_model, default_effort, trusted, memory,
                 default_subagents, default_workflows
          FROM repos WHERE name = $name`,
       )
@@ -586,12 +551,10 @@ export class Store {
       name: row.name,
       path: row.path,
       default_branch: row.default_branch,
-      safe_bash_allowlist: parseJsonArray(row.safe_bash_allowlist),
       cost_cap_usd: row.cost_cap_usd,
       default_model: row.default_model,
       default_effort: row.default_effort,
       trusted: row.trusted,
-      default_auto_approve: row.default_auto_approve,
       memory: row.memory,
       default_subagents: row.default_subagents,
       default_workflows: row.default_workflows,
@@ -611,14 +574,13 @@ export class Store {
   createSession(
     s: Omit<
       SessionRow,
-      "created_at" | "last_active_at" | "budget_limit_usd" | "model" | "effort" | "subagents" | "workflows" | "workflow_write" | "auto_approve" | "plan_mode" | "cleanup_at" | "workdir"
+      "created_at" | "last_active_at" | "budget_limit_usd" | "model" | "effort" | "subagents" | "workflows" | "plan_mode" | "cleanup_at" | "workdir"
     > & {
       budget_limit_usd?: number | null;
       model?: string | null;
       effort?: string | null;
       subagents?: number;
       workflows?: number;
-      auto_approve?: number;
       /** Relative sub-project path; omitted/null = the repo root. */
       workdir?: string | null;
     },
@@ -630,19 +592,16 @@ export class Store {
     const effort = s.effort ?? null;
     const subagents = s.subagents ?? 0;
     const workflows = s.workflows ?? 0;
-    // On by default (matches the column DEFAULT and the shipped posture);
-    // assign passes the repo/daemon-resolved value explicitly.
-    const autoApprove = s.auto_approve ?? 1;
     try {
       this.db
         .query(
           `INSERT INTO sessions
              (id, surface_id, conversation_id, channel_id, repo_id, worktree_path, workdir,
               harness_id, harness_session_handle, branch, status, budget_limit_usd,
-              model, effort, subagents, workflows, auto_approve, created_at, last_active_at)
+              model, effort, subagents, workflows, created_at, last_active_at)
            VALUES ($id, $surface_id, $conversation_id, $channel_id, $repo_id, $worktree_path, $workdir,
                    $harness_id, $handle, $branch, $status, $budget,
-                   $model, $effort, $subagents, $workflows, $autoApprove, $now, $now)`,
+                   $model, $effort, $subagents, $workflows, $now, $now)`,
         )
         .run({
           id: s.id,
@@ -661,7 +620,6 @@ export class Store {
           effort,
           subagents,
           workflows,
-          autoApprove,
           now,
         });
     } catch (err) {
@@ -680,8 +638,6 @@ export class Store {
       effort,
       subagents,
       workflows,
-      workflow_write: 0,
-      auto_approve: autoApprove,
       // Never seeded: plan mode is a per-task decision made in the thread.
       plan_mode: 0,
       cleanup_at: null,
@@ -799,15 +755,12 @@ export class Store {
   }
 
   /** Toggle a session's architect self-approve (`@Condotto auto-approve`). */
-  setSessionAutoApprove(id: string, on: boolean): void {
-    this.db.query(`UPDATE sessions SET auto_approve = $v WHERE id = $id`).run({ id, v: on ? 1 : 0 });
-  }
 
   /**
    * Toggle a session's plan mode (`@Condotto plan on|off`).
    *
-   * Deliberately couples to nothing. Unlike `setSessionWorkflows`/
-   * `setSessionWorkflowWrite`, plan mode implies no other setting and is implied
+   * Deliberately couples to nothing. Unlike `setSessionWorkflows`, plan mode
+   * implies no other setting and is implied
    * by none: it pauses workflows for the duration, but that is computed at turn
    * time from `plan_mode` rather than written here, so `plan off` restores
    * whatever posture the thread had. Do not add an invariant.
@@ -817,31 +770,18 @@ export class Store {
   }
 
   /**
-   * Toggle a session's Workflow tool (part of the `ultra` preset). Turning
-   * it OFF also clears the worktree-write opt-in (invariant: workflow_write ⟹
-   * workflows), so a re-enable never silently resurrects write mode.
+   * Toggle a session's Workflow tool (part of the `ultra` preset). Turning it ON
+   * implies subagents: a workflow IS a fan-out of them, and a row with workflows
+   * on and subagents off describes a session that cannot exist.
    */
   setSessionWorkflows(id: string, on: boolean): void {
     if (on) {
-      this.db.query(`UPDATE sessions SET workflows = 1 WHERE id = $id`).run({ id });
+      this.db.query(`UPDATE sessions SET workflows = 1, subagents = 1 WHERE id = $id`).run({ id });
     } else {
-      this.db.query(`UPDATE sessions SET workflows = 0, workflow_write = 0 WHERE id = $id`).run({ id });
+      this.db.query(`UPDATE sessions SET workflows = 0 WHERE id = $id`).run({ id });
     }
   }
 
-  /**
-   * Toggle a session's worktree-write opt-in for workflow/escaped calls.
-   * Enabling it also asserts the `write ⟹ workflows ⟹ subagents` invariant in the DB
-   * (defense-in-depth — the manager already enables both first, but this keeps the
-   * store self-consistent no matter the caller).
-   */
-  setSessionWorkflowWrite(id: string, on: boolean): void {
-    if (on) {
-      this.db.query(`UPDATE sessions SET workflow_write = 1, workflows = 1, subagents = 1 WHERE id = $id`).run({ id });
-    } else {
-      this.db.query(`UPDATE sessions SET workflow_write = 0 WHERE id = $id`).run({ id });
-    }
-  }
 
   /**
    * Cumulative spend for a session in USD (runaway cap, DESIGN §4). Sums the
@@ -903,7 +843,6 @@ export class Store {
    */
   deleteSession(id: string): void {
     this.db.transaction(() => {
-      this.db.query(`DELETE FROM approvals WHERE session_id = $id`).run({ id });
       this.db.query(`DELETE FROM turns WHERE session_id = $id`).run({ id });
       this.db.query(`DELETE FROM sessions WHERE id = $id`).run({ id });
     })();
@@ -1013,6 +952,16 @@ export class Store {
   }
 
   /**
+   * Boot reconcile: remove only config-seeded rows so runtime `@Condotto
+   * grant` delegations (source='grant') survive the restart, then the daemon
+   * reseeds config rows. Removing a principal from config still revokes their
+   * config authority; grants are a separate, additive namespace.
+   */
+  clearConfigRoles(): void {
+    this.db.run(`DELETE FROM roles WHERE source = 'config'`);
+  }
+
+  /**
    * The effective role of a principal in a channel. A channel-scoped mapping
    * wins over a '*' mapping; absent any mapping, everyone is a `member`
    * (they can converse; only architects hold command authority — DESIGN.md §2).
@@ -1069,144 +1018,4 @@ export class Store {
     this.db.run(`DELETE FROM roles`);
   }
 
-  /**
-   * Boot reconcile: remove only config-seeded rows so runtime `@Condotto
-   * grant` delegations (source='grant') survive the restart, then the daemon
-   * reseeds config rows. Removing a principal from config still revokes their
-   * config authority; grants are a separate, additive namespace.
-   */
-  clearConfigRoles(): void {
-    this.db.run(`DELETE FROM roles WHERE source = 'config'`);
-  }
-
-  // -- approvals ------------------------------------------------------------
-
-  createApproval(a: {
-    id: string;
-    sessionId: string;
-    toolUseId: string | null;
-    toolName: string;
-    toolInput: unknown;
-    /** principalKey of the human whose turn caused this call (see ApprovalRow). */
-    initiatedBy?: string | null;
-  }): void {
-    this.db
-      .query(
-        `INSERT INTO approvals (id, session_id, tool_use_id, tool_name, tool_input, requested_at, decision, initiated_by)
-         VALUES ($id, $sid, $tuid, $name, $input, $now, 'pending', $initBy)`,
-      )
-      .run({
-        id: a.id,
-        sid: a.sessionId,
-        tuid: a.toolUseId,
-        name: a.toolName,
-        input: JSON.stringify(a.toolInput ?? {}),
-        now: new Date().toISOString(),
-        initBy: a.initiatedBy ?? null,
-      });
-  }
-
-  /**
-   * Record an architect auto-approval as an already-decided `approved` row —
-   * so the `approvals` ledger stays complete (every consequential action is
-   * attributable) with no transient `pending` window that `hasPendingApproval`
-   * would trip. `decided_by` = the architect whose standing authority stood in.
-   */
-  recordAutoApproval(a: {
-    sessionId: string;
-    toolUseId: string | null;
-    toolName: string;
-    toolInput: unknown;
-    initiator: string;
-  }): void {
-    const now = new Date().toISOString();
-    this.db
-      .query(
-        `INSERT INTO approvals
-           (id, session_id, tool_use_id, tool_name, tool_input, requested_at, decision, decided_by, decided_at, initiated_by)
-         VALUES ($id, $sid, $tuid, $name, $input, $now, 'approved', $by, $now, $by)`,
-      )
-      .run({
-        id: crypto.randomUUID(),
-        sid: a.sessionId,
-        tuid: a.toolUseId,
-        name: a.toolName,
-        input: JSON.stringify(a.toolInput ?? {}),
-        now,
-        by: a.initiator,
-      });
-  }
-
-  getApproval(id: string): ApprovalRow | null {
-    const row = this.db
-      .query<RawApprovalRow, { id: string }>(`SELECT * FROM approvals WHERE id = $id`)
-      .get({ id });
-    return inflateApproval(row);
-  }
-
-  /** True if the session is currently blocked on an undecided approval. */
-  hasPendingApproval(sessionId: string): boolean {
-    const row = this.db
-      .query<{ one: number }, { sid: string }>(
-        `SELECT 1 AS one FROM approvals WHERE session_id = $sid AND decision = 'pending' LIMIT 1`,
-      )
-      .get({ sid: sessionId });
-    return row !== null;
-  }
-
-  /**
-   * Daemon-wide count of undecided approvals (operator status). Every
-   * pending row is a session waiting on an architect's Approve/Deny click, so the
-   * total is the operator's "how many threads are blocked on me right now" gauge.
-   */
-  countPendingApprovals(): number {
-    const row = this.db
-      .query<{ n: number }, []>(`SELECT COUNT(*) AS n FROM approvals WHERE decision = 'pending'`)
-      .get();
-    return row?.n ?? 0;
-  }
-
-  /** Most recent approval for a re-driven tool call, keyed by tool_use_id. */
-  getApprovalByToolUse(sessionId: string, toolUseId: string): ApprovalRow | null {
-    const row = this.db
-      .query<RawApprovalRow, { sid: string; tuid: string }>(
-        // rowid is monotonic with insertion — deterministic even when two
-        // approvals for the same tool_use_id land in the same millisecond.
-        `SELECT * FROM approvals WHERE session_id = $sid AND tool_use_id = $tuid
-         ORDER BY rowid DESC LIMIT 1`,
-      )
-      .get({ sid: sessionId, tuid: toolUseId });
-    return inflateApproval(row);
-  }
-
-  /**
-   * Transition a pending approval to approved/denied. Returns true iff this
-   * call actually made the transition — a second click (Slack delivers actions
-   * at-least-once, and buttons can be double-clicked) returns false so the
-   * caller resumes the session exactly once.
-   */
-  decideApproval(id: string, decidedBy: string, decision: "approved" | "denied"): boolean {
-    const changes = this.db
-      .query(
-        `UPDATE approvals SET decision = $d, decided_by = $by, decided_at = $now
-         WHERE id = $id AND decision = 'pending'`,
-      )
-      .run({ id, d: decision, by: decidedBy, now: new Date().toISOString() }).changes;
-    return changes > 0;
-  }
-
-  /**
-   * Expire every still-pending approval for a session. Used when the approval
-   * can't be delivered, and when a session is stopped or reactivated — so a
-   * stale 'pending' row never wedges the session (hasPendingApproval) or lets an
-   * abandoned action re-drive later.
-   */
-  expirePendingApprovals(sessionId: string): number {
-    return this.db
-      .query(
-        `UPDATE approvals SET decision = 'expired', decided_at = $now
-         WHERE session_id = $sid AND decision = 'pending'`,
-      )
-      .run({ sid: sessionId, now: new Date().toISOString() }).changes;
-  }
 }

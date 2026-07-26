@@ -6,8 +6,7 @@ Condotto gives any Slack thread its own persistent
 [Claude Code](https://claude.com/claude-code) session, running on your own dev
 machine with your real repo, your real toolchain, and your real deploy path.
 Describe what you want in plain language. The AI writes the code, runs the
-tests, and posts progress in the thread. When it reaches for something
-consequential, an engineer clicks Approve.
+tests, and posts progress in the thread.
 
 That changes who gets to build. **The people who know what to build can now
 build it themselves**, working alongside your engineers instead of waiting on
@@ -17,7 +16,7 @@ support lead chases the root cause instead of waiting for someone to free up.
 What teams use it for:
 
 - **Fix the bug you filed.** The PM who reported it drives the fix, tests and
-  all, with an engineer approving the changes.
+  all, with an engineer driving.
 - **Ship a feature from a plain-language spec.** You bring the what and the
   why; the AI implementer handles the code.
 - **Debug support issues together.** Read the logs and chase the root cause in
@@ -25,16 +24,17 @@ What teams use it for:
 - **Ask production a question, safely.** Answers come back as aggregates only
   (counts, rates, yes or no), never raw rows.
 
-**Guardrails that help, not hinder.** Reading and analysis run freely, so the
-conversation never stalls. Writes, shell commands, production reads, and
-deploys pause until an engineer approves, every action is written to an audit
-log, and a hard-deny floor blocks the truly dangerous moves for everyone. The
-guardrails are not there to slow your team down. They are what make it safe to
-hand real building power to the whole team.
+**Guardrails that hold, without getting in the way.** The agent works at full
+speed — it writes, runs commands, and reaches the network without stopping to ask
+permission. What it cannot do is leave: every file it touches is inside a
+throwaway git worktree, credentials and host-escaping commands are refused
+outright for everyone, and every action lands in an audit log. The boundary is
+mechanical rather than procedural, which is what makes it safe to leave the agent
+alone with the work.
 
-Every session is a three-way collaboration: the domain expert drives the what
-and why, the AI implementer writes and tests the code, and the architect (your
-engineer with approval authority) signs off on the moves that matter.
+Every session is a collaboration: your architect drives the agent, the domain
+expert says what needs to be true, and the AI writes and tests the code. Anyone
+can talk in the thread — an architect's message is what sets the agent going.
 
 **How it's different.** Claude in Slack and Claude Code on the web run in
 Anthropic-hosted sandboxes, and the Claude Code CLI is one person at one
@@ -76,15 +76,14 @@ assigned, the daemon:
    files) and starts a persistent Claude Code session in it.
 2. Streams the thread's messages into that session, framed so message *content*
    can never impersonate a command.
-3. **Mechanically gates every tool call.** Reads and analysis run freely; writes,
-   arbitrary shell, network and production-data access pause
-   un-executed until an architect approves (or, for an architect's own turn,
-   auto-approve lets them through — see below). A hard-deny floor (escaping the
-   worktree, touching credentials, `rm -rf` the box) can't be overridden by anyone.
+3. **Mechanically bounds every tool call.** A `PreToolUse` hook the agent cannot
+   talk its way past answers every call before it runs. Work inside the worktree
+   proceeds; escaping it, touching credentials, or `rm -rf`-ing the box is refused
+   for everyone, always, with no way to override.
 4. **Parks** the session when idle and **resumes** it — same worktree, same
    history — whenever the thread wakes up. One conversation maps to one session
    for its entire life.
-5. **Audits everything** — every tool call, approval and decision — to an
+5. **Audits everything** — every tool call and every decision — to an
    append-only log in the SQLite store.
 
 Slack is the default surface and Claude Code the default harness, but the core is
@@ -242,7 +241,7 @@ workspace you'll use it in. Then:
 1. **Socket Mode** → toggle **on**. This mints an **app-level token** (`xapp-…`)
    with `connections:write`. That's your `app_token`.
 2. **OAuth & Permissions → Bot Token Scopes** — add:
-   - `chat:write` — post replies and approval buttons.
+   - `chat:write` — post replies and buttons.
    - `chat:write.customize` — per-session display names (optional but nice).
    - `commands` — the `/condotto` slash command.
    - `app_mentions:read` — the `@Condotto …` mention path.
@@ -259,7 +258,7 @@ workspace you'll use it in. Then:
    `app_mention`.
 5. **Slash Commands** → create `/condotto` (the "Request URL" field can be any
    placeholder — Socket Mode delivers it).
-6. **Interactivity & Shortcuts** → **on** (required for the Approve / Deny
+6. **Interactivity & Shortcuts** → **on** (required for the guided-choice
    buttons; Socket Mode delivers the clicks).
 7. **Invite the bot to your channel**: `/invite @Condotto`. Without this, reads
    fail with `not_in_channel`.
@@ -300,8 +299,8 @@ The one file to know. Read [`condotto.example.toml`](condotto.example.toml) — 
 heavily commented — but at a glance:
 
 ```toml
-# Surface-qualified principals with command authority (approve,
-# grant). WITHOUT at least one, nobody can approve gated actions.
+# Surface-qualified principals with command authority. Only an architect's
+# message runs the agent. WITHOUT at least one, nobody can drive it.
 architects = ["slack:U0123ABC"]
 
 [slack]
@@ -323,7 +322,6 @@ model = "opus"             # opus (= Opus 5) | sonnet | fable  (env: CONDOTTO_DE
 effort = "xhigh"           # low | medium | high | xhigh | max  (env: CONDOTTO_DEFAULT_EFFORT)
 subagents = true           # parallel read-only subagents    (env: CONDOTTO_SUBAGENTS=off)
 workflows = true           # multi-agent workflows, gated    (env: CONDOTTO_WORKFLOWS=off)
-auto_approve = true        # architects skip their own Approve click (env: CONDOTTO_AUTO_APPROVE=off)
 cost_cap_usd = 50          # per-thread runaway brake       (env: CONDOTTO_COST_CAP_USD)
 max_concurrent_turns = 6   # box-wide cap on live turns     (env: CONDOTTO_MAX_CONCURRENT_TURNS)
 
@@ -334,8 +332,7 @@ path = "~/Projects/webapp"        # absolute path to the git repo (required)
 default_branch = "main"
 trusted = false                   # true loads the repo's own CLAUDE.md/skills/.claude — vouch first
 memory = false                    # true gives the agent durable memory for this repo — vouch first
-safe_bash_allowlist = ["git status", "bun test"]  # auto-allowed without approval
-# cost_cap_usd / default_model / default_effort / auto_approve / subagents / workflows  # per-repo overrides
+# cost_cap_usd / default_model / default_effort / subagents / workflows  # per-repo overrides
 ```
 
 Those `[defaults]` are the **ultra** posture — `xhigh` effort plus subagents plus
@@ -396,12 +393,12 @@ A clean boot logs something like:
 
 ```
 … [daemon] seeded 1 role mapping(s), 1 architect(s)
-… [daemon] cost cap $50/thread (default), max 6 concurrent turns, default model opus @ xhigh effort, subagents ON / workflows ON, architect auto-approve ON by default
+… [daemon] cost cap $50/thread (default), max 6 concurrent turns, default model opus @ xhigh effort, subagents ON / workflows ON
 … [daemon] ready — db=…/condotto.sqlite, sessions on record: 0
 ```
 
 If you see `WARNING: no architects configured`, gated actions will have no one who
-can approve them — set `architects` and restart.
+can drive the agent — set `architects` and restart.
 
 To keep it running across reboots, install a service unit — see
 [Running as a service](#running-as-a-service).
@@ -418,25 +415,21 @@ you can assign):
    *existing* thread instead, mention **`@Condotto assign`** inside it — slash
    commands can't run in threads.) Working in a monorepo? Name the sub-project
    too — `/condotto assign <repo>/apps/report`. See [Monorepos](#monorepos).
-2. **Talk to it in the thread.** Ask it to explore, explain, or plan — reads run
-   without approval. "What does this repo do?" "Add a `/health` endpoint that
-   returns 200."
-3. **Approve the write.** When it goes to edit a file or run non-allowlisted
-   shell, an architect gets an **Approve / Deny** prompt (or, with auto-approve
-   on, an architect's own turn just proceeds). Members can watch but can't decide.
-4. **Or agree the shape first:** `@Condotto plan on`. The thread goes read-only —
-   the agent investigates and writes up a plan, and nothing changes until you
-   approve it. You get one decision about the whole change instead of thirty
-   decisions about individual writes. Approve and it implements straight away;
-   deny and say what you'd rather, and it re-plans. `@Condotto plan off` to leave.
-5. **Ship it:** ask for it. Committing, pushing and opening a PR are ordinary
+2. **Tell it what you want.** "What does this repo do?" "Add a `/health` endpoint
+   that returns 200." It explores, edits, and runs the tests, and posts what it
+   did. Anyone can talk in the thread; an architect's message is what starts a
+   turn, and everyone else's is carried into the next one as context.
+3. **Or agree the shape first:** `@Condotto plan on`. The thread goes read-only —
+   the agent investigates and posts a plan, and changes nothing. Read it, say what
+   you'd rather, and when you're happy, `@Condotto plan off` and it implements.
+4. **Ship it:** ask for it. Committing, pushing and opening a PR are ordinary
    commands the agent runs through the gate, and `GH_TOKEN` survives the
    environment scrub, so a PR URL comes back in the thread.
-6. **Start over without losing the work:** `@Condotto clear` forgets the
+5. **Start over without losing the work:** `@Condotto clear` forgets the
    conversation and nothing else. Same worktree, same branch, same uncommitted
    changes, same settings. Reach for it when a long thread has drifted, or when
    the agent is stuck on an idea it won't let go of.
-7. **End it:** `@Condotto stop` keeps the worktree for later; `@Condotto stop clean`
+6. **End it:** `@Condotto stop` keeps the worktree for later; `@Condotto stop clean`
    schedules it for teardown.
 
 ---
@@ -448,15 +441,16 @@ you can assign):
 | Command | Who | Does |
 |---|---|---|
 | `/condotto assign <repo>[/<sub-project>]` | architect | Start a new session in this channel. Omit the repo and Condotto asks which one — there is no default. In a monorepo, add a sub-project to start there. |
-| `/condotto status` | architect | Daemon-wide **operator dashboard** (ephemeral): uptime, session counts, turns-in-flight vs. cap, pending approvals, config summary. |
+| `/condotto status` | architect | Daemon-wide **operator dashboard** (ephemeral): uptime, session counts, turns-in-flight vs. cap, config summary. |
 | `/condotto stop` | anyone | Lists this channel's sessions and points you to the in-thread stop. |
 
-**Who can do what.** *Assigning* a session is command authority — **architects
-only** (as are approvals, grant, and every setting). **Anyone** can
-*converse* in an assigned thread; a member's instructions are acknowledged but
-never executed without an architect's approval. To let a domain expert drive
-sessions themselves, an architect `@Condotto grant`s them architect rights (see
-[the trust model](#empowering-domain-experts--grant--auto-approve)).
+**Who can do what.** **Only an architect's message runs the agent.** Everyone
+else can talk in the thread, and what they say is kept and carried into the next
+architect turn as context — so the conversation reaches the agent whole, it just
+doesn't spend a turn on every line of it. Assigning, stopping and every setting
+are architect-only too. To let a domain expert drive sessions themselves, an
+architect `@Condotto grant`s them architect rights (see
+[the trust model](#empowering-domain-experts--grant)).
 
 **In-thread** (mention `@Condotto` inside a session thread):
 
@@ -466,18 +460,16 @@ sessions themselves, an architect `@Condotto grant`s them architect rights (see
 | `@Condotto status` | anyone | This channel's sessions + their settings. |
 | `@Condotto stop [clean]` | architect | End the session; `clean` also discards the worktree. |
 | `@Condotto cancel` | architect | Interrupt the running turn (e.g. a runaway workflow); the session lives on. |
-| `@Condotto clear` (or `/clear`) | architect | Forget the thread's conversation and start the agent fresh. The worktree, branch, uncommitted work, settings, memory and spend all survive. Pending approvals are discarded, and worktree-write goes back off. Refused while a turn is running — `cancel` first. |
+| `@Condotto clear` (or `/clear`) | architect | Forget the thread's conversation and start the agent fresh. The worktree, branch, uncommitted work, settings, memory and spend all survive. Refused while a turn is running — `cancel` first. |
 | `@Condotto budget <usd>` | architect | Raise this thread's cost ceiling. |
 | `@Condotto model <opus\|sonnet\|fable>` | architect | Set the implementer model (`opus` = Opus 5). |
 | `@Condotto effort <low…max>` | architect | Set reasoning effort. Changing it mid-thread drops the prompt cache, so prefer setting it early. |
-| `@Condotto subagents on\|off` | architect | Read-only parallel exploration fan-out (on by default). |
-| `@Condotto workflows on\|off` | architect | Multi-agent Workflow tool, gated + confined (on by default). |
-| `@Condotto workflows write on\|off` | architect | Let confined workflow/subagent calls write **in the worktree** without a per-write click (out-of-worktree/credentials still refused). Off by default, and the only one of these not settable in `condotto.toml`. |
-| `@Condotto plan on\|off` | architect | Research first. I investigate and write up a plan, and nothing is written or run — not even the test suite — until you approve it. Approving takes me straight into implementing; denying sends me back to revise. |
+| `@Condotto subagents on\|off` | architect | Parallel exploration fan-out (on by default). Subagents are confined to the worktree exactly as the main agent is. |
+| `@Condotto workflows on\|off` | architect | Multi-agent Workflow tool (on by default). |
+| `@Condotto plan on\|off` | architect | Research first. I investigate and post a plan, and nothing is written or run — not even the test suite — while it's on. Turn it off when you're happy and I implement. |
 | `@Condotto ultra on\|off` | architect | Preset: `xhigh` effort + subagents + workflows — the shipped default, so this is mainly how you get back after dialing down. `off` drops subagents/workflows; set effort separately. |
 | `@Condotto /<skill> [args]` | architect | Run one of the harness's skills — including one marked `disable-model-invocation`, which the agent itself cannot invoke. Mention me first: a message that *begins* with `/` is eaten by Slack. |
 | `@Condotto skills` | architect | List the skills this thread can run, and which file each one is. |
-| `@Condotto auto-approve on\|off` | architect | Run an architect's own turns without the Approve click (on by default). |
 | `@Condotto grant @user architect [everywhere]` | architect | Delegate authority (this channel, or `everywhere`). Persists across restarts. |
 | `@Condotto revoke @user [everywhere]` | architect | Remove a runtime grant. |
 
@@ -505,10 +497,7 @@ hard-denied exactly as before.
 
 One thing follows from the cwd being the sub-project: **commands run there**, not
 at the repo root. The agent runs the sub-project's own test command by default;
-ask it for the root suite and it steps up itself. If you want a command to skip
-the approval click, put it in the repo's `safe_bash_allowlist` exactly as the
-agent will type it — a compound command that is only half allowlisted still
-gates.
+ask it for the root suite and it steps up itself.
 
 A session's sub-project is fixed when it's assigned and can't be changed
 afterwards (the agent's conversation history is tied to its working directory).
@@ -519,42 +508,49 @@ To work somewhere else, start a new thread.
 ## Security & trust model
 
 This is the heart of the product. The daemon is, by construction, a remote-code-
-execution portal — it takes text from Slack and runs an agent with a shell, a
-repo, and deploy keys. Two layers keep that honest:
+execution portal — it takes text from Slack and runs an agent with a shell and a
+repo. Condotto is built for a small, mutually trusting team on a machine they own,
+and the model is shaped by that: it does not ask a human to confirm work they just
+asked for. Three things hold instead, and none of them ever interrupts you.
 
-**1. Mechanical tool gating.** A `PreToolUse` hook the agent cannot talk its way
-past sorts every tool call into:
-- **Auto-allow** — read-only, side-effect-free (`Read`, `Glob`, `Grep`, the repo's
-  safe bash allowlist). Analysis never needs a human.
-- **Gate** — writes, edits, arbitrary shell, network, production-data, `git push`,
-  the deploy path. The call **pauses un-executed** until an architect approves.
-- **Hard-deny** — escaping the worktree, credential/secret access, `rm -rf` the
-  box. Refused for **everyone**, always. Nothing below can override it.
+**1. Worktree containment.** Every session works inside a fresh, throwaway git
+worktree. A `PreToolUse` hook the agent cannot talk its way past resolves every
+path a tool call names, and anything outside the worktree is refused — reads
+included, because reading the box and posting the answer into Slack is its own
+kind of leak.
 
-**2. Role-verified approvals.** A gate is resolved only by an architect, checked
+**2. A hard-deny floor.** Credentials (`ANTHROPIC_API_KEY`,
+`CLAUDE_CODE_OAUTH_TOKEN`, `~/.ssh`, `~/.aws`), environment dumps, `rm -rf`
+escaping the tree, and symlinking an outside path in. Refused for **everyone**,
+always, with no override and no button.
+
+**3. Unforgeable identity.** Only an architect's message runs the agent, checked
 **server-side** against the roles table by verified Slack user ID — never a
 display name, never text in a message body (this exact impersonation attack was
-found in the prototype). Members can see the prompt; their clicks are rejected.
+found in the prototype). Message text reaches the agent inside an unforgeable
+random-nonce fence, so content can never pose as an instruction from someone
+else. This is the control a trusted team does *not* replace: the attacker it
+guards against is a string in a dependency README, not a person in your Slack.
 
-### Empowering domain experts — grant + auto-approve
+Everything else the agent does — writing, editing, running commands, reaching the
+network — just runs, and lands in the audit log.
+
+### Empowering domain experts — grant
 
 The whole product vision is: an architect (expert in the *tech*) empowers domain
 experts (expert in the *product*, varied coding depth) to do real engineering in
-Slack. Two features make that practical:
+Slack.
 
-- **`@Condotto grant @user architect [everywhere]`** delegates command authority at
-  runtime — no config edit, no restart. Default scope is *this channel*; add
-  `everywhere` for all channels. Grants are **persisted** and survive restarts
-  (while `condotto.toml` stays authoritative for config-defined roles).
-  `@Condotto revoke @user` takes it back.
-- **`@Condotto auto-approve on|off`** (on by default) lets an **architect's own**
-  turns skip the Approve click. When an architect is driving a verified surface,
-  a gate-tier call just runs — so the architect can work at speed and step in to
-  approve only when a *member's* turn reaches for something gated. The
-  **mechanical hard-deny floor still holds** even under auto-approve: out-of-
-  worktree access, credential/secret exfiltration, and host-escape commands are
-  still refused with no button. Dial it off per thread with `@Condotto auto-approve
-  off`, or globally with `CONDOTTO_AUTO_APPROVE=off`.
+**`@Condotto grant @user architect [everywhere]`** delegates that authority at
+runtime — no config edit, no restart. Default scope is *this channel*; add
+`everywhere` for all channels. Grants are **persisted** and survive restarts
+(while `condotto.toml` stays authoritative for config-defined roles).
+`@Condotto revoke @user` takes it back.
+
+Granting is the whole decision. There is no per-action approval to click
+afterwards, which is deliberate: a permission you grant once and mean is more
+honest than thirty prompts nobody reads. Hand it to people you would hand a
+laptop and a git remote to.
 
 ### Running your skills
 
@@ -568,8 +564,7 @@ it no matter how you ask — and it's the flag teams put on exactly the skills t
 matter: `ship`, `ready`, `commit`. Naming one yourself is a different route
 entirely, which is why it's architects-only.
 
-A skill runs as an ordinary turn: same model, same budget, same gate. What it asks
-for still gets approved or refused the usual way.
+A skill runs as an ordinary turn: same model, same budget, same boundary.
 
 Two things Condotto refuses, and it's worth knowing why. **Arguments are limited to
 plain text** — letters, digits, and ordinary punctuation. A skill's text is expanded
@@ -586,8 +581,9 @@ inline (`` !`git status` `` in its own text). Condotto disables that — it woul
 before anything could gate it — so such a skill still works, but without that
 context. You'll see a note saying so before it starts.
 
-> **Residual risk, stated plainly (accepted for the trusted-team model):** under
-> auto-approve, in-worktree shell on an architect's turn runs without a click.
+> **Residual risk, stated plainly (accepted for the trusted-team model):** an
+> architect's turn runs shell in the worktree with nobody watching. That is the
+> trade the model makes, not an oversight.
 >
 > **The agent's shell can reach the Claude credential.** This is true in **both**
 > auth modes and is worth understanding rather than glossing. The runtime the agent
@@ -595,9 +591,8 @@ context. You'll see a note saying so before it starts.
 > process's environment — the SDK's documented mechanism. The agent's `Bash` tool
 > is a child of that process, so the value is in principle readable. What guards it
 > is **not** the credential's absence: it is the hard-deny on any command naming
-> `ANTHROPIC_API_KEY` or `CLAUDE_CODE_OAUTH_TOKEN` (no button, no auto-approve
-> override), plus the separate scrub that keeps both out of land/deploy commands.
-> Both are pinned by tests. One exception: under subscription auth on a desktop,
+> `ANTHROPIC_API_KEY` or `CLAUDE_CODE_OAUTH_TOKEN`, with no override of any kind.
+> It is pinned by tests. One exception: under subscription auth on a desktop,
 > the credential lives in the OS keychain rather than the environment, so there is
 > nothing there to read.
 >
@@ -654,37 +649,36 @@ at the top. Edit the paths/user to match your install before enabling.
 
 ### Reading the audit log
 
-Every consequential action — tool calls, approval requests, who clicked
-Approve/Deny, deploys, session lifecycle — is written to the **`audit_log`** table
-in the SQLite store. (A read-only Slack audit *channel* is planned but deferred
-past this beta; for now you read the log locally.) The trail is load-bearing: it's
-how you reconstruct what the agent did and who approved it.
+Every tool call and every session-lifecycle event is written to the **`audit_log`**
+table in the SQLite store. (A read-only Slack audit *channel* is planned but
+deferred past this beta; for now you read the log locally.) With no approval step
+in the way, this trail is how you reconstruct what the agent actually did — it is
+the record, not a supplement to one.
 
 Query it with any SQLite client — `sqlite3` ships with macOS and most Linux:
 
 ```sh
-# Recent gated / approval activity (newest first)
+# Recent activity (newest first)
 sqlite3 -header -column condotto.sqlite \
   "SELECT ts, actor, event, substr(detail,1,70) AS detail
      FROM audit_log
-    WHERE event IN ('tool_call','approval_request','approval_decision','auto_approved','session_stopped')
+    WHERE event IN ('tool_call','session_assigned','session_stopped')
     ORDER BY id DESC LIMIT 20;"
 
-# Who approved or denied what
+# Everything the floor refused — the one place a refusal shows up
 sqlite3 -header -column condotto.sqlite \
-  "SELECT ts, actor AS clicker,
+  "SELECT ts, json_extract(detail,'\$.tool')     AS tool,
           json_extract(detail,'\$.decision') AS decision,
-          json_extract(detail,'\$.tool')     AS tool
-     FROM audit_log WHERE event='approval_decision'
+          json_extract(detail,'\$.reason')   AS reason
+     FROM audit_log
+    WHERE event='tool_call' AND json_extract(detail,'\$.decision') LIKE 'deny%'
     ORDER BY id DESC LIMIT 20;"
 
-# Anything that was hard-denied or is still waiting on a click
+# What one session actually ran
 sqlite3 -header -column condotto.sqlite \
-  "SELECT ts, event, json_extract(detail,'\$.decision') AS decision,
-          json_extract(detail,'\$.summary') AS summary
+  "SELECT ts, json_extract(detail,'\$.tool') AS tool, json_extract(detail,'\$.decision') AS decision
      FROM audit_log
-    WHERE json_extract(detail,'\$.decision') LIKE 'deny%' OR event='approval_request'
-    ORDER BY id DESC LIMIT 20;"
+    WHERE event='tool_call' AND session_id='<SESSION_ID>' ORDER BY id ASC;"
 
 # Full timeline for one session (find its id in the queries above)
 sqlite3 -header -column condotto.sqlite \
@@ -696,10 +690,8 @@ events and actors:
 
 | `event` | `actor` | `detail` highlights |
 |---|---|---|
-| `tool_call` | `agent` | `tool`, `toolUseId`, `decision` (`allow`, `allow(architect-approved)`, `allow(auto-approved)`, `gate`, `deny(…)`) |
-| `approval_request` | `agent` (agent tool gate) or the ordering architect's `slack:U…` (land/deploy) | agent: `tool`, `toolUseId`, `summary`, `concern?` (e.g. `production-data`); land/deploy: `tool`, `kind`, `command` |
-| `approval_decision` | the clicker's `slack:U…` | `requestId`, `decision`, `tool` |
-| `auto_approved` | the architect's `slack:U…` | the auto-approved call |
+| `tool_call` | `agent` | `tool`, `toolUseId`, `decision` (`allow`, `deny`, `deny(plan-mode)`, `deny(memory-unproven)`), plus `agentId`/`escaped` when the call came from a subagent or the backstop path |
+| `message_held` | the member's `slack:U…` | a message kept for the next architect turn |
 | `session_assigned` | `slack:U…` | `repo`, `branch`, `worktree` |
 | `session_reactivated` / `session_stopped` | `slack:U…` | empty; `stop clean` adds `clean`/`cleanupAt`, reactivation adds `cleanupCancelled` |
 | `message_in` / `message_out` | `slack:U…` / `agent` | the conversation trail |
@@ -766,14 +758,16 @@ is loaded into the *system prompt* of every later thread in that channel, so the
 person who owns the install decides once, per repo — not per session, and not the
 agent. Worth knowing before you switch it on:
 
-- Writes are **gated** like any other write. On your own turns auto-approve covers
-  them silently; a member-driven turn surfaces one Approve click showing the content.
+- Writes go through the same boundary as any other write, and every one is
+  audited. The shape rules are narrow on purpose: a markdown file directly in the
+  memory root, through `Write` or `Edit`, and nothing else.
 - Memory is **notes, not authority.** The agent is told so explicitly: a memory
   never grants permission and never carries an approval, no matter what it claims.
 - The directory is Condotto's, not the repo's. It sits under `[paths].memory_root`,
   never inside a worktree, and it survives `stop clean` — that is the whole point.
-- The agent's **shell cannot reach it.** Memory changes only through the file tools,
-  so every change is gated and audited.
+- The agent's **shell cannot reach it.** Memory changes only through the file
+  tools, so every change is audited, and every target is re-proven against the
+  filesystem (no symlinks, no hard links) immediately before the call runs.
 
 Storage is one markdown file per fact plus a `MEMORY.md` index. To read what a repo
 has learned, or to forget it, look in `[paths].memory_root` — deleting a directory
@@ -791,7 +785,7 @@ there is a supported way to reset.
 | `Configuration error: …` at boot | The message names the bad field. Fix `condotto.toml` (compare against `condotto.example.toml`). |
 | Binary: "found no `claude` CLI beside it" | Ship `claude` next to the `condotto` binary, or set `CONDOTTO_CLAUDE_CLI` to an installed `claude`. |
 | Boot: `default model "x" not in harness models` | Use `opus`, `sonnet`, or `fable` for `[defaults].model`. |
-| Approve button does nothing | The clicker isn't an architect. Check `architects` / `@Condotto grant`. |
+| Condotto ignores my messages | Only an architect's message runs the agent. Check `architects` / `@Condotto grant`. Your message is kept, not lost — it reaches the agent on the next architect turn. |
 | Repeating `Failed to send ping to Slack (… undici_1.ping is not a function)` | You have Bolt 5 / `@slack/socket-mode@3`, which Bun can't run. `rm -rf node_modules && bun install --frozen-lockfile`, then confirm with `bun pm ls \| grep -E 'bolt\|socket-mode'`. |
 
 ---
@@ -811,9 +805,9 @@ worktrees root, and its own scratch state under `~/.cache/condotto-smoke`
 never touch a repo you care about.
 
 ```sh
-bun run smoke:gate      # gate a Write -> defer; then smoke:approve resumes and approves it
 bun run smoke:create    # a real session + turn; then smoke:resume proves park & resume
-bun run smoke:workflows # multi-agent Workflow, gated and confined
+bun run smoke:workflows # multi-agent Workflow: it fans out, and the boundary holds
+bun run smoke:plan      # plan mode: reads run, writes don't, the plan reaches the thread
 bun run smoke:monorepo  # sub-project cwd: project config, cross-package edits, boundary
 bun run smoke:reset     # delete the scratch dir; the next run rebuilds it
 ```

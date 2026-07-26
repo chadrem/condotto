@@ -1,6 +1,5 @@
 // Fake adapters exercising both ports without any platform dependency.
 import type {
-  ApprovalPrompt,
   ChoicePrompt,
   ConversationRef,
   GateFn,
@@ -31,10 +30,7 @@ export class FakeSurface implements SurfaceAdapter {
 
   posts: { conv: ConversationRef; text: string; messageId: string }[] = [];
   updates: { messageId: string; text: string }[] = [];
-  approvalRequests: { conv: ConversationRef; req: ApprovalPrompt }[] = [];
   choiceRequests: { conv: ConversationRef; prompt: ChoicePrompt }[] = [];
-  /** When true, requestApproval throws (simulates a Slack post failure). */
-  failApprovals = false;
   private nextId = 1;
 
   async start(_emit: (e: InboundEvent) => void): Promise<void> {}
@@ -50,10 +46,6 @@ export class FakeSurface implements SurfaceAdapter {
     this.updates.push({ messageId: ref.messageId, text: msg.text });
   }
 
-  async requestApproval(conv: ConversationRef, req: ApprovalPrompt): Promise<void> {
-    if (this.failApprovals) throw new Error("fake: approval post failed");
-    this.approvalRequests.push({ conv, req });
-  }
 
   async requestChoice(conv: ConversationRef, prompt: ChoicePrompt): Promise<void> {
     this.choiceRequests.push({ conv, prompt });
@@ -64,10 +56,6 @@ export class FakeSurface implements SurfaceAdapter {
     return this.choiceRequests.at(-1)?.prompt;
   }
 
-  /** The requestId of the most recent approval prompt (for tests to decide). */
-  lastApprovalRequestId(): string | undefined {
-    return this.approvalRequests.at(-1)?.req.requestId;
-  }
 
   /** All texts a human in the conversation would have seen, in order. */
   transcript(): string[] {
@@ -145,44 +133,11 @@ class FakeHarnessSession implements HarnessSession {
       }
       this._handle = { ...this._handle, pending: null };
       yield { kind: "handle_updated", handle: this._handle };
-      // An empty-prompt resume (approval decision) is done here. A resume that
-      // also carries a fresh human instruction continues into its scripted work
-      // after the leftover call is resolved (models the agent moving on).
-      if (input.text.trim().length === 0) {
-        // Optional: a test-queued continuation models NEW gated calls the agent
-        // emits after the approved action, within this resumed turn (resume
-        // auto-approve semantics). Isolated queue so it never interferes with the
-        // fresh-turn script queue.
-        const cont = this.parent.nextResumeScript();
-        if (cont) {
-          for (const c of cont) {
-            this.gateCalls.push(c);
-            const dd = await gate(c);
-            if (dd.decision === "gate") {
-              this._handle = { ...this._handle, pending: c };
-              yield { kind: "handle_updated", handle: this._handle };
-              yield { kind: "deferred", call: c };
-              return;
-            }
-            if (dd.decision === "allow") this.parent.executed.push(c);
-          }
-        }
-        // Model a workflow run: approving a Workflow launch "runs" the workflow,
-        // so its reply is a workflow-tagged summary (cost footer).
-        yield { kind: "reply", text: note, costUsd: 0.01, workflow: call.name === "Workflow" };
-        return;
-      }
       const scripted = this.parent.nextScript();
       if (scripted) {
         for (const c of scripted) {
           this.gateCalls.push(c);
           const dd = await gate(c);
-          if (dd.decision === "gate") {
-            this._handle = { ...this._handle, pending: c };
-            yield { kind: "handle_updated", handle: this._handle };
-            yield { kind: "deferred", call: c };
-            return;
-          }
           if (dd.decision === "allow") this.parent.executed.push(c);
         }
       }
@@ -197,14 +152,7 @@ class FakeHarnessSession implements HarnessSession {
       for (const call of scripted) {
         this.gateCalls.push(call);
         const d = await gate(call);
-        if (d.decision === "gate") {
-          // Deferred: end the turn with this call preserved for resume.
-          this._handle = { ...this._handle, pending: call };
-          yield { kind: "handle_updated", handle: this._handle };
-          yield { kind: "progress", text: `attempting ${call.name}` };
-          yield { kind: "deferred", call };
-          return;
-        }
+        yield { kind: "progress", text: `attempting ${call.name}` };
         if (d.decision === "allow") this.parent.executed.push(call);
         // A deny is fed back to the agent, which adapts — reflect the reason.
         if (d.decision === "deny") denials.push(d.reason);

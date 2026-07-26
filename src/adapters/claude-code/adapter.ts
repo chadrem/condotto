@@ -57,18 +57,16 @@ export type QueryFn = (args: { prompt: unknown; options: Record<string, any> }) 
 //    context (it invents paths) — always use the preset + append.
 //  - `session_id` arrives on the `system`/`init` message.
 //
-// The core GateFn answers allow/deny/gate for every tool call.
-//  - allow  -> PreToolUse `allow` (reads stay auto-approved; the hook still
-//              confines them, which beats allowedTools per the SDK precedence).
-//  - deny   -> PreToolUse `deny` with a reason fed back to the agent.
-//  - gate   -> PreToolUse `defer`: the turn ends un-executed with the pending
-//              call preserved (verified); the core records an approval, and a
-//              later architect decision resumes the session to re-drive it.
-// `canUseTool` is the deny-by-default backstop for the one batching caveat:
-// when the model issues several tool calls in one batch, `defer` is ignored and
-// the gated call falls through the permission flow to canUseTool, which denies
-// it (verified doc precedence: hooks -> deny/ask rules -> permission mode ->
-// allow rules -> canUseTool).
+// The core GateFn answers allow or deny for every tool call.
+//  - allow -> PreToolUse `allow` (the hook still confines, which beats
+//             allowedTools per the SDK precedence).
+//  - deny  -> PreToolUse `deny` with a reason fed back to the agent.
+// There used to be a third answer, `gate`, mapped to the SDK's `defer` so a turn
+// could end un-executed and resume on an architect's click. Deleted 2026-07-26
+// with the approval loop. `canUseTool` remains as a deny-by-default backstop for
+// calls that reach the permission flow instead of the hook (a batched call, or a
+// workflow agent's call that carried no agent_id) — it runs the same core policy,
+// so the answer is identical wherever the call lands.
 
 /**
  * Opaque to the core. Owned entirely by this adapter. Deliberately does NOT
@@ -475,11 +473,6 @@ export function enumerateSkills(opts: {
   return { skills, refused };
 }
 
-/** Deny message for a gated call that arrived batched (defer unavailable). */
-const BATCH_GATE_DENY =
-  "This action needs an architect's approval, but it came in a parallel batch of tool calls, " +
-  "which can't be paused for approval. Re-issue it on its own and I'll request approval.";
-
 /**
  * The SDK warns — with a full stack trace, on EVERY query() — that read-only
  * tools are "shadowed" from canUseTool by allowedTools
@@ -793,21 +786,14 @@ class ClaudeCodeSession implements HarnessSession {
       } catch (err) {
         decision = { decision: "deny", reason: `gate error (denied fail-closed): ${err}` };
       }
-      // Map the domain decision onto the SDK's PreToolUse contract. `gate`
-      // becomes `defer`, which ends the query with the pending call preserved
-      // (updatedInput is ignored on defer, per the docs).
+      // Map the domain decision onto the SDK's PreToolUse contract.
       const out =
         decision.decision === "allow"
           ? {
               permissionDecision: "allow" as const,
               updatedInput: decision.updatedInput as Record<string, unknown> | undefined,
             }
-          : decision.decision === "deny"
-            ? { permissionDecision: "deny" as const, permissionDecisionReason: decision.reason }
-            : {
-                permissionDecision: "defer" as const,
-                permissionDecisionReason: "Gated by Condotto — awaiting an architect's approval.",
-              };
+          : { permissionDecision: "deny" as const, permissionDecisionReason: decision.reason };
       return { hookSpecificOutput: { hookEventName: "PreToolUse" as const, ...out } };
     };
 
@@ -856,11 +842,10 @@ class ClaudeCodeSession implements HarnessSession {
         ? ("bypassPermissions" as const)
         : ("default" as const);
 
-    // The canUseTool backstop now runs the CORE policy on an `escaped` call —
-    // a call that reached this un-deferrable path instead of the hook (a batched
-    // gated call, or a workflow-agent call that didn't carry agent_id). The policy
-    // confines it: reads pass, a would-be gate becomes deny (can't defer here), and
-    // with the worktree-write opt-in confined writes pass. Fail closed on error.
+    // The canUseTool backstop runs the CORE policy on an `escaped` call — one that
+    // reached the permission flow instead of the hook. Same policy, same answer;
+    // it exists so a call can never route around the boundary by taking a
+    // different path. Fails closed on error.
     const canUseToolFn = async (toolName: string, toolInput: unknown) => {
       let decision: Awaited<ReturnType<GateFn>>;
       try {
@@ -874,10 +859,7 @@ class ClaudeCodeSession implements HarnessSession {
           updatedInput: (decision.updatedInput ?? toolInput) as Record<string, unknown>,
         };
       }
-      // deny, or a defensive gate (the policy never gates an escaped call — that
-      // would strand it un-deferred — so treat any gate here as a fail-closed deny).
-      const message = decision.decision === "deny" ? decision.reason : BATCH_GATE_DENY;
-      return { behavior: "deny" as const, message };
+      return { behavior: "deny" as const, message: decision.reason };
     };
 
     const q = this.queryFn({
@@ -1148,29 +1130,7 @@ class ClaudeCodeSession implements HarnessSession {
             if (cost !== undefined) drainedCost = cost;
             continue;
           }
-          const deferred = m.deferred_tool_use as
-            | { id?: string; name?: string; input?: unknown }
-            | undefined;
-          if (m.terminal_reason === "tool_deferred" || deferred) {
-            // A gated tool call was deferred (verified handshake). Hand the
-            // preserved pending call to the core to record an approval; the turn
-            // is over until an architect decides and the session is resumed. A
-            // defer is the real outcome — drop any buffered intermediate reply.
-            pendingReply = null;
-            if (deferred?.id) {
-              yield {
-                kind: "deferred",
-                call: { id: deferred.id, name: deferred.name ?? "unknown", input: deferred.input },
-                costUsd: cost,
-              };
-            } else {
-              yield {
-                kind: "error",
-                message: "a tool call was deferred but no pending call was preserved",
-                costUsd: cost,
-              };
-            }
-          } else if (m.subtype === "success") {
+          if (m.subtype === "success") {
             // Buffer, don't yield: a later result may supersede this one (workflow
             // "launched" → "completed"). Delivered after the loop (last wins).
             pendingReply = {

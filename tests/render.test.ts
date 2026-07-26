@@ -1,13 +1,9 @@
 import { describe, expect, test } from "bun:test";
 import {
-  APPROVE_ACTION,
   CHOICE_ACTION,
-  DENY_ACTION,
-  approvalBlocks,
   choiceBlocks,
   parseChoiceBlockId,
   renderMrkdwn,
-  resolveApprovalMessage,
   resolveChoiceMessage,
 } from "../src/adapters/slack/render";
 import { frameMessage } from "../src/core/framing";
@@ -45,92 +41,6 @@ describe("renderMrkdwn", () => {
   });
 });
 
-describe("approvalBlocks", () => {
-  function buttons(blocks: unknown[]): any {
-    return (blocks as any[]).find((b) => b.type === "actions");
-  }
-
-  test("detailPosted suppresses the detail block — a plan is never rendered twice", () => {
-    // The plan is delivered whole as its own message above the buttons. The
-    // detail block truncates at 2500 chars, so rendering it too would put a
-    // clipped duplicate directly under the text the architect just read.
-    const plan = "1. Rewrite the parser\n2. Add a regression test\n" + "x".repeat(4000);
-    const req = {
-      requestId: "req-plan",
-      toolName: "Write",
-      toolInput: { file_path: "/wt/.condotto/plans/plan-a.md", content: plan },
-      summary: "stop planning and start implementing the plan above",
-    };
-    const withDetail = approvalBlocks(req);
-    const suppressed = approvalBlocks({ ...req, detailPosted: true });
-    const sections = (b: unknown[]) => (b as any[]).filter((x) => x.type === "section");
-    expect(sections(withDetail.blocks).length).toBe(2); // control: an ordinary write shows its detail
-    expect(sections(suppressed.blocks).length).toBe(1); // headline only
-    expect(JSON.stringify(suppressed.blocks)).not.toContain("Rewrite the parser");
-    expect(buttons(suppressed.blocks)).toBeTruthy(); // still decidable
-  });
-
-  test("renders two buttons that carry the requestId and the action detail", () => {
-    const { blocks, text } = approvalBlocks({
-      requestId: "req-1",
-      toolName: "Bash",
-      toolInput: { command: "npm install left-pad" },
-      summary: "run `npm install left-pad`",
-    });
-    expect(text).toContain("Approval needed");
-    const actions = buttons(blocks);
-    expect(actions.block_id).toBe("condotto_approval:req-1");
-    const [approve, deny] = actions.elements;
-    expect(approve.action_id).toBe(APPROVE_ACTION);
-    expect(approve.value).toBe("req-1");
-    expect(deny.action_id).toBe(DENY_ACTION);
-    expect(deny.value).toBe("req-1");
-    // The command is shown so the architect can judge it.
-    expect(JSON.stringify(blocks)).toContain("npm install left-pad");
-  });
-
-  test("a policy concern renders a warning context block (production-data)", () => {
-    const { blocks } = approvalBlocks({
-      requestId: "req-p",
-      toolName: "Bash",
-      toolInput: { command: "psql -c 'select count(*) from users'" },
-      summary: "run `psql ...` (investigates production data)",
-      concern: "This investigates production data — results must be aggregates only.",
-    });
-    const warn = (blocks as any[]).find(
-      (b) => b.type === "context" && String(JSON.stringify(b)).includes("aggregates only"),
-    );
-    expect(warn).toBeDefined();
-    expect(JSON.stringify(warn)).toContain(":warning:");
-  });
-
-  test("no concern → no warning block", () => {
-    const { blocks } = approvalBlocks({ requestId: "r", toolName: "Bash", toolInput: { command: "ls" }, summary: "run `ls`" });
-    expect((blocks as any[]).some((b) => b.type === "context")).toBe(false);
-  });
-
-  test("content that contains a code fence can't break out of the detail block", () => {
-    const { blocks } = approvalBlocks({
-      requestId: "req-2",
-      toolName: "Write",
-      toolInput: { file_path: "x.md", content: "```\nrm -rf /\n```" },
-      summary: "write x.md",
-    });
-    const detail = (blocks as any[]).find(
-      (b) => b.type === "section" && String(b.text?.text ?? "").startsWith("```"),
-    );
-    // Exactly the opening and closing fences we added — the inner ``` is defused.
-    expect((String(detail.text.text).match(/```/g) ?? []).length).toBe(2);
-  });
-
-  test("resolveApprovalMessage drops the buttons and records the decider", () => {
-    const { blocks } = approvalBlocks({ requestId: "r", toolName: "Bash", toolInput: { command: "ls" }, summary: "run `ls`" });
-    const resolved = resolveApprovalMessage(blocks, "approved", "U_ARCH");
-    expect((resolved.blocks as any[]).some((b) => b.type === "actions")).toBe(false);
-    expect(JSON.stringify(resolved.blocks)).toContain("Approved");
-    expect(JSON.stringify(resolved.blocks)).toContain("U_ARCH");
-  });
-});
 
 describe("choiceBlocks (guided choice)", () => {
   test("renders one button per option carrying its value; block_id round-trips", () => {
@@ -265,15 +175,6 @@ describe("mention tokens", () => {
     expect(/<[^>]*$/.test(body)).toBe(false);
   });
 
-  test("the approval notification fallback linkifies tokens", () => {
-    const { text } = approvalBlocks({
-      requestId: "r",
-      toolName: "Bash",
-      toolInput: { command: "ls" },
-      summary: "run ls for @[[slack:U0ABBY]]",
-    });
-    expect(text).toBe("Approval needed: run ls for <@U0ABBY>");
-  });
 
   test("the choice notification fallback linkifies tokens", () => {
     const { text } = choiceBlocks({
@@ -284,20 +185,6 @@ describe("mention tokens", () => {
     expect(text).toBe("<@U0ABBY> which repo?");
   });
 
-  test("the approval detail block is byte-identical — an architect judges what will RUN", () => {
-    const command = "notify --to '@[[slack:U0ABBY]]' --dry-run";
-    const { blocks } = approvalBlocks({
-      requestId: "r",
-      toolName: "Bash",
-      toolInput: { command },
-      summary: "run a notify command",
-    });
-    const detail = (blocks as any[]).find(
-      (b) => b.type === "section" && String(b.text?.text ?? "").startsWith("```"),
-    );
-    expect(detail.text.text).toBe("```\n" + command + "\n```");
-    expect(detail.text.text).not.toContain("<@");
-  });
 });
 
 describe("mention tokens: the inbound-to-outbound round trip", () => {
@@ -346,19 +233,6 @@ describe("notification-fallback text escapes exactly like the block body", () =>
   // sees because it only counts tokens it rewrote (review 2026-07-20).
   const BROADCASTS = ["<!channel>", "<!here>", "<!everyone>", "<@U0BOSS>"];
 
-  test("an approval summary cannot mint a broadcast or a raw mention", () => {
-    for (const raw of BROADCASTS) {
-      const { text } = approvalBlocks({
-        requestId: "r1",
-        toolName: "Bash",
-        toolInput: { command: "ls" },
-        summary: `run ls ${raw}`,
-      });
-      expect(text).not.toContain(raw);
-      expect(text).not.toContain("<!");
-      expect(text).toContain("&lt;");
-    }
-  });
 
   test("a choice prompt cannot mint a broadcast or a raw mention", () => {
     for (const raw of BROADCASTS) {
@@ -369,11 +243,10 @@ describe("notification-fallback text escapes exactly like the block body", () =>
   });
 
   test("but a real token still linkifies in the fallback — the sanctioned path survives escaping", () => {
-    const { text } = approvalBlocks({
-      requestId: "r1",
-      toolName: "Bash",
-      toolInput: { command: "ls" },
-      summary: "ask @[[slack:U0ABBY]]",
+    const { text } = choiceBlocks({
+      choiceId: "c",
+      text: "ask @[[slack:U0ABBY]]",
+      options: [{ label: "a", value: "a" }],
     });
     expect(text).toContain("<@U0ABBY>");
   });
@@ -408,11 +281,4 @@ describe("resolved messages render the label but never the decider", () => {
     expect(json(resolved.blocks)).not.toContain("&lt;@U_ARCH");
   });
 
-  test("resolveApprovalMessage keeps the decider's own mention live in text and blocks", () => {
-    const { blocks } = approvalBlocks({ requestId: "r", toolName: "Bash", toolInput: { command: "ls" }, summary: "run `ls`" });
-    const resolved = resolveApprovalMessage(blocks, "denied", "U_ARCH");
-    expect(resolved.text).toContain("<@U_ARCH>");
-    expect(json(resolved.blocks)).toContain("<@U_ARCH>");
-    expect(json(resolved.blocks)).not.toContain("&lt;@U_ARCH");
-  });
 });

@@ -39,34 +39,32 @@ done.
       keys are ignored rather than rejected, so an old `condotto.toml` still
       boots. `safeBashAllowlist` outlives it by one phase and dies in phase 2,
       where it is a policy concept rather than a config one.
-- [ ] **Phase 2 — collapse `policy.ts`.** Two answers, allow or deny. Deny is the
-      floor and nothing else. Delete the gate tier, `PolicyConcern`, production
-      data detection, the bash allowlist, `workflowWrite`, and
-      `evaluateConfined`'s separate rules (subagents and workflow agents get the
-      same answer the main agent gets). Widen the floor tests while doing it:
-      after this they are the only security tests in the repo.
-- [ ] **Phase 3 — delete the approval loop.** The defer/resume handshake, the
-      approvals table and its store methods, Approve/Deny blocks, the
-      prior-approval short-circuit, `@Condotto auto-approve`, the budget-capped
-      approval resume, the `canUseTool` batching backstop. A turn becomes one
-      query that runs to completion.
-- [ ] **Phase 4 — only architects drive.** A non-architect's message is recorded
-      and framed as context for the next architect turn, but never starts one.
-      `@Condotto grant @user architect` is how you hand someone the keys.
+- [x] **Phase 2 — collapse `policy.ts`.** Two answers, allow or deny. The gate
+      tier, `PolicyConcern`, production-data detection, the bash allowlist,
+      `workflowWrite` and `evaluateConfined` are gone; origin (`agentId`,
+      `escaped`) is audit detail rather than a policy input. The floor tests were
+      widened at the same time, since they are now the only security tests in the
+      repo, and the widening found one real gap: bare `set` dumps the environment
+      and was not floored.
+- [x] **Phase 3 — delete the approval loop.** The defer/resume handshake, the
+      approvals table, Approve/Deny blocks, the prior-approval short-circuit,
+      `@Condotto auto-approve`, `@Condotto workflows write`, the budget-capped
+      approval resume, `requestApproval` on the surface port, and the `deferred`
+      turn event (migration v8). A turn is one query that runs to completion.
+- [x] **Phase 4 — only architects drive.** A non-architect's message is framed,
+      recorded and held on the live session entry, then prepended to the next
+      architect turn. In memory on purpose: a restart loses the queue, and the
+      messages are still sitting in the thread.
 - [ ] **Phase 5 — trust stops being per-repo ceremony.** Drop the `trusted` flag;
       every repo loads its own `CLAUDE.md`, skills and `.claude/`. Drop
       `checkSkillArgs`. Keep `disableAllHooks` and `disableSkillShellExecution`
       pinned: a repo's checked-in shell runs before any hook, which is the one
       path that walks straight past the floor.
-- [ ] **Phase 6 — tests, smokes, and this file.** Delete the gate, approval,
-      prod-data, allowlist and confined-tier tests. Drop `smoke:gate` and
-      `smoke:approve`. Clean up the ~48 stale `DESIGN.md`/`DECISIONS.md`
-      references in code comments. Trim the section above.
+- [ ] **Phase 6 — the last sweep.** Clean up the ~48 stale `DESIGN.md`/
+      `DECISIONS.md` references in code comments, and delete this section.
 
-**Still in the tree until those phases land:** the defer-based approval loop,
-Approve/Deny cards, auto-approve, the production-data gate, the safe bash
-allowlist, and per-repo `trusted`. Expect to meet
-them in the code; they are on the way out, not load-bearing.
+**Still in the tree until phase 5 lands:** per-repo `trusted`, and the skill
+argument charset refusal. Everything else on the list above is done.
 
 ## What survives, and why
 
@@ -75,7 +73,9 @@ asks a human anything, which is the point.
 
 - **Worktree containment.** Every path-bearing tool call resolves inside the
   session's worktree. The boundary is the worktree ROOT, which may sit above the
-  cwd in a monorepo session, and containment is computed only from the root.
+  cwd in a monorepo session, and containment is computed only from the root. It is
+  origin-blind: a subagent, a workflow agent and a call arriving on the
+  `canUseTool` backstop all get the identical answer.
 - **The hard-deny floor.** Credential env names (`ANTHROPIC_API_KEY`,
   `CLAUDE_CODE_OAUTH_TOKEN`, the daemon's own secrets), `rm -rf` escapes, and
   linking an out-of-tree path into the worktree. No one overrides it.
@@ -91,8 +91,10 @@ asks a human anything, which is the point.
   exception to containment. `verifyMemoryTarget` re-proves every target against
   the filesystem (no symlinks, no hard links) before the call runs. That per-call
   proof is the boundary; the sweep in `prepare` is hygiene.
-- **Plan mode.** Read-only "investigate and propose first". Keeps the posture,
-  loses the Approve/Deny card.
+- **Plan mode.** Read-only "investigate and propose first". The plan-file write is
+  the one write it permits, `policy.ts` flags that decision with `plan: true`, and
+  the session manager posts the content into the thread. `@Condotto plan off` is
+  how it ends — there is no button.
 
 ## Architecture (the shape to preserve)
 

@@ -37,7 +37,7 @@ console.log(`[smoke] worktree:  ${worktree.path}`);
 console.log(`[smoke] plans dir: ${plansDir}`);
 
 // Observations, all of which have to hold for a PASS.
-let planWriteGated = false; // the plan reached the gate as a plan
+let planWritten = false; // the plan reached the gate as a plan
 let planTextSeen = ""; // and carried readable plan text
 let ordinaryWriteDenied = false; // an ordinary write was DENIED, not gated
 let readAllowedWhilePlanning = false;
@@ -48,53 +48,28 @@ const approved = new Set<string>();
 
 /** Plan mode is a per-turn posture, exactly as the session manager treats it. */
 let planMode = true;
-/**
- * Architect self-approve, which is ON by default in a real thread. Modelled only
- * AFTER the plan is approved, which is exactly the shipped posture: the plan
- * itself is never auto-approved (that exemption is the feature), and the
- * implementation that follows runs on the architect's standing authority.
- */
-let autoApprove = false;
 
 const gate: GateFn = async (call: ToolCall) => {
-  // The prior-approval short-circuit, i.e. the resume half of the handshake.
-  if (call.id && approved.has(call.id)) {
-    console.log(`[gate] ${call.name} -> allow (architect-approved)`);
-    return { decision: "allow" };
-  }
   const ctx: PolicyContext = {
     worktree: worktree.path,
-    safeBashAllowlist: ["git status"],
-    subagentsEnabled: true,
     ...(planMode ? { planMode: true, plansDir } : {}),
   };
   const d = evaluate(call, ctx);
   const isPlan = planMode && isPlanPresentation(call, plansDir, worktree.path);
   const tag = isPlan ? "PLAN" : call.agentId ? `sub(${call.agentId.slice(0, 6)})` : "main";
-  console.log(`[gate] ${tag} ${call.name} -> ${d.action}${d.concern ? ` (${d.concern})` : ""}`);
+  console.log(`[gate] ${tag} ${call.name} -> ${d.action}${d.plan ? " (the plan)" : ""}`);
 
   if (planMode) {
     if ((call.name === "Read" || call.name === "Glob" || call.name === "Grep") && d.action === "allow") {
       readAllowedWhilePlanning = true;
     }
     if (call.name === "Write" && !isPlan && d.action === "deny") ordinaryWriteDenied = true;
-    if (isPlan && d.action === "gate" && d.concern === "plan-approval") {
-      planWriteGated = true;
+    if (d.plan) {
+      planWritten = true;
       planTextSeen = planTextFrom(call.input) ?? "";
-      deferredId = call.id;
     }
   }
-  // Architect auto-approve. Never reached while planning: the plan-approval gate
-  // is exempt by design, and everything else in plan mode is a deny, not a gate.
-  if (d.action === "gate" && autoApprove && d.concern !== "plan-approval") {
-    console.log(`[gate] ${call.name} -> allow (auto-approved, architect's own turn)`);
-    return { decision: "allow" };
-  }
-  return d.action === "allow"
-    ? { decision: "allow" }
-    : d.action === "deny"
-      ? { decision: "deny", reason: d.reason }
-      : { decision: "gate" };
+  return d.action === "allow" ? { decision: "allow" } : { decision: "deny", reason: d.reason };
 };
 
 const adapter = new ClaudeCodeAdapter();
@@ -119,37 +94,33 @@ for await (const ev of session.turn(
 )) {
   if (ev.kind === "progress") console.log(`[progress] ${ev.text}`);
   if (ev.kind === "reply") console.log(`[reply] ${ev.text.slice(0, 400)}`);
-  if (ev.kind === "deferred") console.log(`[deferred] ${ev.call.name} id=${ev.call.id}`);
   if (ev.kind === "error") console.log(`[error] ${ev.message}`);
 }
 
 console.log(`\n[smoke] a read ran while planning:                    ${readAllowedWhilePlanning}`);
 console.log(`[smoke] an ordinary write was DENIED (not gated):      ${ordinaryWriteDenied}`);
 console.log(`[smoke] the ordinary write did NOT land:               ${!existsSync(FORBIDDEN)}`);
-console.log(`[smoke] the PLAN gated with concern plan-approval:     ${planWriteGated}`);
+console.log(`[smoke] the PLAN was written and flagged as the plan:   ${planWritten}`);
 console.log(`[smoke] the plan text is readable (${planTextSeen.length} chars)`);
 if (planTextSeen) console.log(`[smoke] plan opens: ${JSON.stringify(planTextSeen.slice(0, 160))}`);
 
 // ------------------------------------------------------- 3 + 4: approve, build
 let implemented = false;
 let planFileLanded = false;
-if (planWriteGated && deferredId) {
-  console.log("\n=== phase 2: architect approves -> plan mode OFF, resume, implement ===");
-  approved.add(deferredId); // the architect clicked Approve
-  planMode = false; // ...which is what clears the mode, before the resume
-  autoApprove = true; // and the thread's default posture governs the work that follows
+if (planWritten) {
+  console.log("\n=== phase 2: `@Condotto plan off` -> the agent implements ===");
+  planMode = false;
 
   for await (const ev of session.turn(
     {
-      text: "", // empty prompt: the resume half of the defer handshake
+      text: "Plan mode is off now. Go ahead and implement the plan.",
       harness: { model: "fable", effort: "low", subagents: true },
     },
     gate,
   )) {
     if (ev.kind === "progress") console.log(`[progress] ${ev.text}`);
     if (ev.kind === "reply") console.log(`[reply] ${ev.text.slice(0, 400)}`);
-    if (ev.kind === "deferred") console.log(`[deferred] ${ev.call.name} id=${ev.call.id}`);
-    if (ev.kind === "error") console.log(`[error] ${ev.message}`);
+      if (ev.kind === "error") console.log(`[error] ${ev.message}`);
   }
 
   planFileLanded = existsSync(plansDir) && readdirSync(plansDir).some((f) => f.endsWith(".md"));
@@ -164,7 +135,7 @@ const ok =
   readAllowedWhilePlanning &&
   ordinaryWriteDenied &&
   !existsSync(FORBIDDEN) &&
-  planWriteGated &&
+  planWritten &&
   planTextSeen.length > 40 &&
   implemented;
 

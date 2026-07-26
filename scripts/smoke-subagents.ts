@@ -32,8 +32,6 @@ const gate: GateFn = async (call) => {
   if (call.agentId) seenAgentIds.add(call.agentId);
   const d = evaluate(call, {
     worktree: worktree.path,
-    safeBashAllowlist: [],
-    subagentsEnabled: true,
   });
   const origin = call.agentId ? `subagent(${call.agentId.slice(0, 6)})` : "main";
   console.log(`[gate] ${origin} ${call.name} -> ${d.action}`);
@@ -42,7 +40,7 @@ const gate: GateFn = async (call) => {
     ? { decision: "allow" }
     : d.action === "deny"
       ? { decision: "deny", reason: d.reason }
-      : { decision: "gate" };
+      : { decision: "deny", reason: d.reason };
 };
 
 const adapter = new ClaudeCodeAdapter();

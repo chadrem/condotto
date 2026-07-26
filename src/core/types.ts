@@ -98,9 +98,6 @@ export type CommandName =
   // "on"|"off" or "write on"|"write off" (the worktree-write opt-in).
   | "workflows"
   | "ultra"
-  // architect self-approve toggle ("on"|"off"): an architect-initiated
-  // turn's gated actions run without the Approve click (hard-deny floor stays).
-  | "auto-approve"
   // Dispatch a harness skill / slash command on an architect's behalf
   // (`@Condotto /ship <args>`). Args are "<name> [raw args…]". This is the only
   // path to a skill the AGENT cannot invoke: a skill marked
@@ -143,12 +140,6 @@ export type InboundEvent =
       author: Principal;
       name: CommandName;
       args: string;
-    }
-  | {
-      kind: "approval_decision";
-      requestId: string;
-      decider: Principal;
-      decision: "approved" | "denied";
     }
   | {
       /** A human picked an option from a ChoicePrompt (e.g. which repo to assign). */
@@ -196,32 +187,6 @@ export interface ChoicePrompt {
   architectOnly?: boolean;
 }
 
-/** Carried in the port from day one so the seam doesn't drift. */
-export interface ApprovalPrompt {
-  requestId: string;
-  toolName: string;
-  toolInput: unknown;
-  summary: string;
-  /**
-   * An optional human-facing warning that raises the stakes of this approval,
-   * e.g. "investigating production data — in-thread results must be
-   * aggregates only." Surfaces render it prominently; it is decoration for the
-   * decider, never authority.
-   */
-  concern?: string;
-  /**
-   * The consequential detail of this call has ALREADY been delivered into the
-   * conversation as its own message, so the surface must not render it again.
-   *
-   * Set for a plan approval. Surfaces show tool detail in a bounded, truncating
-   * block (Slack's caps at 2500 chars), which is right for a command or a diff and
-   * wrong for a plan: the architect would read the plan, then meet a clipped
-   * duplicate of it under the buttons. A plan is delivered whole, above the
-   * prompt, precisely so nobody approves a document they only half-saw.
-   */
-  detailPosted?: boolean;
-}
-
 export interface SurfaceAdapter {
   readonly id: string;
   readonly capabilities: SurfaceCapabilities;
@@ -230,7 +195,6 @@ export interface SurfaceAdapter {
   post(conv: ConversationRef, msg: OutboundMessage): Promise<PostedRef>;
   /** Only called when capabilities.editMessages is true. */
   update(ref: PostedRef, msg: OutboundMessage): Promise<void>;
-  requestApproval(conv: ConversationRef, req: ApprovalPrompt): Promise<void>;
   /** Present a guided choice. Only called when capabilities.buttons. */
   requestChoice(conv: ConversationRef, prompt: ChoicePrompt): Promise<void>;
 }
@@ -246,41 +210,39 @@ export interface ToolCall {
    * Set when the call was initiated by a SUBAGENT rather than the main agent.
    * Opaque origin marker — the harness adapter fills it from the
    * subagent id the runtime reports (Claude Code: the PreToolUse hook's
-   * `agent_id`, present only inside a subagent). The policy engine treats
-   * subagent-initiated calls more strictly: reads pass (confined), but any gated
-   * action or nested spawn is denied, because a subagent call cannot be paused
-   * for out-of-band approval the way a main-agent call can (spike 2026-07-18).
-   * WORKFLOW agents also carry `agentId`: under bypassPermissions the
-   * background workflow's tool calls route through the PreToolUse hook with an
-   * `agent_id`, so the same subagent policy confines them read-only.
+   * `agent_id`, present only inside a subagent). Workflow agents carry it too:
+   * under bypassPermissions the background workflow's tool calls route through
+   * the PreToolUse hook with an `agent_id`.
+   *
+   * AUDIT DETAIL ONLY since 2026-07-26. It used to make the policy stricter —
+   * a subagent's gated call was denied because it could not be paused for
+   * approval — and with no approval to wait for, origin no longer changes the
+   * answer.
    */
   agentId?: string;
   /**
-   * Set when the call reached the gate via the harness's un-deferrable backstop
-   * path (Claude Code: `canUseTool`) rather than the main PreToolUse hook.
-   * Such a call CANNOT be paused for approval, so the policy engine confines it
-   * instead of gating: confined reads pass, and (with the worktree-write opt-in)
-   * confined writes pass, but anything that would otherwise `gate` is DENIED —
-   * never left to `defer`. This is a defence-in-depth backstop; under
-   * bypassPermissions workflow-agent calls normally hit the PreToolUse hook
-   * (agentId) instead, but a call that escapes here is still confined, not leaked.
+   * Set when the call reached the gate via the harness's backstop path (Claude
+   * Code: `canUseTool`) rather than the main PreToolUse hook. Audit detail, like
+   * `agentId`: the floor applies identically on both paths.
    */
   escaped?: boolean;
 }
 
 /**
- * THE capability (DESIGN.md §3): called for every tool call; the adapter must
- * hold the call un-executed until this resolves.
+ * THE capability: called for every tool call; the adapter must hold the call
+ * un-executed until this resolves.
  *  - `allow` — run it now (optionally with rewritten input).
  *  - `deny`  — refuse; the reason is fed back to the agent so it adapts.
- *  - `gate`  — pause for out-of-band human approval. The adapter maps this to
- *    the SDK's `defer`: the turn ends with the pending call preserved, and a
- *    later `approval_decision` resumes the session (verified handshake).
+ *
+ * There used to be a third answer, `gate`, which the adapter mapped to the SDK's
+ * `defer`: the turn ended with the call preserved and a Slack button resumed it.
+ * It is gone (2026-07-26) along with the approval loop. Holding the call
+ * un-executed until this resolves is still the non-negotiable capability — that
+ * is what makes a deny mean something.
  */
 export type GateDecision =
   | { decision: "allow"; updatedInput?: unknown }
-  | { decision: "deny"; reason: string }
-  | { decision: "gate" };
+  | { decision: "deny"; reason: string };
 
 export type GateFn = (call: ToolCall) => Promise<GateDecision>;
 
@@ -298,13 +260,6 @@ export type TurnEvent =
    * spend, and the core's cost ledger must count it (DESIGN §4 runaway cap).
    */
   | { kind: "error"; message: string; costUsd?: number }
-  /**
-   * A gated tool call was deferred: the turn ended un-executed with this call
-   * preserved. The core records an approval and posts it to the surface; a
-   * later architect decision resumes the session and re-drives `call`. `costUsd`
-   * is the spend up to the defer (the SDK reports it on the deferring result).
-   */
-  | { kind: "deferred"; call: ToolCall; costUsd?: number }
   /**
    * The adapter's opaque handle changed (e.g. the underlying session id became
    * known). The core persists it immediately and never inspects it.
@@ -516,8 +471,6 @@ export interface RepoConfig {
   name: string;
   path: string; // absolute
   defaultBranch: string;
-  /** Commands that run without approval (exact or word-boundary prefix match). */
-  safeBashAllowlist: string[];
   /**
    * Per-thread cost ceiling in USD. A session whose cumulative
    * `total_cost_usd` reaches this pauses and pings the architect; the ceiling is

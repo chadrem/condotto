@@ -21,8 +21,6 @@
     "smoke:reset": "bun run scripts/smoke-reset.ts",
     "smoke:create": "bun run scripts/smoke-create.ts",
     "smoke:resume": "bun run scripts/smoke-resume.ts",
-    "smoke:gate": "bun run scripts/smoke-gate.ts",
-    "smoke:approve": "bun run scripts/smoke-gate-approve.ts",
     "smoke:concurrency": "bun run scripts/smoke-concurrency.ts",
     "smoke:model": "bun run scripts/smoke-model.ts",
     "smoke:subagents": "bun run scripts/smoke-subagents.ts",

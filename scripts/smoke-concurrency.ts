@@ -16,11 +16,11 @@ const repo = env.repo;
 const worktrees = new WorktreeManager(env.worktreesRoot);
 const adapter = new ClaudeCodeAdapter();
 
-// Read-only turn: allow reads, gate everything else (nothing should gate here).
+// Read-only turn: allow reads, refuse everything else (nothing else should run here).
 const gate: GateFn = async (call) =>
   ["Read", "Glob", "Grep", "TodoWrite"].includes(call.name)
     ? { decision: "allow" }
-    : { decision: "gate" };
+    : { decision: "deny", reason: "this smoke is read-only" };
 
 async function runOne(i: number): Promise<{ i: number; ok: boolean; sessionId: string | null; reply: string }> {
   const worktree = await worktrees.create({ repoPath: repo.path, defaultBranch: repo.defaultBranch, sessionId: crypto.randomUUID() });

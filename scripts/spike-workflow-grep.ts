@@ -168,7 +168,7 @@ function makeGate(seen: SeenCall[]) {
     }
     const d = evaluate(
       { id: "", name, input, agentId, escaped },
-      { worktree: root, safeBashAllowlist: [], subagentsEnabled: true, workflowWrite: false },
+      { worktree: root },
     );
     seen.push({ tool: name, agentId, escaped, decision: d.action });
     return d;

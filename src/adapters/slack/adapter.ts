@@ -1,6 +1,5 @@
 import { App, type RespondFn } from "@slack/bolt";
 import type {
-  ApprovalPrompt,
   Attachment,
   ChoicePrompt,
   CommandName,
@@ -14,14 +13,10 @@ import type {
 } from "../../core/types";
 import { principalKey } from "../../core/types";
 import {
-  APPROVE_ACTION,
   CHOICE_ACTION,
-  DENY_ACTION,
-  approvalBlocks,
   choiceBlocks,
   parseChoiceBlockId,
   renderMrkdwn,
-  resolveApprovalMessage,
   resolveChoiceMessage,
 } from "./render";
 import { DisplayNameCache, slackUserSource } from "./users";
@@ -177,7 +172,6 @@ export function parseMentionCommand(
   // a malformed command. Exactly two words, nothing else.
   if (first === "plan" && words.length === 2) return { name: "plan", args: words[1]! };
   // Single whitespace-free token, so `split(/\s+/)` keeps it intact.
-  if (first === "auto-approve" && words.length === 2) return { name: "auto-approve", args: words[1]! };
   if (first === "workflows" && words.length === 2) return { name: "workflows", args: words[1]! };
   if (first === "workflows" && second === "write" && words.length === 3) {
     return { name: "workflows", args: `write ${words[2]!}` };
@@ -309,17 +303,6 @@ export class SlackAdapter implements SurfaceAdapter {
       this.handleMessage(event as Record<string, any>);
     });
 
-    const onDecision = async (args: any) => {
-      await args.ack();
-      try {
-        await this.handleApprovalAction(args);
-      } catch (err) {
-        this.log(`[slack] approval action failed: ${err}`);
-      }
-    };
-    this.app.action(APPROVE_ACTION, onDecision);
-    this.app.action(DENY_ACTION, onDecision);
-
     // Guided-choice buttons: action_ids look like `condotto_choice:<value>`.
     this.app.action(new RegExp(`^${CHOICE_ACTION}:`), async (args: any) => {
       await args.ack();
@@ -419,7 +402,7 @@ export class SlackAdapter implements SurfaceAdapter {
             "`@Condotto subagents on|off`, `@Condotto workflows on|off`, `@Condotto ultra on|off`.\n" +
             "Plan before building: `@Condotto plan on|off` — I propose a plan and nothing changes until you approve it.\n" +
             "Run one of my skills: `@Condotto /<skill> [args]` — `@Condotto skills` lists them.\n" +
-            "Approvals & roles: `@Condotto auto-approve on|off` (skip your own Approve clicks), " +
+            "Roles: " +
             "`@Condotto grant @user architect [everywhere]`, `@Condotto revoke @user`.\n" +
             "To assign an existing thread: `@Condotto assign <repo>` in that thread.",
         });
@@ -554,15 +537,6 @@ export class SlackAdapter implements SurfaceAdapter {
     });
   }
 
-  async requestApproval(conv: ConversationRef, req: ApprovalPrompt): Promise<void> {
-    const { text, blocks } = approvalBlocks(req);
-    await this.app.client.chat.postMessage({
-      channel: conv.channelId,
-      thread_ts: threadTsOf(conv),
-      text, // notification fallback; the blocks carry the interactive content
-      blocks: blocks as any[],
-    });
-  }
 
   /**
    * An Approve/Deny click. Bolt has already verified the request signature, so
@@ -570,42 +544,6 @@ export class SlackAdapter implements SurfaceAdapter {
    * "architects only" gate here for UX; the daemon re-verifies authority
    * server-side before it acts on the emitted decision (DESIGN.md §4).
    */
-  private async handleApprovalAction(args: {
-    body: Record<string, any>;
-    client: { chat: { update: (o: Record<string, any>) => Promise<unknown> } };
-    respond: RespondFn;
-  }): Promise<void> {
-    const { body, client, respond } = args;
-    const action = (body.actions ?? [])[0] ?? {};
-    const requestId = action.value ? String(action.value) : "";
-    if (!requestId) return;
-    // Slack delivers actions at-least-once; a click can also be double-fired.
-    if (action.action_ts && this.dedup.has(`act:${action.action_ts}`)) return;
-
-    const decider: Principal = { surface: SURFACE_ID, externalId: String(body.user?.id) };
-    const channelId = String(body.channel?.id ?? body.container?.channel_id ?? "");
-    const outcome: "approved" | "denied" = action.action_id === APPROVE_ACTION ? "approved" : "denied";
-    this.log(`[slack] approval click: ${outcome} req=${requestId} by ${decider.externalId} ch=${channelId}`);
-
-    if (!this.authority.isArchitect(decider, channelId)) {
-      this.log(`[slack] click ignored — ${decider.externalId} is not an architect in ${channelId}`);
-      await respond({
-        response_type: "ephemeral",
-        text: "Only architects can approve or deny — ignoring.",
-      }).catch(() => {});
-      return;
-    }
-
-    // Resolve the message: keep the detail, drop the buttons, record who decided.
-    const resolved = resolveApprovalMessage(body.message?.blocks, outcome, decider.externalId);
-    if (body.message?.ts) {
-      await client.chat
-        .update({ channel: channelId, ts: String(body.message.ts), text: resolved.text, blocks: resolved.blocks as any[] })
-        .catch((err) => this.log(`[slack] could not update approval message: ${err}`));
-    }
-
-    this.emit({ kind: "approval_decision", requestId, decider, decision: outcome });
-  }
 
   /**
    * A guided-choice button click, e.g. picking a repo to assign. Same

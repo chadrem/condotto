@@ -135,7 +135,6 @@ console.log(`[smoke] boundary (worktree root): ${worktree.path}`);
 const policyCtx: PolicyContext = {
   worktree: worktree.path,
   cwd,
-  safeBashAllowlist: ["git status", "pwd"],
 };
 
 const denied: string[] = [];

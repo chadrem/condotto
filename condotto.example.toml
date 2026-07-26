@@ -18,10 +18,11 @@
 
 # ---------------------------------------------------------------------------
 # Architects — surface-qualified principals ("slack:U0123ABC") with command
-# authority: assign/stop sessions, approve gated actions, auto-approve their own
-# turns, and delegate roles at runtime.
+# authority: only an architect's message runs the agent. Everyone else's is kept
+# and carried into the next architect turn as context, so the thread stays whole.
+# Architects also assign/stop sessions and delegate roles at runtime.
 # Find a user's ID in Slack: profile → ⋯ → "Copy member ID".
-# WITHOUT at least one architect, no one can approve gated actions.
+# WITHOUT at least one architect, nobody can drive the agent at all.
 # Env override/append: CONDOTTO_ARCHITECTS (comma/space separated).
 architects = [
   # "slack:U0123ABC",
@@ -102,13 +103,9 @@ subagents = true            # the agent can fan out to parallel READ-ONLY subage
                             #   agent and the gate.
                             #   Env override: CONDOTTO_SUBAGENTS=off|false|0|no
 workflows = true            # the agent can launch multi-agent workflows for big
-                            #   cross-cutting jobs. Each LAUNCH is gated (an
-                            #   architect approves it), and workflow agents are
-                            #   confined to the worktree and read-only.
+                            #   cross-cutting jobs. Workflow agents are confined
+                            #   to the worktree, exactly like the main agent.
                             #   Env override: CONDOTTO_WORKFLOWS=off|false|0|no
-auto_approve = true         # architect-initiated turns skip the Approve
-                            #   click (the mechanical hard-deny floor still holds).
-                            #   Env override: CONDOTTO_AUTO_APPROVE=off|false|0|no
 cost_cap_usd = 50           # per-thread cost ceiling; a runaway thread pauses here.
                             #   Sized for the posture above — xhigh with subagents
                             #   and workflows spends real money per thread. This is
@@ -128,12 +125,10 @@ max_concurrent_turns = 6    # cap on harness turns running at once across all
 # `/condotto assign webapp/apps/report` starts the agent in `apps/report` (the
 # whole worktree stays readable and writable, so shared packages are still in
 # reach). Commands the agent runs land IN that sub-project; it steps up to the
-# root itself when the job needs the root. If you want one to skip the approval
-# click, add it to `safe_bash_allowlist` exactly as the agent will type it.
+# root itself when the job needs the root.
 #
 # Starting out, point your first entry at a THROWAWAY clone rather than a repo you
-# care about, and watch the approval gate work before you aim it at anything real.
-# Sessions only ever see COMMITTED content (each runs in a
+# care about. Sessions only ever see COMMITTED content (each runs in a
 # fresh git worktree), so a repo's working tree, untracked files, and .gitignored
 # files are never visible to the agent.
 #
@@ -155,17 +150,13 @@ max_concurrent_turns = 6    # cap on harness turns running at once across all
 #                                 #   what they learn, another channel starts clean.
 #                                 #   A vouch like `trusted`: what one thread writes
 #                                 #   lands in the system prompt of every later thread
-#                                 #   in that channel. Writes are gated; the agent's
-#                                 #   shell cannot reach the directory.
-# safe_bash_allowlist = [         # commands auto-allowed without approval on this
-#   "git status", "bun test",     #   repo. Omit for a conservative read-only default.
-# ]
+#                                 #   in that channel. Every write is audited, and
+#                                 #   the agent's shell cannot reach the directory.
 # cost_cap_usd = 25               # per-thread cost ceiling for this repo
 #                                 #   (overrides [defaults].cost_cap_usd).
 # default_model = "sonnet"        # per-repo default model token (overrides [defaults]).
 # default_effort = "high"         # per-repo default effort (overrides [defaults]).
-# auto_approve = true             # per-repo default for architect self-approve
-#                                 #   (overrides [defaults].auto_approve).
+
 # subagents = false               # per-repo harness posture (overrides [defaults]).
 # workflows = false               #   Omit both to inherit the daemon default —
 #                                 #   omitted is NOT the same as `false`. Use these
