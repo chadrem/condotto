@@ -172,7 +172,8 @@ async function main(): Promise<void> {
     `[daemon] cost cap $${config.defaultCostCapUsd}/thread (default), ` +
       `max ${config.maxConcurrentTurns} concurrent turns, ` +
       `default model ${config.defaultModel} @ ${config.defaultEffort} effort, ` +
-      `subagents ${config.defaultSubagents ? "ON" : "off"} / workflows ${config.defaultWorkflows ? "ON" : "off"}`,
+      `subagents ${config.defaultSubagents ? "ON" : "off"} / workflows ${config.defaultWorkflows ? "ON" : "off"} / ` +
+      `memory ${config.defaultMemory ? "ON" : "off"}`,
   );
 
   // Worktree GC: sweep once at boot — before any surface is live, so a

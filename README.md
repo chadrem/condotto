@@ -219,6 +219,7 @@ model = "opus"             # opus (Opus 5) | sonnet | fable
 effort = "xhigh"           # low | medium | high | xhigh | max
 subagents = true           # parallel exploration
 workflows = true           # multi-agent workflows
+memory = true              # durable notes per (repo, channel)
 cost_cap_usd = 50          # per-thread runaway brake
 max_concurrent_turns = 6   # box-wide cap on live turns
 
@@ -226,7 +227,7 @@ max_concurrent_turns = 6   # box-wide cap on live turns
 name = "webapp"
 path = "~/Projects/webapp"    # absolute path to the git repo
 default_branch = "main"
-memory = false                # true gives the agent durable notes for this repo
+# memory = false             # durable notes are on; this is how you opt out
 # cost_cap_usd / default_model / default_effort / subagents / workflows override [defaults]
 ```
 
@@ -265,7 +266,7 @@ A clean boot looks like:
 
 ```
 … [daemon] seeded 1 role mapping(s), 1 architect(s)
-… [daemon] cost cap $50/thread (default), max 6 concurrent turns, default model opus @ xhigh effort, subagents ON / workflows ON
+… [daemon] cost cap $50/thread (default), max 6 concurrent turns, default model opus @ xhigh effort, subagents ON / workflows ON / memory ON
 … [daemon] ready — db=…/condotto.sqlite, sessions on record: 0
 ```
 
@@ -439,17 +440,19 @@ A skill runs as an ordinary turn: same model, same budget, same boundary.
 
 ## Memory
 
-A repo with `memory = true` gets durable notes. The agent writes down how the
-codebase is laid out, the conventions, the decisions and why, the dead ends worth
-not repeating. Later threads pick them up. Without it, every thread starts from
-zero, which is why an install without memory never seems to learn.
+The agent keeps durable notes: how the codebase is laid out, the conventions, the
+decisions and why, the dead ends worth not repeating. Later threads pick them up.
+Without this, every thread starts from zero, which is why an install without
+memory never seems to learn — so it is on out of the box.
 
 Memory is scoped to **(repo, channel)**, not to a thread. Threads in the same
 channel share what they learn; another channel starts clean. That matches how
 authority works, since grants are channel-scoped too.
 
-It is off by default and it is your decision, not the agent's, because what one
-thread writes lands in the system prompt of every later thread in that channel.
+It is **on by default**. Turn it off for a repo with `memory = false`, or
+everywhere with `[defaults].memory = false`. It stays your decision rather than
+the agent's, because what one thread writes lands in the system prompt of every
+later thread in that channel.
 
 - Notes live in `[paths].memory_root`, never inside a worktree, and they survive
   `stop clean`. That is the point.

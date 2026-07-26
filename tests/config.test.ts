@@ -162,19 +162,41 @@ path = "/srv/bare"
   });
 
 
-  test("the per-repo memory vouch parses and defaults off", () => {
+  test("memory is ON unless a repo or the daemon default says otherwise", () => {
     const cfg = loadConfig(
       {},
       tomlFile(`[[repos]]\nname = "remembers"\npath = "/srv/a"\nmemory = true\n\n[[repos]]\nname = "bare"\npath = "/srv/b"\n`),
     );
     expect(cfg.repos.find((r) => r.name === "remembers")!.memory).toBe(true);
-    expect(cfg.repos.find((r) => r.name === "bare")!.memory).toBe(false);
+    // Absent = the daemon default, which is on.
+    expect(cfg.repos.find((r) => r.name === "bare")!.memory).toBe(true);
+    expect(cfg.defaultMemory).toBe(true);
+  });
+
+  test("an explicit false still wins over the daemon default", () => {
+    const cfg = loadConfig(
+      {},
+      tomlFile(`[[repos]]\nname = "quiet"\npath = "/srv/a"\nmemory = false\n`),
+    );
+    expect(cfg.repos[0]!.memory).toBe(false);
+  });
+
+  test("memory can be turned off daemon-wide, by file or env", () => {
+    const toml = `[defaults]\nmemory = false\n\n[[repos]]\nname = "a"\npath = "/srv/a"\n\n[[repos]]\nname = "b"\npath = "/srv/b"\nmemory = true\n`;
+    const cfg = loadConfig({}, tomlFile(toml));
+    expect(cfg.defaultMemory).toBe(false);
+    expect(cfg.repos.find((r) => r.name === "a")!.memory).toBe(false);
+    // A repo that asks for it explicitly still gets it.
+    expect(cfg.repos.find((r) => r.name === "b")!.memory).toBe(true);
+    // Env wins over the file, same as every other [defaults] toggle.
+    const viaEnv = loadConfig({ CONDOTTO_MEMORY: "off" }, tomlFile(`[[repos]]\nname = "a"\npath = "/srv/a"\n`));
+    expect(viaEnv.repos[0]!.memory).toBe(false);
   });
 
   test("a non-boolean memory fails fast rather than silently disabling memory", () => {
-    // Same reasoning as `trusted`: memory a member's turn writes reaches the
+    // Memory a thread writes reaches the
     // SYSTEM PROMPT of every later thread in the channel, so an operator who
-    // typo'd `memory = "true"` must be told, not silently given the off posture.
+    // typo'd `memory = "no"` must be told, not silently given the on posture.
     expect(() => loadConfig({}, tomlFile(`[[repos]]\nname = "r"\npath = "/x"\nmemory = "yes"\n`))).toThrow(
       /must be a boolean/,
     );

@@ -520,9 +520,14 @@ export interface RepoConfig {
    * worktree. Default (false/undefined) = off, and auto-memory is pinned off in
    * the harness rather than merely unreachable.
    *
-   * An operator decision, not a per-session toggle: what one thread records is
-   * loaded into the SYSTEM PROMPT of every later thread in that channel — above
-   * `framing.ts`, and so outside the `user=`-header authority rule.
+   * ON by default (`[defaults].memory`), because a thread that starts from zero
+   * every time is how an install ends up never seeming to learn anything.
+   *
+   * Still an operator-level setting rather than a per-thread toggle: what one
+   * thread records is loaded into the SYSTEM PROMPT of every later thread in that
+   * channel — above `framing.ts`, and so outside the `user=`-header authority
+   * rule. `undefined` here means "not stated"; `loadConfig` resolves it against
+   * the daemon default before this ever reaches the store.
    */
   memory?: boolean;
 }

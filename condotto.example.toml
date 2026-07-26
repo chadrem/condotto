@@ -81,8 +81,8 @@ memory_root = "~/.condotto/memory"          # durable agent memory, per (repo, c
                                             # Unlike a worktree this OUTLIVES the
                                             # session that wrote it — that is the
                                             # point — so don't put it somewhere
-                                            # disposable. Only used by repos with
-                                            # memory = true below.
+                                            # disposable. Memory is on by default,
+                                            # so this path gets used out of the box.
 
 # ---------------------------------------------------------------------------
 # Daemon-wide defaults. Each is used when a repo (below) doesn't set its own.
@@ -105,6 +105,12 @@ subagents = true            # the agent can fan out to subagents for parallel
                             #   exactly as the main agent is; the main agent makes
                             #   the edits, so one agent holds the whole change.
                             #   Env override: CONDOTTO_SUBAGENTS=off|false|0|no
+memory = true               # durable notes the agent keeps per (repo, channel),
+                            #   loaded at the start of every later thread in that
+                            #   channel. On by default: without it every thread
+                            #   starts from zero and the install never seems to
+                            #   learn. Set false here to opt out everywhere.
+                            #   Env override: CONDOTTO_MEMORY=off|false|0|no
 workflows = true            # the agent can launch multi-agent workflows for big
                             #   cross-cutting jobs. Workflow agents are confined
                             #   to the worktree, exactly like the main agent.
@@ -141,7 +147,8 @@ max_concurrent_turns = 6    # cap on harness turns running at once across all
 # default_branch = "main"         # base branch for session worktrees (default "main")
 #                                 # Every repo loads its own CLAUDE.md, skills and
 #                                 # .claude config. There is no switch for that.
-# memory = false                  # true gives the agent durable memory for this repo:
+# memory = true                   # durable memory for this repo (ON by default;
+#                                 #   set false to opt this one repo out):
 #                                 #   markdown notes it keeps about the codebase and
 #                                 #   picks up again in LATER threads. Scoped per
 #                                 #   (repo, channel) — threads in one channel share

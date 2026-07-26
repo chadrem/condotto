@@ -56,6 +56,8 @@ export interface CondottoConfig {
    */
   defaultSubagents: boolean;
   defaultWorkflows: boolean;
+  /** Daemon-wide default for durable agent memory, used when a repo sets none. */
+  defaultMemory: boolean;
 }
 
 /** Surface (Slack) credentials — owned by the composition root, never the core. */
@@ -113,6 +115,18 @@ export const DEFAULT_EFFORT = "xhigh";
  */
 export const DEFAULT_SUBAGENTS = true;
 export const DEFAULT_WORKFLOWS = true;
+/**
+ * Durable agent memory, ON by default.
+ *
+ * Without it every thread starts from zero and the install never appears to
+ * learn anything, which is the single biggest difference between Condotto
+ * feeling useful on day 30 and feeling the same as day 1. It is still an
+ * operator-level setting rather than a per-thread toggle — what one thread
+ * records lands in the SYSTEM PROMPT of every later thread in that channel,
+ * above `framing.ts` and so outside the `user=`-header authority rule — so
+ * turning it off is `[defaults].memory = false`, or per repo.
+ */
+export const DEFAULT_MEMORY = true;
 
 /** Default location and env override for the single config file. */
 export const DEFAULT_CONFIG_PATH = "condotto.toml";
@@ -282,11 +296,12 @@ function parseRepoEntry(entry: unknown, where: string): RepoConfig {
     // falls through to the daemon default.
     subagents: optBool(e.subagents, `${where}.subagents`),
     workflows: optBool(e.workflows, `${where}.workflows`),
-    // Durable agent memory for this repo. An operator decision rather than a
-    // session toggle: what one thread writes lands in the system prompt of every
-    // later session in that channel, so the person who owns the install names the
-    // repos where that is wanted. Explicit boolean, so a typo cannot enable it.
-    memory: optBool(e.memory, `${where}.memory`) === true,
+    // Durable agent memory. Tri-state like the two above: an explicit boolean
+    // pins it, absent falls through to the daemon default (on). A non-boolean
+    // still THROWS rather than being coerced — what memory records reaches a
+    // later thread's system prompt, so `memory = "no"` must be an error, not a
+    // silent posture.
+    memory: optBool(e.memory, `${where}.memory`),
   };
 }
 
@@ -403,6 +418,7 @@ const DEFAULTS_KEYS = [
   "effort",
   "subagents",
   "workflows",
+  "memory",
   "cost_cap_usd",
   "max_concurrent_turns",
 ] as const;
@@ -458,6 +474,12 @@ export function loadConfig(
     "[defaults].workflows",
     DEFAULT_WORKFLOWS,
   );
+  const defaultMemory = resolveBoolDefault(
+    env.CONDOTTO_MEMORY,
+    defaults.memory,
+    "[defaults].memory",
+    DEFAULT_MEMORY,
+  );
 
   return {
     dbPath: expandHome(envStr(env.CONDOTTO_DB_PATH) ?? optString(paths.db, "[paths].db") ?? "condotto.sqlite"),
@@ -467,7 +489,10 @@ export function loadConfig(
     memoryRoot: expandHome(
       envStr(env.CONDOTTO_MEMORY_ROOT) ?? optString(paths.memory_root, "[paths].memory_root") ?? "~/.condotto/memory",
     ),
-    repos: parseRepos(toml, configPath),
+    // Each repo's tri-state memory flag is resolved against the daemon default
+    // HERE, so `RepoConfig.memory` is a plain boolean by the time it reaches the
+    // store and nothing downstream has to re-derive it.
+    repos: parseRepos(toml, configPath).map((r) => ({ ...r, memory: r.memory ?? defaultMemory })),
     roles: parseRoles(toml, env),
     defaultCostCapUsd:
       envPosNumber(env.CONDOTTO_COST_CAP_USD, "CONDOTTO_COST_CAP_USD") ??
@@ -483,6 +508,7 @@ export function loadConfig(
       envStr(env.CONDOTTO_DEFAULT_EFFORT) ?? optString(defaults.effort, "[defaults].effort") ?? DEFAULT_EFFORT,
     defaultSubagents,
     defaultWorkflows,
+    defaultMemory,
   };
 }
 
