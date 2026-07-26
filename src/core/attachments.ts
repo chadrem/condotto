@@ -19,16 +19,11 @@ export const ATTACHMENTS_REL = join(".condotto", "attachments");
 /** Anything the agent leaves here is posted to the thread, then deleted. */
 export const OUTBOX_REL = join(".condotto", "outbox");
 
-/**
- * Per-file ceiling on what we will pull down from a surface. Slack itself allows
- * up to 1 GB; a thread that drops one should not be able to fill the operator's
- * disk, and nothing useful happens to a file this size anyway.
- */
-export const MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024;
-/** Per-message ceiling, so a bulk drop cannot spend the turn on downloads. */
-export const MAX_ATTACHMENTS_PER_MESSAGE = 10;
-/** Per-turn ceiling on files posted back, so a loop cannot flood the thread. */
-export const MAX_OUTBOX_FILES = 10;
+// There is deliberately NO size or count limit in either direction. Whatever
+// someone put in the thread is what the agent gets, and whatever the agent
+// produced is what the thread gets. A cap here would drop a file the person
+// meant to send, which is worse than a slow turn or a big worktree — and the
+// worktree is disposable anyway.
 
 /**
  * A filename safe to join onto a directory we own.
@@ -91,10 +86,6 @@ export async function landAttachments(
       failed.push(wanted);
       continue;
     }
-    if (file.bytes.byteLength > MAX_ATTACHMENT_BYTES) {
-      failed.push(wanted);
-      continue;
-    }
     const name = uniqueName(wanted, taken);
     taken.add(name);
     try {
@@ -144,10 +135,12 @@ export async function readOutbox(worktree: string): Promise<OutboxFile[]> {
     if (!e.isFile()) continue; // withFileTypes uses lstat semantics: a symlink is not a file
     const absPath = join(dir, e.name);
     const st = await stat(absPath).catch(() => null);
-    if (!st?.isFile() || st.size === 0 || st.size > MAX_ATTACHMENT_BYTES) continue;
+    // A zero-byte upload is not a thing Slack accepts, so skipping it avoids a
+    // guaranteed error post. Everything with content goes, however big.
+    if (!st?.isFile() || st.size === 0) continue;
     out.push({ name: e.name, absPath, sizeBytes: st.size });
   }
-  return out.sort((a, b) => a.name.localeCompare(b.name)).slice(0, MAX_OUTBOX_FILES);
+  return out.sort((a, b) => a.name.localeCompare(b.name));
 }
 
 /** Empty the outbox. Called after posting, so the next turn starts clean. */

@@ -345,8 +345,9 @@ that starts a turn or just leave it in the thread for later. A screenshot of a
 broken page, a failing CI log, a CSV of the rows that look wrong: all just files
 the agent opens.
 
-Up to 10 files per message, 25 MB each. If one does not come through, Condotto
-says so in the thread rather than letting the agent look like it ignored you.
+No size or count limit: attach what you want, and the agent gets it. If one does
+not come through, Condotto says so in the thread rather than letting the agent
+look like it ignored you.
 
 **Files it sends back.** Ask for a diff, a report, a generated chart. Anything the
 agent writes to `.condotto/outbox/` in its worktree is uploaded to the thread and

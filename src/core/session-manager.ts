@@ -24,14 +24,7 @@ import {
 } from "./worktrees";
 import { MemoryManager, verifyMemoryTarget } from "./memory";
 import { checkSkillArgs, frameMessage, sanitizeSkillText } from "./framing";
-import {
-  ATTACHMENTS_REL,
-  MAX_ATTACHMENTS_PER_MESSAGE,
-  OUTBOX_REL,
-  clearOutbox,
-  landAttachments,
-  readOutbox,
-} from "./attachments";
+import { ATTACHMENTS_REL, OUTBOX_REL, clearOutbox, landAttachments, readOutbox } from "./attachments";
 import { evaluate, memoryTargets, planTextFrom, type PolicyContext } from "./policy";
 import {
   DEFAULT_COST_CAP_USD,
@@ -2536,9 +2529,10 @@ export class SessionManager {
     if (!this.surfaceFor(event.conv).capabilities.attachments) return [];
 
     const surface = this.surfaceFor(event.conv);
-    const wanted = files.slice(0, MAX_ATTACHMENTS_PER_MESSAGE);
+    // Every file, in parallel. No cap: dropping one silently is the failure mode
+    // that makes the agent look like it ignored you.
     const fetched = await Promise.all(
-      wanted.map(async (a) => ({ name: a.name, bytes: await surface.fetchAttachment(a).catch(() => null) })),
+      files.map(async (a) => ({ name: a.name, bytes: await surface.fetchAttachment(a).catch(() => null) })),
     );
     const { landed, failed } = await landAttachments(session.worktree_path, fetched);
 
@@ -2562,8 +2556,8 @@ export class SessionManager {
         .post(event.conv, {
           text:
             `⚠️ I couldn't read ${failed.length === 1 ? "the file" : `${failed.length} of the files`} ` +
-            `you attached (${failed.join(", ")}). Files over 25 MB don't come through, and the ` +
-            `Slack app needs the \`files:read\` scope.`,
+            `you attached (${failed.join(", ")}). If this keeps happening, check that the Slack ` +
+            `app has the \`files:read\` scope.`,
         })
         .catch(() => {});
     }

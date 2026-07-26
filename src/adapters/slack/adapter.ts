@@ -22,8 +22,12 @@ import {
 } from "./render";
 import { DisplayNameCache, slackUserSource } from "./users";
 
-/** A thread file should download fast or not at all; a turn is waiting on it. */
-const FILE_FETCH_TIMEOUT_MS = 30_000;
+/**
+ * Bounds a DEAD socket, not the file size. Generous on purpose: `fetch` only
+ * offers a total-duration timeout, so a short one would silently become a size
+ * limit on a slow link — and there is no size limit here.
+ */
+const FILE_FETCH_TIMEOUT_MS = 10 * 60_000;
 
 /**
  * Authority the adapter consults for the ephemeral "architects only" response

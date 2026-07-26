@@ -4,7 +4,6 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   ATTACHMENTS_REL,
-  MAX_ATTACHMENT_BYTES,
   OUTBOX_REL,
   clearOutbox,
   landAttachments,
@@ -95,13 +94,23 @@ describe("landAttachments", () => {
     expect(landed.map((l) => l.name)).toEqual(["here.txt"]);
   });
 
-  test("an oversized file is refused rather than filling the disk", async () => {
+  test("a big file lands too — there is no size cap", async () => {
+    // Dropping a file someone deliberately attached is worse than a slow turn or
+    // a big worktree, and the worktree is disposable.
     const root = wt();
-    const { landed, failed } = await landAttachments(root, [
-      { name: "huge.bin", bytes: new Uint8Array(MAX_ATTACHMENT_BYTES + 1) },
-    ]);
-    expect(landed).toEqual([]);
-    expect(failed).toEqual(["huge.bin"]);
+    const big = new Uint8Array(40 * 1024 * 1024);
+    const { landed, failed } = await landAttachments(root, [{ name: "heap.bin", bytes: big }]);
+    expect(failed).toEqual([]);
+    expect(landed.map((l) => l.name)).toEqual(["heap.bin"]);
+    expect((await Bun.file(join(root, landed[0]!.relPath)).arrayBuffer()).byteLength).toBe(big.byteLength);
+  });
+
+  test("many files all land — there is no count cap", async () => {
+    const root = wt();
+    const many = Array.from({ length: 25 }, (_, i) => ({ name: `f${i}.txt`, bytes: bytes(String(i)) }));
+    const { landed, failed } = await landAttachments(root, many);
+    expect(failed).toEqual([]);
+    expect(landed).toHaveLength(25);
   });
 });
 
@@ -145,6 +154,12 @@ describe("readOutbox", () => {
     mkdirSync(join(root, OUTBOX_REL, "nested"));
     writeFileSync(join(root, OUTBOX_REL, "nested", "deep.txt"), "x");
     expect((await readOutbox(root)).map((f) => f.name)).toEqual(["real.txt"]);
+  });
+
+  test("many outbox files all post — there is no count cap", async () => {
+    const root = wt();
+    seed(root, Object.fromEntries(Array.from({ length: 25 }, (_, i) => [`f${String(i).padStart(2, "0")}.txt`, "x"])));
+    expect(await readOutbox(root)).toHaveLength(25);
   });
 
   test("an empty file is skipped and clearOutbox empties the rest", async () => {
