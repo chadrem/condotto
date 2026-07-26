@@ -87,9 +87,8 @@ memory_root = "~/.condotto/memory"          # durable agent memory, per (repo, c
 # ---------------------------------------------------------------------------
 # Daemon-wide defaults. Each is used when a repo (below) doesn't set its own.
 #
-# The shipped values below are the "ultra" posture: xhigh effort + subagents +
-# workflows. That combination is exactly what `@Condotto ultra on` sets, which is
-# why there is no separate `ultra` key — set the three parts. A new thread starts
+# The shipped values below are the full-strength posture: xhigh effort, subagents
+# and workflows. Dial any of them down here, per repo, or per thread. A new thread starts
 # at full strength; dial any of it down here, per-repo, or per-thread in Slack.
 [defaults]
 model = "opus"              # implementer model token: opus | sonnet | fable.

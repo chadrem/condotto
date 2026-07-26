@@ -49,8 +49,8 @@ export interface CondottoConfig {
   /**
    * Daemon-wide default harness posture for a new session, used when a repo sets
    * no `subagents`/`workflows`. Both on by default: together with the `xhigh`
-   * effort default they are exactly the `ultra` preset, so a thread arrives at
-   * full strength instead of waiting for an architect to remember to raise it.
+   * effort default, a thread arrives at full strength instead of waiting for an
+   * architect to remember to raise it.
    * Override with `[defaults].subagents = false` / `CONDOTTO_SUBAGENTS=off`
    * (same for workflows). Confinement is unchanged — see DEFAULT_SUBAGENTS.
    */
@@ -459,9 +459,8 @@ export function loadConfig(
   const defaults = toml.defaults === undefined ? {} : asTable(toml.defaults, "[defaults]");
   warnUnknownKeys(defaults, DEFAULTS_KEYS, "[defaults]");
 
-  // Both on unless explicitly disabled. Together with `[defaults].effort = "xhigh"`
-  // these two ARE the `ultra` preset, which is why there is no separate `ultra`
-  // key — it would need a conflict rule against an `effort` set alongside it.
+  // Both on unless explicitly disabled, which with `[defaults].effort = "xhigh"`
+  // is the full-strength posture a new thread starts in.
   const defaultSubagents = resolveBoolDefault(
     env.CONDOTTO_SUBAGENTS,
     defaults.subagents,

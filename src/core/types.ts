@@ -112,12 +112,11 @@ export type CommandName =
   | "budget"
   | "help"
   // harness capability controls (architect-only). model/effort tune the
-  // implementer; subagents/workflows/ultra widen the fan-out. Args are "on"|"off".
+  // implementer; subagents/workflows widen the fan-out. Args are "on"|"off".
   | "model"
   | "effort"
   | "subagents"
   | "workflows"
-  | "ultra"
   // Dispatch a harness skill / slash command on an architect's behalf
   // (`@Condotto /ship <args>`). Args are "<name> [raw args…]". This is the only
   // path to a skill the AGENT cannot invoke: a skill marked

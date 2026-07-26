@@ -308,7 +308,6 @@ describe("assign: monorepo sub-project", () => {
     expect(readdirSync(isolated).length).toBe(0);
   });
 
-
   test("reactivation cannot re-point the session at different work", async () => {
     // The harness keys its transcript by encoded cwd, so honouring a different
     // sub-project would silently lose the context reactivation promises to keep.
@@ -772,9 +771,6 @@ describe("the tool-call boundary", () => {
   }
 
 
-
-
-
   test("a hard-deny (write outside the worktree) is refused outright — no approval", async () => {
     const w = makeWorld();
     await assignWithScript(w, "b40.000001", [{ id: "tu-esc", name: "Write", input: { file_path: "/etc/evil", content: "x" } }]);
@@ -784,8 +780,6 @@ describe("the tool-call boundary", () => {
     expect(w.surface.transcript().some((t) => t.includes("outside your worktree"))).toBe(true);
     expect(session).not.toBeNull();
   });
-
-
 
   test("bash runs — there is no allowlist any more, only the floor", async () => {
     const w = makeWorld();
@@ -819,7 +813,6 @@ describe("cost budgets & runaway cap", () => {
     await w.manager.handleEvent({ kind: "message", conv: conv("e00.000001"), author: architect, text: "hi", attachments: [] });
     expect(w.harness.allTurns.at(-1)!.budgetUsd).toBe(5); // full headroom on the first turn
   });
-
 
   test("a session over its cap pauses new turns and pings for a budget raise", async () => {
     const w = makeWorld(undefined, { costCap: 5 });
@@ -1032,8 +1025,6 @@ describe("clear — resetting the agent's context", () => {
     // Forgetting the conversation does not un-spend the money.
     expect(w.store.sessionCostUsd(before.id)).toBe(spentBefore);
   });
-
-
 
   test("spend survives, so a cleared over-budget session still refuses new turns", async () => {
     const w = makeWorld(undefined, { costCap: 5 });
@@ -1284,7 +1275,7 @@ describe("harness capabilities — model & effort", () => {
 
 });
 
-describe("harness capabilities — subagents & ultra", () => {
+describe("harness capabilities — subagents & workflows", () => {
   async function assign(w: World, id: string): Promise<void> {
     await w.manager.handleEvent({ kind: "command", conv: conv(id), author: architect, name: "assign", args: "testrepo" });
   }
@@ -1293,9 +1284,8 @@ describe("harness capabilities — subagents & ultra", () => {
     const w = makeWorld();
     await assign(w, "sb1.000001");
     expect(w.store.getSessionByConversation("fake", "sb1.000001")!.subagents).toBe(1);
-    // Subagents + workflows + xhigh IS ultra, so the summary collapses to that label.
     expect(w.surface.posts.at(-1)!.text).toContain("subagents *on*");
-    expect(w.surface.posts.at(-1)!.text).toContain("ultra *on*");
+    expect(w.surface.posts.at(-1)!.text).toContain("workflows *on*");
   });
 
   test("a session that dialed subagents off no longer claims them", async () => {
@@ -1307,10 +1297,10 @@ describe("harness capabilities — subagents & ultra", () => {
     await w.manager.handleEvent({ kind: "command", conv: c, author: architect, name: "help", args: "" });
     const msg = w.surface.posts.at(-1)!.text;
     expect(msg).toContain("subagents off");
-    expect(msg).toContain("ultra off");
+    expect(msg).toContain("workflows off");
   });
 
-  test("the join announcement lists EVERY setting, including subagents/ultra", async () => {
+  test("the join announcement lists EVERY setting", async () => {
     const w = makeWorld();
     await assign(w, "set1.000001");
     const intro = w.surface.posts.at(-1)!.text;
@@ -1318,21 +1308,21 @@ describe("harness capabilities — subagents & ultra", () => {
     expect(intro).toContain("model `opus`");
     expect(intro).toContain("effort `xhigh`");
     expect(intro).toContain("subagents *on*");
-    expect(intro).toContain("ultra *on*");
+    expect(intro).toContain("workflows *on*");
     expect(intro).toContain("cost budget");
   });
 
-  test("the join announcement reflects enabled subagents/ultra when Condotto re-announces", async () => {
+  test("re-announcing reflects a capability the architect changed", async () => {
     const w = makeWorld();
     const c = conv("set2.000001");
     await assign(w, "set2.000001");
-    await w.manager.handleEvent({ kind: "command", conv: c, author: architect, name: "ultra", args: "on" });
+    await w.manager.handleEvent({ kind: "command", conv: c, author: architect, name: "workflows", args: "off" });
     // A bare @Condotto (help) re-announces the current settings in an assigned thread.
     await w.manager.handleEvent({ kind: "command", conv: c, author: architect, name: "help", args: "" });
     const msg = w.surface.posts.at(-1)!.text;
     expect(msg).toContain("Session settings");
     expect(msg).toContain("subagents *on*");
-    expect(msg).toContain("ultra *on*");
+    expect(msg).toContain("workflows off");
   });
 
   test("architect turns subagents on; it persists, reaches the turn, and enters the prompt", async () => {
@@ -1363,42 +1353,6 @@ describe("harness capabilities — subagents & ultra", () => {
     expect(w.store.getSessionByConversation("fake", "sb3.000001")!.subagents).toBe(1);
   });
 
-  test("ultra on sets xhigh + subagents (the preset); off restores the defaults", async () => {
-    const w = makeWorld();
-    const c = conv("sb4.000001");
-    await assign(w, "sb4.000001");
-    await w.manager.handleEvent({ kind: "command", conv: c, author: architect, name: "ultra", args: "on" });
-    let s = w.store.getSessionByConversation("fake", "sb4.000001")!;
-    expect(s.subagents).toBe(1);
-    expect(s.effort).toBe("xhigh");
-    expect(w.surface.posts.at(-1)!.text).toContain("Ultra on");
-
-    await w.manager.handleEvent({ kind: "message", conv: c, author: architect, text: "go", attachments: [] });
-    const t = w.harness.allTurns.at(-1)!;
-    expect(t.harness?.subagents).toBe(true);
-    expect(t.harness?.effort).toBe("xhigh");
-
-    await w.manager.handleEvent({ kind: "command", conv: c, author: architect, name: "ultra", args: "off" });
-    s = w.store.getSessionByConversation("fake", "sb4.000001")!;
-    expect(s.subagents).toBe(0);
-    expect(s.effort).toBeNull(); // back to the daemon default (high)
-  });
-
-  test("dropping to a lower effort takes a session out of ultra (derived state)", async () => {
-    const w = makeWorld();
-    const c = conv("sb5.000001");
-    await assign(w, "sb5.000001");
-    await w.manager.handleEvent({ kind: "command", conv: c, author: architect, name: "ultra", args: "on" });
-    await w.manager.handleEvent({ kind: "command", conv: c, author: architect, name: "status", args: "" });
-    expect(w.surface.posts.at(-1)!.text).toContain("ultra on");
-    // Lowering effort below xhigh means it's no longer the ultra preset (subagents stay on).
-    await w.manager.handleEvent({ kind: "command", conv: c, author: architect, name: "effort", args: "high" });
-    await w.manager.handleEvent({ kind: "command", conv: c, author: architect, name: "status", args: "" });
-    const msg = w.surface.posts.at(-1)!.text;
-    expect(msg).not.toContain("ultra on");
-    expect(msg).toContain("subagents on");
-  });
-
   test("a subagent-initiated write is denied end-to-end — the main agent must do it", async () => {
     const w = makeWorld();
     const c = conv("sb6.000001");
@@ -1411,13 +1365,14 @@ describe("harness capabilities — subagents & ultra", () => {
     expect(w.harness.executed.find((cl) => cl.id === "sw1")).toBeDefined();
   });
 
-  test("subagents/ultra state shows in the status listing", async () => {
+  test("subagents/workflows state shows in the status listing", async () => {
     const w = makeWorld();
     const c = conv("sb7.000001");
     await assign(w, "sb7.000001");
-    await w.manager.handleEvent({ kind: "command", conv: c, author: architect, name: "ultra", args: "on" });
     await w.manager.handleEvent({ kind: "command", conv: c, author: architect, name: "status", args: "" });
-    expect(w.surface.posts.at(-1)!.text).toContain("ultra on");
+    const msg = w.surface.posts.at(-1)!.text;
+    expect(msg).toContain("subagents on");
+    expect(msg).toContain("workflows on");
   });
 
   test("toggling subagents rebuilds the system prompt on the next turn (review fix)", async () => {
@@ -1463,7 +1418,7 @@ describe("harness capabilities — workflows", () => {
     const s = w.store.getSessionByConversation("fake", "wf1b.000001")!;
     expect(s.subagents).toBe(0);
     expect(s.workflows).toBe(0);
-    expect(w.surface.posts.at(-1)!.text).toContain("ultra off");
+    expect(w.surface.posts.at(-1)!.text).toContain("subagents off");
   });
 
   test("a repo asking for workflows without subagents still gets subagents (seed invariant)", async () => {
@@ -1549,38 +1504,19 @@ describe("harness capabilities — workflows", () => {
     expect(s.workflows).toBe(0);
   });
 
-  test("ultra on now enables workflows too (re-folded into the preset)", async () => {
-    const w = makeWorld();
-    const c = conv("wf5.000001");
-    await assign(w, "wf5.000001");
-    await w.manager.handleEvent({ kind: "command", conv: c, author: architect, name: "ultra", args: "on" });
-    const s = w.store.getSessionByConversation("fake", "wf5.000001")!;
-    expect(s.workflows).toBe(1);
-    expect(s.subagents).toBe(1);
-    expect(s.effort).toBe("xhigh");
-    await w.manager.handleEvent({ kind: "message", conv: c, author: architect, text: "go", attachments: [] });
-    expect(w.harness.allTurns.at(-1)!.harness?.workflows).toBe(true);
-    // ultra off clears workflows again.
-    await w.manager.handleEvent({ kind: "command", conv: c, author: architect, name: "ultra", args: "off" });
-    expect(w.store.getSessionByConversation("fake", "wf5.000001")!.workflows).toBe(0);
-  });
-
   test("workflows on shows in the status listing and re-announcement", async () => {
     const w = makeWorld();
     const c = conv("wf6.000001");
     await assign(w, "wf6.000001");
-    // A default session is already the full preset, so the summary collapses to
-    // the `ultra` label rather than listing its three parts separately.
     await w.manager.handleEvent({ kind: "command", conv: c, author: architect, name: "status", args: "" });
-    expect(w.surface.posts.at(-1)!.text).toContain("*ultra on*");
+    expect(w.surface.posts.at(-1)!.text).toContain("*workflows on*");
 
-    // Drop effort below xhigh and it is no longer ultra — workflows must then be
-    // reported on its own, so the label always tracks the real posture.
+    // Each capability is reported on its own, whatever the effort is set to.
     await w.manager.handleEvent({ kind: "command", conv: c, author: architect, name: "effort", args: "medium" });
     await w.manager.handleEvent({ kind: "command", conv: c, author: architect, name: "status", args: "" });
     const status = w.surface.posts.at(-1)!.text;
     expect(status).toContain("*workflows on*");
-    expect(status).not.toContain("*ultra on*");
+    expect(status).toContain("effort `medium`");
 
     await w.manager.handleEvent({ kind: "command", conv: c, author: architect, name: "help", args: "" });
     expect(w.surface.posts.at(-1)!.text).toContain("workflows *on*");
@@ -1649,7 +1585,6 @@ describe("role delegation — grant/revoke", () => {
     expect(w.surface.posts.at(-1)!.text).toContain("set by config");
     expect(w.store.isArchitect("fake:U_ARCH", "C1")).toBe(true); // still architect
   });
-
 
   test("a runtime grant cannot flip/overwrite a config architect's row — no lockout (review 2026-07-19)", async () => {
     const w = makeWorld(); // U_ARCH is a config architect at '*'
@@ -2131,7 +2066,6 @@ describe("skills — architect invocation", () => {
     expect(audit.some((a) => a.event === "authz_denied" && (a.detail as any).action === "skill")).toBe(true);
   });
 
-
   test("refuses an unknown skill with a suggestion, and starts no turn", async () => {
     const w = trustedWorld();
     await assign(w, "sk4.000001");
@@ -2140,8 +2074,6 @@ describe("skills — architect invocation", () => {
     expect(w.harness.allTurns.length).toBe(before);
     expect(w.surface.posts.at(-1)!.text).toContain("/ship"); // did-you-mean
   });
-
-
 
   test("a skill turn is a human turn: the budget cap and the pending-approval guard apply", async () => {
     const w = trustedWorld();
@@ -2154,7 +2086,6 @@ describe("skills — architect invocation", () => {
     expect(w.harness.allTurns.length).toBe(before);
     expect(w.surface.posts.at(-1)!.text).toContain("cost budget");
   });
-
 
   test("lists skills grouped by source, with descriptions defanged", async () => {
     const w = trustedWorld([
@@ -2232,8 +2163,6 @@ describe("plan mode — research first, implement after approval", () => {
     expect(w.surface.transcript().some((t) => t.includes("plan mode"))).toBe(true);
   });
 
-
-
   test("the plan is posted into the thread in full, with how to leave plan mode", async () => {
     const w = makeWorld();
     await assign(w, "pm6.000001");
@@ -2250,9 +2179,6 @@ describe("plan mode — research first, implement after approval", () => {
     // The plan file write itself still ran — the plan is a real file in the tree.
     expect(w.harness.executed.some((c) => c.name === "Write")).toBe(true);
   });
-
-
-
 
 
   test("workflows are PAUSED while planning, and `plan off` restores them", async () => {
@@ -2278,8 +2204,6 @@ describe("plan mode — research first, implement after approval", () => {
     expect(w.harness.resumed.at(-1)!.system).toContain("PLAN MODE");
     expect(w.harness.resumed.at(-1)!.system).not.toContain("Propose these actions normally");
   });
-
-
 
   test("`clear` leaves plan mode ON — it is posture, not consent", async () => {
     // The deliberate counterpoint to workflow_write, which `clear` revokes: that

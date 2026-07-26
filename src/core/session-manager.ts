@@ -291,7 +291,7 @@ function threadCommandHelp(): string {
   return [
     `Architect commands — mention me in this thread:`,
     `• \`@Condotto model <opus|sonnet|fable>\` / \`@Condotto effort <low…max>\` — tune the implementer`,
-    `• \`@Condotto subagents on|off\` · \`@Condotto workflows on|off\` · \`@Condotto ultra on|off\` — multi-agent power (on by default)`,
+    `• \`@Condotto subagents on|off\` · \`@Condotto workflows on|off\` — multi-agent power (both on by default)`,
     `• \`@Condotto grant @user architect [everywhere]\` · \`@Condotto revoke @user\` — delegate authority (this channel, or everywhere)`,
     `• \`@Condotto budget <usd>\` — raise this thread's cost budget · \`@Condotto cancel\` — stop the running turn (e.g. a runaway workflow)`,
     `• \`@Condotto plan on|off\` — research first: I propose a plan and change nothing until you turn it off`,
@@ -344,8 +344,8 @@ export interface SessionManagerOptions {
   /**
    * Daemon-wide default harness posture, used when a session's repo sets no
    * `default_subagents`/`default_workflows`. Both on by default: with the `xhigh`
-   * effort default that is the `ultra` preset, so a thread starts at full
-   * strength. Seeds NEW sessions only — an existing session keeps its own row.
+   * effort default, a thread starts at full strength. Seeds NEW sessions only —
+   * an existing session keeps its own row.
    */
   defaultSubagents?: boolean;
   defaultWorkflows?: boolean;
@@ -482,20 +482,6 @@ export class SessionManager {
   private effectiveEffort(session: SessionRow): string {
     return session.effort ?? this.defaultEffort;
   }
-  /**
-   * "Ultra" is a preset, not stored state: it means subagents on AND
-   * workflows on AND xhigh effort — the full "max it out" posture (the SDK analogue
-   * of CLI "ultracode"). Derived so the label always reflects the effective posture,
-   * however it was reached. (The Workflow tool was re-folded back in — it was
-   * dropped earlier while workflows were disabled.)
-   */
-  private isUltra(session: SessionRow): boolean {
-    return (
-      session.subagents === 1 &&
-      session.workflows === 1 &&
-      this.effectiveEffort(session) === "xhigh"
-    );
-  }
   /** One-line human summary of a session's harness capabilities. */
   private capabilitySummary(session: SessionRow): string {
     const parts = [
@@ -504,16 +490,13 @@ export class SessionManager {
     ];
     // Plan mode leads: it changes what every other capability here actually means.
     if (session.plan_mode === 1) parts.push("*plan mode on*");
-    if (this.isUltra(session)) parts.push("*ultra on* (xhigh + subagents + workflows)");
-    else {
-      if (session.subagents === 1) parts.push("*subagents on*");
-      // The EFFECTIVE state: while planning, the Workflow tool is not in context,
-      // so reporting "workflows on" would describe a session that doesn't exist.
-      if (this.effectiveWorkflows(session)) {
-        parts.push("*workflows on*");
-      } else if (session.workflows === 1) {
-        parts.push("workflows paused");
-      }
+    if (session.subagents === 1) parts.push("*subagents on*");
+    // The EFFECTIVE state: while planning, the Workflow tool is not in context,
+    // so reporting "workflows on" would describe a session that doesn't exist.
+    if (this.effectiveWorkflows(session)) {
+      parts.push("*workflows on*");
+    } else if (session.workflows === 1) {
+      parts.push("workflows paused");
     }
     return parts.join(", ");
   }
@@ -528,7 +511,6 @@ export class SessionManager {
     const subagents = session.subagents === 1;
     const workflows = this.effectiveWorkflows(session);
     const planMode = session.plan_mode === 1;
-    const ultra = this.isUltra(session);
     const budget = session.budget_limit_usd ?? this.defaultCostCapUsd;
     const lines = [
       `⚙️ *Session settings*`,
@@ -544,7 +526,7 @@ export class SessionManager {
         ? [`• working in \`${session.workdir}\` (the whole worktree stays in scope)`]
         : []),
       `• model \`${this.effectiveModel(session)}\`  ·  effort \`${this.effectiveEffort(session)}\``,
-      `• subagents ${subagents ? "*on*" : "off"}  ·  workflows ${workflows ? "*on*" : planMode && session.workflows === 1 ? "paused" : "off"}  ·  ultra ${ultra ? "*on*" : "off"}`,
+      `• subagents ${subagents ? "*on*" : "off"}  ·  workflows ${workflows ? "*on*" : planMode && session.workflows === 1 ? "paused" : "off"}`,
       `• cost budget $${budget.toFixed(2)}`,
     ];
     if (repo?.memory === 1) {
@@ -728,9 +710,6 @@ export class SessionManager {
         break;
       case "workflows":
         await this.setWorkflows(event.conv, event.author, event.args);
-        break;
-      case "ultra":
-        await this.setUltra(event.conv, event.author, event.args);
         break;
       case "plan":
         await this.setPlanMode(event.conv, event.author, event.args);
@@ -1659,57 +1638,6 @@ export class SessionManager {
     });
   }
 
-  /**
-   * `@Condotto ultra on|off`. The power preset: `xhigh` effort +
-   * subagents + the Workflow tool — the SDK analogue of CLI "ultracode".
-   *
-   * This is now the SHIPPED default posture, not an opt-in: a new session already
-   * arrives with all three on (`[defaults]` in `condotto.toml`), so `ultra on` is
-   * mainly how you get back after dialing something down. It burns the plan's
-   * rate limit fastest, which is why it stays architect-only.
-   */
-  private async setUltra(conv: ConversationRef, author: Principal, args: string): Promise<void> {
-    const surface = this.surfaceFor(conv);
-    const session = this.store.getSessionByConversation(conv.surfaceId, conv.conversationId);
-    if (!session || session.status === "stopped") {
-      await surface.post(conv, { text: "No active session in this thread." });
-      return;
-    }
-    if (!this.store.isArchitect(principalKey(author), conv.channelId)) {
-      this.store.audit({ sessionId: session.id, actor: principalKey(author), event: "authz_denied", detail: { action: "ultra" } });
-      await surface.post(conv, { text: "Only architects can toggle ultra mode." });
-      return;
-    }
-    const on = this.parseOnOff(args);
-    if (on === null) {
-      await surface.post(conv, { text: `Usage: \`@Condotto ultra on|off\`. Currently ${this.isUltra(session) ? "on" : "off"}.` });
-      return;
-    }
-    if (on) {
-      // Ultra = the "max it out" preset: xhigh reasoning + parallel subagents +
-      // the Workflow tool. All worktree-confined, same as everything else.
-      this.store.setSessionSubagents(session.id, true);
-      this.store.setSessionWorkflows(session.id, true);
-      if (this.supportsEffort("xhigh")) this.store.setSessionEffort(session.id, "xhigh");
-    } else {
-      this.store.setSessionSubagents(session.id, false);
-      this.store.setSessionWorkflows(session.id, false);
-      // Back to the daemon default — which now IS `xhigh`. So `ultra off` drops
-      // the multi-agent half of the preset and leaves reasoning effort where the
-      // operator configured it; `isUltra` is false either way (it requires all
-      // three). Use `@Condotto effort <level>` to actually lower the effort.
-      this.store.setSessionEffort(session.id, null);
-    }
-    this.store.audit({ sessionId: session.id, actor: principalKey(author), event: "ultra_set", detail: { on } });
-    const fresh = this.store.getSession(session.id)!;
-    await surface.post(conv, {
-      text:
-        (on
-          ? "⚡ Ultra on — max reasoning (`xhigh`) + parallel subagents + multi-agent workflows. This burns the rate limit fastest; dial down with `@Condotto ultra off`. "
-          : "Ultra off — subagents and workflows are off. Reasoning effort goes back to the daemon default; set it explicitly with `@Condotto effort <level>`. ") +
-        `(${this.capabilitySummary(fresh)}) Takes effect on your next message.`,
-    });
-  }
 
   /**
    * `@Condotto plan on|off` — architect-only, both directions.
@@ -2616,7 +2544,7 @@ export class SessionManager {
   private async getOrAttachHarness(session: SessionRow, memoryDir?: string): Promise<HarnessSession> {
     const entry = this.entryFor(session.id);
     // Re-attach when the prompt-affecting capability state changed since the
-    // cached harness was built (a subagents/ultra toggle). Reading the fresh row
+    // cached harness was built (a subagents/workflows toggle). Reading the fresh row
     // here makes this race-free — no reliance on out-of-band invalidation that a
     // toggle landing mid-attach could miss.
     // Memory is part of the key: turning it on (or losing it for a turn) changes

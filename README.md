@@ -231,10 +231,9 @@ default_branch = "main"
 # cost_cap_usd / default_model / default_effort / subagents / workflows override [defaults]
 ```
 
-Those defaults are the full-strength posture. `xhigh` with subagents and workflows
-is what `@Condotto ultra on` sets, so a new thread starts there instead of waiting
-for someone to turn it up. It is also the expensive end, which is why the runaway
-brake sits at $50. Dial it down here, per repo, or per thread in Slack.
+Those defaults are the full-strength posture, so a new thread starts there instead
+of waiting for someone to turn it up. It is also the expensive end, which is why
+the runaway brake sits at $50. Dial it down here, per repo, or per thread in Slack.
 
 **At least one repo is required.** There is no default repo, and the daemon refuses
 to start without one. A monorepo is one entry; you pick the sub-project when you
@@ -304,30 +303,39 @@ In a channel the bot has been invited to:
 
 | Command | Who | Does |
 |---|---|---|
-| `/condotto assign <repo>[/<sub-project>]` | architect | Start a session in this channel. Omit the repo and Condotto asks which one. |
+| `/condotto assign <repo>[/<sub-project>]` | architect | Start a session in this channel. Omit the repo and Condotto asks which one. Defaults to the repo root. |
 | `/condotto status` | architect | Daemon-wide dashboard: uptime, session counts, turns in flight, config. |
 | `/condotto stop` | anyone | Lists this channel's sessions and points you to the in-thread stop. |
 
 **In a session thread**, mention `@Condotto`.
 
-| Mention | Who | Does |
-|---|---|---|
-| `@Condotto assign <repo>[/<sub-project>]` | architect | Assign *this* thread as a session. |
-| `@Condotto status` | anyone | This channel's sessions and their settings. |
-| `@Condotto stop [clean]` | architect | End the session. `clean` also discards the worktree. |
-| `@Condotto cancel` | architect | Interrupt the running turn. The session lives on. |
-| `@Condotto clear` | architect | Forget the conversation. Worktree, branch, uncommitted work, settings, memory and spend all survive. |
-| `@Condotto plan on\|off` | architect | Read-only mode. The agent investigates and posts a plan, and changes nothing until you turn it off. |
-| `@Condotto budget <usd>` | architect | Raise this thread's cost ceiling. |
-| `@Condotto model <opus\|sonnet\|fable>` | architect | Set the model. |
-| `@Condotto effort <low…max>` | architect | Set reasoning effort. Prefer setting it early; changing it mid-thread drops the prompt cache. |
-| `@Condotto subagents on\|off` | architect | Parallel exploration (on by default). |
-| `@Condotto workflows on\|off` | architect | Multi-agent workflows (on by default). |
-| `@Condotto ultra on\|off` | architect | Preset: `xhigh` plus subagents plus workflows. The shipped default, so this is mostly how you get back after dialing down. |
-| `@Condotto /<skill> [args]` | architect | Run one of your skills. Mention Condotto first: Slack eats a message that starts with `/`. |
-| `@Condotto skills` | architect | List the skills this thread can run, and the file each one is. |
-| `@Condotto grant @user architect [everywhere]` | architect | Let someone else drive. This channel by default. Survives restarts. |
-| `@Condotto revoke @user [everywhere]` | architect | Take it back. |
+| Mention | Who | Default | Does |
+|---|---|---|---|
+| `@Condotto assign <repo>[/<sub-project>]` | architect | — | Assign *this* thread as a session. |
+| `@Condotto status` | anyone | — | This channel's sessions and their settings. |
+| `@Condotto stop [clean]` | architect | — | End the session. `clean` also discards the worktree. |
+| `@Condotto cancel` | architect | — | Interrupt the running turn. The session lives on. |
+| `@Condotto clear` | architect | — | Forget the conversation. Worktree, branch, uncommitted work, settings, memory and spend all survive. |
+| `@Condotto plan on\|off` | architect | **off** | Read-only mode. The agent investigates and posts a plan, and changes nothing until you turn it off. |
+| `@Condotto budget <usd>` | architect | **$50** | Raise this thread's cost ceiling. From `cost_cap_usd`. |
+| `@Condotto model <opus\|sonnet\|fable>` | architect | **`opus`** | Set the model. From `[defaults].model`. |
+| `@Condotto effort <low\|medium\|high\|xhigh\|max>` | architect | **`xhigh`** | Set reasoning effort. From `[defaults].effort`. Prefer setting it early; changing it mid-thread drops the prompt cache. |
+| `@Condotto subagents on\|off` | architect | **on** | Parallel exploration. From `[defaults].subagents`. |
+| `@Condotto workflows on\|off` | architect | **on** | Multi-agent workflows. From `[defaults].workflows`. Turning it on turns subagents on too. |
+| `@Condotto /<skill> [args]` | architect | — | Run one of your skills. Mention Condotto first: Slack eats a message that starts with `/`. |
+| `@Condotto skills` | architect | — | List the skills this thread can run, and the file each one is. |
+| `@Condotto grant @user <architect\|member> [everywhere]` | architect | — | Let someone else drive. The role is required. This channel unless you add `everywhere`. Survives restarts. |
+| `@Condotto revoke @user [everywhere]` | architect | — | Take it back. |
+
+Every default above comes from `condotto.toml` and can be changed there, per repo,
+or per thread with the command. A thread starts at full strength: `opus` at `xhigh`
+with subagents, workflows and memory all on. That is also the expensive end, which
+is why the runaway brake sits at $50 — see [Cost](#cost).
+
+**Not in this table because they are not per-thread:** durable memory is on by
+default and set per repo (`memory = false` to opt out, see [Memory](#memory)); the
+concurrency cap `max_concurrent_turns` (**6**) is daemon-wide; and anyone not
+granted a role is a **member**, who talks in the thread without running the agent.
 
 **Who can do what.** Only an architect's message runs the agent. Everyone else can
 talk in the thread, and what they say is carried into the next architect turn as

@@ -172,7 +172,6 @@ export function parseMentionCommand(
   if (first === "model" && words.length === 2) return { name: "model", args: words[1]! };
   if (first === "effort" && words.length === 2) return { name: "effort", args: words[1]! };
   if (first === "subagents" && words.length === 2) return { name: "subagents", args: words[1]! };
-  if (first === "ultra" && words.length === 2) return { name: "ultra", args: words[1]! };
   // Strict arity earns its keep here more than anywhere else in this ladder:
   // "plan" is an ordinary English verb in the leading position, so `@Condotto plan
   // the migration with me` must fall through to conversation rather than parse as
@@ -407,7 +406,7 @@ export class SlackAdapter implements SurfaceAdapter {
             "`@Condotto clear` (forget the conversation, keep the worktree), " +
             "`@Condotto status`, `@Condotto budget <usd>`.\n" +
             "Tune the implementer: `@Condotto model <opus|sonnet|fable>`, `@Condotto effort <low…max>`, " +
-            "`@Condotto subagents on|off`, `@Condotto workflows on|off`, `@Condotto ultra on|off`.\n" +
+            "`@Condotto subagents on|off`, `@Condotto workflows on|off`.\n" +
             "Plan before building: `@Condotto plan on|off` — I propose a plan and change nothing until you turn it off.\n" +
             "Run one of my skills: `@Condotto /<skill> [args]` — `@Condotto skills` lists them.\n" +
             "Roles: " +

@@ -250,8 +250,8 @@ describe("loadConfig defaults + env overrides", () => {
   });
 
   test("subagents/workflows default ON, are settable in-file, and env overrides them", () => {
-    // The shipped posture: with `effort = "xhigh"` above, these two ARE `ultra`,
-    // which is why there is no separate `[defaults].ultra` key.
+    // The shipped posture: both on, which with `effort = "xhigh"` above is the
+    // full-strength default a new thread starts in.
     const def = loadConfig({}, cfgFile(""));
     expect(def.defaultSubagents).toBe(true);
     expect(def.defaultWorkflows).toBe(true);

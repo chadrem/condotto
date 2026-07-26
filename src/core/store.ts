@@ -795,7 +795,7 @@ export class Store {
   }
 
   /**
-   * Toggle a session's Workflow tool (part of the `ultra` preset). Turning it ON
+   * Toggle a session's Workflow tool. Turning it ON
    * implies subagents: a workflow IS a fan-out of them, and a row with workflows
    * on and subagents off describes a session that cannot exist.
    */
