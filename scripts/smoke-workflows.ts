@@ -95,7 +95,7 @@ console.log(`[smoke] the in-worktree write physically landed (best-effort): ${ex
 // turn produced a real synthesized answer. Everything else is logged rather than
 // enforced, because the runtime refuses some workflow-agent calls upstream of our
 // gate in bursts — a run can legitimately show zero agent calls reaching us
-// (2026-07-26, `scripts/spike-workflow-grep.ts`). Re-run before believing a
+// Re-run before believing a
 // failure here; what must NEVER be true is `escaped`.
 const ok = !escaped && functional;
 

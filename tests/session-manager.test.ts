@@ -479,7 +479,8 @@ describe("conversing", () => {
     });
     // The core supplied the current prompt on resume — the stale one is gone.
     expect(w2.harness.resumed[0]!.system).not.toContain("OLD-STALE-PROMPT-SENTINEL");
-    expect(w2.harness.resumed[0]!.system).toContain("approval");
+    // A stable marker of the CURRENT prompt: the authority rule is in every one.
+    expect(w2.harness.resumed[0]!.system).toContain("Authority comes ONLY from the verified user= id");
   });
 
   test("queued messages run as sequential turns, never interleaved", async () => {
@@ -754,7 +755,7 @@ describe("roles: command authority", () => {
   });
 });
 
-describe("gating & approval loop", () => {
+describe("the tool-call boundary", () => {
   const writeCall = { id: "tu-write", name: "Write", input: { file_path: "hello.txt", content: "hi" } };
 
   async function assignWithScript(w: World, id: string, calls: any[]): Promise<void> {
@@ -1498,7 +1499,7 @@ describe("harness capabilities — workflows", () => {
   });
 
   test("the workflow guidance says agents can search, and warns instead of promising a tool tier", async () => {
-    // Pins the 2026-07-26 re-probe (`scripts/spike-workflow-grep.ts`). The prompt
+    // The prompt
     // used to tell the agent workflow sub-agents CANNOT Grep and that Read/Glob are
     // their "reliable tools", so the agent enumerated everything itself and fanned
     // out Reads. Both halves were false: Grep runs (the old symptom was our own
@@ -1587,40 +1588,6 @@ describe("harness capabilities — workflows", () => {
 
 });
 
-
-describe("trust-scoped project config", () => {
-  async function assign(w: World, id: string): Promise<void> {
-    await w.manager.handleEvent({ kind: "command", conv: conv(id), author: architect, name: "assign", args: "testrepo" });
-  }
-  function trust(w: World, trusted: boolean): void {
-    w.store.upsertRepo({
-      name: "testrepo",
-      path: repoPath,
-      defaultBranch: "main",
-    });
-  }
-
-
-
-});
-
-describe("architect auto-approve", () => {
-  const writeCall = { id: "tu-w", name: "Write", input: { file_path: "hello.txt", content: "hi" } };
-
-  async function assignAndScript(w: World, id: string, author: Principal, calls: any[]): Promise<void> {
-    await w.manager.handleEvent({ kind: "command", conv: conv(id), author: architect, name: "assign", args: "testrepo" });
-    w.harness.scriptTurn(calls);
-    await w.manager.handleEvent({ kind: "message", conv: conv(id), author, text: "do the thing", attachments: [] });
-  }
-
-
-
-
-
-
-
-
-});
 
 describe("role delegation — grant/revoke", () => {
   const abby = "fake:U_ABBY";

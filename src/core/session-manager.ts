@@ -1,6 +1,5 @@
 import type {
   HarnessSkill,
-  ChoicePrompt,
   ConversationRef,
   GateFn,
   HarnessAdapter,
@@ -25,7 +24,7 @@ import {
 } from "./worktrees";
 import { MemoryManager, verifyMemoryTarget } from "./memory";
 import { checkSkillArgs, frameMessage, sanitizeSkillText } from "./framing";
-import { evaluate, describeCall, memoryTargets, planTextFrom, type PolicyContext } from "./policy";
+import { evaluate, memoryTargets, planTextFrom, type PolicyContext } from "./policy";
 import {
   DEFAULT_COST_CAP_USD,
   DEFAULT_EFFORT,
@@ -116,22 +115,14 @@ function condottoSystemPrompt(opts: {
     : null;
   // Guidance when the architect has enabled multi-agent workflows.
   //
-  // This used to say workflow sub-agents CANNOT Grep and must be fed files the main
-  // agent enumerated first. Re-probed 2026-07-26 (`scripts/spike-workflow-grep.ts`)
-  // and that was wrong twice over:
-  //   - Grep works. Sub-agent Grep calls reach our hook with an `agent_id` and the
-  //     policy engine allows them as confined reads. The original 2026-07-18 finding
-  //     was measuring ABSENCE, not denial: under that posture the session had no
-  //     `Grep` at all (allowedTools was empty and `tools` unset), so sub-agents told
-  //     to search called `ToolSearch{select:Grep}` and got nothing. Our bug, fixed by
-  //     the 2026-07-26 `tools` allowlist.
-  //   - There is no reliable/unreliable tool tier. The runtime still refuses SOME
-  //     sub-agent calls upstream of our hook, but tool-agnostically — measured runs
-  //     where every `Grep` ran and every `Read` was refused, and runs where all
-  //     twelve calls ran. So the prompt promises no tier; it warns about refusals.
-  // Shell and writes are no longer origin-dependent (2026-07-26): a workflow agent
-  // gets the same answer the main agent does, because there is no approval to
-  // pause for and nothing left for origin to change.
+  // Two things this text must NOT say, both learned the expensive way.
+  //   - Do not claim workflow sub-agents cannot Grep. They can: their calls reach
+  //     our hook with an `agent_id` and the policy allows them as confined reads.
+  //     The apparent denial was our own bug — the session had no `Grep` at all
+  //     until the explicit `tools` list, so sub-agents told to search found nothing.
+  //   - Do not promise a reliable/unreliable tool tier. The runtime refuses some
+  //     sub-agent calls upstream of our hook, but tool-agnostically and in bursts.
+  //     So the prompt warns about refusals rather than naming safe tools.
   const workflow = opts.workflows
     ? `- For a big cross-cutting job (auditing a pattern across the codebase, reviewing many files), ` +
       `you can launch a multi-agent WORKFLOW (the Workflow tool): it fans out agents in parallel ` +
@@ -199,9 +190,9 @@ function condottoSystemPrompt(opts: {
           `  supervise you. If one refuses you, adapt — do not look for another route to`,
           `  the same place.`,
         ]),
-    `- Anything you post into this thread from PRODUCTION data must be AGGREGATES`,
-    `  ONLY — counts, rates, yes/no. Never paste row-level data, PII, or secrets into`,
-    `  the thread; if someone needs detail, say it has to go out of band.`,
+    `- Whatever you post lands in a channel other people read. If a command you run`,
+    `  returns real user data, PII, or a secret, summarize it — counts, rates,`,
+    `  yes/no — and say the detail has to go out of band. Never paste it in.`,
     `- You are confined to your worktree: you cannot read or write files outside it,`,
     `  and destructive or credential-touching commands are refused outright. Note the`,
     `  boundary is the WORKTREE ROOT, which may sit above your cwd — see Context.`,
@@ -211,12 +202,12 @@ function condottoSystemPrompt(opts: {
           ...(opts.planMode
             ? [
                 `  You may read it freely. Writing to it is paused while you're planning,`,
-                `  like every other write — save what you learn once the plan is approved.`,
+                `  like every other write — save what you learn once planning is over.`,
               ]
             : [
                 `  You may read it freely and write MARKDOWN (.md) files there with Write or`,
-                `  Edit (gated like any other write). It is NOT reachable from the shell — use`,
-                `  the file tools, not bash. Everything else outside the worktree stays refused.`,
+                `  Edit. It is NOT reachable from the shell — use the file tools, not bash.`,
+                `  Everything else outside the worktree stays refused.`,
               ]),
           `- Memory persists across threads for this repo and channel, so record what a`,
           `  future thread would waste time rediscovering: how this codebase is laid out,`,
@@ -285,7 +276,7 @@ function describeTarget(repoName: string, workdir: string | null): string {
 /**
  * A short, one-time summary of what people can do in an assigned thread. Posted
  * when a session starts or reactivates so the commands are discoverable in the
- * thread itself, not only in the docs. Kept terse (Slack ergonomics, Appendix A).
+ * thread itself, not only in the docs. Kept terse — it is a chat message.
  */
 function threadCommandHelp(): string {
   return [
@@ -573,7 +564,7 @@ export class SessionManager {
    * Where the harness writes plan files for a session. Absolute and inside the
    * worktree, both load-bearing: the runtime's default is `~/.claude/plans/`,
    * which the policy hard-denies, and a relative path would resolve against the
-   * cwd — the sub-project, for a monorepo session (spike 2026-07-25).
+   * cwd — the sub-project, for a monorepo session.
    *
    * Under `.condotto/` rather than a bare directory so one `.git/info/exclude`
    * entry covers anything else the daemon ever needs to leave in a worktree.
@@ -816,8 +807,6 @@ export class SessionManager {
         // A clean-stopped session being reactivated cancels its scheduled teardown
         // — the worktree lives on for the resumed work (journey 6).
         this.store.clearSessionCleanup(existing.id);
-        // Drop any approval left pending from before the stop — it refers to an
-        // abandoned turn and would otherwise wedge the reactivated session (#7).
         this.store.audit({
           sessionId: existing.id,
           actor: principalKey(author),
@@ -967,8 +956,9 @@ export class SessionManager {
         `branch \`${worktree.branch}\`.\n` +
         this.settingsBlock(session, repo) +
         `\n\n` +
-        `Reply in this thread to talk — reading and analysis are free. Edits, shell ` +
-        `commands, and land/deploy pause for an architect's Approve/Deny.\n\n` +
+        `Reply in this thread to talk. An architect's message sets me working — edits ` +
+        `and commands just run, inside this worktree. Anyone else's message is carried ` +
+        `into the next architect turn.\n\n` +
         threadCommandHelp(),
     });
   }
@@ -1152,7 +1142,7 @@ export class SessionManager {
   }
 
   /**
-   * `@Condotto stop [clean]` (architect-only, DESIGN ). Plain `stop`
+   * `@Condotto stop [clean]` (architect-only). Plain `stop`
    * ends the session but KEEPS its worktree for reactivation (journey 6 /  j5);
    * `stop clean` additionally schedules the worktree for teardown a retention
    * interval later — a grace window in which a re-assign still recovers it.
@@ -1189,9 +1179,6 @@ export class SessionManager {
       // the live entry and its FIFO — deleting mid-turn would let a later
       // reactivation start a second concurrent turn on the same session.
       this.store.updateSessionStatus(session.id, "stopped");
-      // Expire any approval left pending — the session is gone; nothing should be
-      // resumable via a late click (#7). handleApprovalDecision also guards on
-      // status, but clearing the row keeps hasPendingApproval/audit honest.
       const entry = this.live.get(session.id);
       if (entry) entry.harness = null;
     }
@@ -1228,7 +1215,7 @@ export class SessionManager {
    * `@Condotto cancel` — architect-only. Interrupt the session's IN-FLIGHT
    * turn (a wedged or over-cap multi-agent workflow) WITHOUT ending the session, so
    * the thread continues. The harness halts the — possibly detached — background task
-   * via `q.interrupt()` (the only lever that actually stops it — spike b) and drains
+   * via `q.interrupt()` (the only lever that actually stops it) and drains
    * its spend into the ledger; the running turn then parks with a cancellation notice.
    * A no-op when nothing is running. Mirrors `stop`'s architect-only, thread shape.
    */
@@ -1328,7 +1315,13 @@ export class SessionManager {
         // looks at the handle, so the row alone would not clear a warm session. Null
         // the harness but KEEP the entry: deleting it drops the FIFO chain.
         const live = this.live.get(s.id);
-        if (live) live.harness = null;
+        if (live) {
+          live.harness = null;
+          // Held messages go too. They are conversation from before the clear, and
+          // folding them into the next turn would re-inject the very thread the
+          // architect was just told I had forgotten.
+          live.pendingContext = [];
+        }
         const spentUsd = this.store.sessionCostUsd(s.id);
         const budgetUsd = s.budget_limit_usd ?? this.defaultCostCapUsd;
         this.store.audit({
@@ -1578,9 +1571,9 @@ export class SessionManager {
 
   /**
    * `@Condotto subagents on|off`. Architect-only; ON by default (`[defaults].subagents`).
-   * On: the implementer may fan out READ-ONLY exploration to subagents; it still
-   * makes edits itself (gated). Turning it off also turns workflows off (a
-   * workflow orchestrates subagents, so it needs the base capability).
+   * On, the implementer may fan out exploration to subagents and still makes the
+   * edits itself. Turning it off also turns workflows off, since a workflow
+   * orchestrates subagents and needs the base capability.
    */
   private async setSubagents(conv: ConversationRef, author: Principal, args: string): Promise<void> {
     const surface = this.surfaceFor(conv);
@@ -1608,25 +1601,18 @@ export class SessionManager {
     await surface.post(conv, {
       text:
         (on
-          ? "Subagents on — I can fan out read-only exploration in parallel; I still make edits myself (gated). "
+          ? "Subagents on — I can fan out exploration in parallel; I still make the edits myself. "
           : "Subagents off. ") +
         `(${this.capabilitySummary(fresh)}) Takes effect on your next message.`,
     });
   }
 
   /**
-   * `@Condotto workflows on|off` (architect-only; ON by default, `[defaults].workflows`). On: the
-   * implementer may launch multi-agent WORKFLOWS for parallel read-only
-   * research/analysis. Their sub-agents are gated read-only and worktree-confined
-   * (via the PreToolUse hook under bypassPermissions — spike 2026-07-18); the main
-   * agent still makes edits itself (gated). Enabling workflows implies subagents
-   * (a workflow orchestrates sub-agents).
-   *
-   * `@Condotto workflows write on|off` (the informed insecure opt-in): lets
-   * workflow/subagent-origin (and batched) calls WRITE and run bash confined to the
-   * worktree WITHOUT per-write approval. Off by default; enabling it posts a
-   * mandatory, non-skippable warning. out-of-worktree/credential/prod-data stay
-   * hard-denied and land/deploy still require an Approve click.
+   * `@Condotto workflows on|off` (architect-only; ON by default,
+   * `[defaults].workflows`). On, the implementer may launch multi-agent workflows
+   * for wide research. Their agents are worktree-confined like every other call,
+   * via the PreToolUse hook under bypassPermissions. Enabling
+   * workflows implies subagents, since a workflow orchestrates them.
    */
   private async setWorkflows(conv: ConversationRef, author: Principal, args: string): Promise<void> {
     const surface = this.surfaceFor(conv);
@@ -1710,7 +1696,7 @@ export class SessionManager {
     await surface.post(conv, {
       text:
         (on
-          ? "⚡ Ultra on — max reasoning (`xhigh`) + parallel read-only subagents + multi-agent workflows. This burns the rate limit fastest; dial down with `@Condotto ultra off`. "
+          ? "⚡ Ultra on — max reasoning (`xhigh`) + parallel subagents + multi-agent workflows. This burns the rate limit fastest; dial down with `@Condotto ultra off`. "
           : "Ultra off — subagents and workflows are off. Reasoning effort goes back to the daemon default; set it explicitly with `@Condotto effort <level>`. ") +
         `(${this.capabilitySummary(fresh)}) Takes effect on your next message.`,
     });
@@ -1720,18 +1706,17 @@ export class SessionManager {
    * `@Condotto plan on|off` — architect-only, both directions.
    *
    * On: the thread plans instead of building. Only genuine reads run; the agent
-   * writes its plan to the session's plans directory, that write is gated, and the
-   * plan is posted into the thread for Approve/Deny. Approving flips this off and
-   * resumes straight into implementation.
+   * writes its plan to the session's plans directory, and the core posts that
+   * write's content into the thread. `plan off` is the only way out.
    *
    * Architect-only in BOTH directions even though turning it ON only removes
    * authority. Turning it off is the half that matters — it hands the agent write
    * and shell access back — and a single symmetric rule is easier to reason about
-   * than a split one. It also matches every other session control.
+   * than a split one.
    *
    * In-thread only: no `condotto.toml` key and no per-repo default, because it is
    * a per-TASK decision ("plan this one out first"), not a posture an operator
-   * sets once for a repo. Same reasoning as the worktree-write opt-in.
+   * sets once for a repo.
    */
   private async setPlanMode(conv: ConversationRef, author: Principal, args: string): Promise<void> {
     const surface = this.surfaceFor(conv);
@@ -1887,8 +1872,7 @@ export class SessionManager {
   /**
    * `@Condotto /<name> [args]` — architect-only. Runs a harness skill as a TURN of
    * this session, so it carries the session's model, effort, budget and — the point
-   * — the same  gate as any other turn (verified: a Write inside a skill turn
-   * defers and re-drives on the approval resume).
+   * — the same boundary as any other turn.
    *
    * This is the ONLY path to a skill marked `disable-model-invocation`. That flag
    * withholds a skill from the model, so the agent cannot reach it however it is
@@ -1963,8 +1947,9 @@ export class SessionManager {
 
     // Argument text is the one piece of human input that reaches the harness
     // outside the fence, and it is substituted into the skill body before the model
-    // runs — so `!`cmd`` in it EXECUTES, ahead of every check in policy.ts. This
-    // refusal is the boundary, not a nicety. See `checkSkillArgs`.
+    // runs — so `!`cmd`` in it EXECUTES, ahead of every check in policy.ts. That is
+    // accepted: an architect typing their own arguments into their own skill is the
+    // feature. `checkSkillArgs` only refuses what would MISROUTE (a leading `/`).
     const checked = checkSkillArgs(rest.join(" "));
     if (!checked.ok) {
       this.store.audit({ sessionId: session.id, actor, event: "skill_refused", detail: { name: skill.name, reason: "bad_args" } });
@@ -1989,10 +1974,8 @@ export class SessionManager {
     });
 
     // Serialized on the session FIFO and run AS a human turn: `inbound` is what
-    // subjects it to the pending-approval guard, the runaway cost cap and the
-    // transcript, exactly like a message.
-    // auto-approve behaves as it already does — and so any approval this turn defers
-    // records them, not whoever later clicks.
+    // A skill runs as an ordinary turn: same FIFO, same runaway cost cap, same
+    // transcript. The invoker is recorded as the actor.
     const entry = this.entryFor(session.id);
     entry.chain = entry.chain
       .then(() =>
@@ -2064,7 +2047,7 @@ export class SessionManager {
     const where = scope === "*" ? "across all channels" : "in this channel";
     const extra =
       role === "architect"
-        ? ` They can now approve gated actions and run architect commands ${where}.` +
+        ? ` They can now set me working and run architect commands ${where}.` +
           (scope === "*" ? "" : " For another channel, run this in that channel; add `everywhere` for all channels.")
         : "";
     // Identity renders via `mentionToken`, never backticked — a code span is
@@ -2204,7 +2187,7 @@ export class SessionManager {
   /**
    * Runs one turn (a framed human message, or an empty-prompt resume that
    * re-drives a decided tool call) to completion: streams progress, delivers
-   * the reply, records an approval on a defer, and audits every tool call.
+   * the reply, and audits every tool call.
    */
   private async executeTurn(params: {
     sessionId: string;
@@ -2214,8 +2197,7 @@ export class SessionManager {
      * A harness skill invocation instead of prose. Mutually exclusive with a
      * non-empty `framedText` by construction: an invocation carries no message body.
      * Passed through opaquely — the core names a skill, the adapter knows how its
-     * runtime spells one. Deliberately absent on an approval RESUME, so the resume
-     * re-drives the pending tool call rather than dispatching the command again.
+     * runtime spells one.
      */
     skill?: { name: string; args?: string };
     placeholder: string;
@@ -2514,10 +2496,10 @@ export class SessionManager {
 
 
   /**
-   * The session's cwd, or an explanation of why it is unusable. `rm -rf .` is
-   * merely gated (a plausible "delete this package" refactor), so an approved edit
-   * can remove the directory the session runs in — after which every turn would
-   * die at harness spawn with an opaque error. Check first and say so plainly.
+   * The session's cwd, or an explanation of why it is unusable. A relative
+   * `rm -rf .` is ordinary in-tree work, so the agent can delete the directory the
+   * session runs in — after which every turn dies at harness spawn with an opaque
+   * error. Check first and say so plainly.
    */
   private cwdProblem(session: SessionRow): string | null {
     const cwd = sessionCwd(session.worktree_path, session.workdir);
@@ -2538,15 +2520,15 @@ export class SessionManager {
     // Memory is part of the key: turning it on (or losing it for a turn) changes
     // the prompt, and a cached harness built without it would keep the old text.
     // plan_mode is part of the key because it rewrites the prompt wholesale (the
-    // gate bullet, the test command, the memory paragraph). Without it, `plan on`
-    // would leave a warm harness telling the agent to propose gated actions
-    // normally while the gate denies every one of them.
+    // action bullet and the memory paragraph). Without it, `plan on` would leave a
+    // warm harness telling the agent to just do the work while the policy denies
+    // every write.
     const promptKey = `${session.subagents}:${session.workflows}:${session.plan_mode}:${memoryDir ?? ""}`;
     if (entry.harness && entry.promptKey === promptKey) return entry.harness;
 
     // The system prompt is current Condotto policy, re-supplied on resume too —
-    // never the stale one a session was created with (e.g. a read-only
-    // session reactivated later must now know it can propose gated actions).
+    // never the stale one a session was created with (a thread parked in plan mode
+    // and reactivated after `plan off` must be told it can act again).
     const repo = this.store.getRepo(session.repo_id);
     const system = condottoSystemPrompt({
       repoName: session.repo_id,

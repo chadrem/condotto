@@ -61,7 +61,7 @@ describe("WorktreeManager.create + remove", () => {
 
   test("create excludes the daemon's `.condotto/` scratch from git, idempotently", async () => {
     // Plan files land in `.condotto/plans`. Untracked, they would ride an
-    // operator's `land_cmd` doing `git add -A` straight into a real commit.
+    // an agent's `git add -A` sweeping it straight into a real commit.
     const wm = new WorktreeManager(root);
     const info = await wm.create({ repoPath, defaultBranch: "main", sessionId: "sess-cccccccc-9" });
     mkdirSync(join(info.path, ".condotto", "plans"), { recursive: true });

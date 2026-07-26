@@ -95,7 +95,7 @@ path = "/srv/api"
     expect(() => loadConfig({}, tomlFile(`repos = "notanarray"\n`))).toThrow(/array of tables/);
   });
 
-  test("[[repos]] loads test/land/deploy commands and per-repo cost cap", () => {
+  test("[[repos]] IGNORES the retired test/land/deploy keys and loads the cost cap", () => {
     const path = tomlFile(`
 [[repos]]
 name = "webapp"
@@ -238,7 +238,7 @@ describe("loadConfig defaults + env overrides", () => {
     expect(fromFile.defaultSubagents).toBe(false);
     expect(fromFile.defaultWorkflows).toBe(false);
 
-    // Same falsey spellings the auto-approve override accepts — one shared helper.
+    // Every [defaults] toggle parses falsey spellings the same way — one helper.
     for (const off of ["off", "false", "0", "no", "OFF"]) {
       expect(loadConfig({ CONDOTTO_SUBAGENTS: off }, cfgFile("")).defaultSubagents).toBe(false);
       expect(loadConfig({ CONDOTTO_WORKFLOWS: off }, cfgFile("")).defaultWorkflows).toBe(false);

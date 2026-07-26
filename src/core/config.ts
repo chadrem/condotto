@@ -41,8 +41,8 @@ export interface CondottoConfig {
   maxConcurrentTurns: number;
   /**
    * Daemon-wide default model/effort tokens, used when a repo sets
-   * none. Opaque tokens the harness adapter validates; the north-star wants the
-   * implementer to be first-class, so the default is Opus 5 + xhigh.
+   * none. Opaque tokens the harness adapter validates. The default is Opus 5 +
+   * xhigh: the implementer has to be first-class for a PM to build a real feature.
    */
   defaultModel: string;
   defaultEffort: string;
@@ -76,7 +76,6 @@ export interface SlackCredentials {
  *                  ordinary individual use of Claude Code and the Agent SDK, so
  *                  this is the single-operator path: one architect driving their
  *                  own sessions. Supported, not deprecated — just not for teams.
- *
  */
 export type AuthMode = "api_key" | "subscription";
 
@@ -97,10 +96,9 @@ export const DEFAULT_COST_CAP_USD = 50;
 /** Default cap on concurrently-executing harness turns (protects the box). */
 export const DEFAULT_MAX_CONCURRENT_TURNS = 6;
 /**
- * Default implementer model/effort. Opus 5 + xhigh: the implementer must be
- * first-class for a PM to build a real feature, and
- * Anthropic's own guidance is to step up to xhigh for demanding coding and
- * agentic work. Opaque tokens — the harness adapter maps/validates them.
+ * Default implementer model/effort. Opus 5 + xhigh: Anthropic's guidance is to
+ * step up to xhigh for demanding coding and agentic work. Opaque tokens — the
+ * harness adapter maps/validates them.
  */
 export const DEFAULT_MODEL = "opus";
 export const DEFAULT_EFFORT = "xhigh";
@@ -445,11 +443,9 @@ export function loadConfig(
   const defaults = toml.defaults === undefined ? {} : asTable(toml.defaults, "[defaults]");
   warnUnknownKeys(defaults, DEFAULTS_KEYS, "[defaults]");
 
-  // The three daemon-wide toggles, all on unless explicitly disabled: architect
-  // the subagents/workflows harness posture. Together with
-  // `[defaults].effort = "xhigh"` the latter two ARE the `ultra` preset, which is
-  // why there is no separate `ultra` key — it would need a conflict rule against
-  // an `effort` set alongside it.
+  // Both on unless explicitly disabled. Together with `[defaults].effort = "xhigh"`
+  // these two ARE the `ultra` preset, which is why there is no separate `ultra`
+  // key — it would need a conflict rule against an `effort` set alongside it.
   const defaultSubagents = resolveBoolDefault(
     env.CONDOTTO_SUBAGENTS,
     defaults.subagents,

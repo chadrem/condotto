@@ -38,8 +38,13 @@ of it now. Nothing here ever asks a human anything, which is the point.
   origin-blind: a subagent, a workflow agent and a call arriving on the
   `canUseTool` backstop all get the identical answer.
 - **The hard-deny floor.** Credential env names (`ANTHROPIC_API_KEY`,
-  `CLAUDE_CODE_OAUTH_TOKEN`, the daemon's own secrets), `rm -rf` escapes, and
-  linking an out-of-tree path into the worktree. No one overrides it.
+  `CLAUDE_CODE_OAUTH_TOKEN`, the daemon's own secrets), credential directories
+  (`~/.ssh`, `~/.aws`, `~/.gnupg`, `~/.kube`), environment dumps, `rm -rf`
+  escapes, and linking an out-of-tree path into the worktree. No one overrides it.
+  It applies to Bash, which has no path confinement — a command is a string, so
+  this pattern list is the whole boundary there. Match credential DIRECTORIES, not
+  filenames: matching only `.ssh/` once left `cp -r ~/.ssh mine` allowed, and a
+  copy inside the worktree reads back clean.
 - **Injection framing** (`core/framing.ts`). Thread text reaches the model inside
   an unforgeable random-nonce fence with protocol-sentinel defanging. Authority
   attaches only to the verified `user=` id in the header, never to display names
@@ -81,8 +86,11 @@ seams:
 **Port erosion is a review-blocking bug even with one adapter per seam:** no
 `@slack/bolt` or `@anthropic-ai/claude-agent-sdk` import outside `adapters/`, no
 `thread_ts` in the core, no SDK type in `policy.ts`. Domain types (`Principal`,
-`ConversationRef`, `ToolCall`) live in the core. `bun run check:ports` enforces
-part of this; the rest is on you.
+`ConversationRef`, `ToolCall`) live in the core. `bun run check:ports` (also run
+by `bun test`) catches the mechanical half: platform imports, relative imports
+into `adapters/`, and surface wire tokens (`thread_ts`, `block_actions`, `<@`,
+`xoxb-`) anywhere outside `adapters/`. A domain type that merely mirrors an SDK
+shape is on you.
 
 ## Key invariants (enforce in code, not just schema)
 
@@ -149,7 +157,11 @@ of the last three we relied on contradicted the SDK's own documentation.
   cannot present a plan at all without this.
 - **Skill text is preprocessed before the model sees it.** `` !`cmd` `` runs
   shell and `@path` inlines a file, both before any hook, so `policy.ts` never
-  sees them. `disableSkillShellExecution: true` closes the shell half.
+  sees them. `disableSkillShellExecution: true` would close the shell half for a
+  skill BODY, though not for arguments. The adapter does
+  NOT set it, deliberately: skills that shell out to gather context are the
+  normal kind, and this is the "your repo, your skills" line the security model
+  already draws. Turning it on is a product decision, not a bug fix.
 - **`disableAllHooks` governs filesystem hooks only.** The SDK-passed
   programmatic `PreToolUse` hook still fires, which is what makes it safe to pin.
 - **Session storage is keyed by encoded cwd**:
@@ -161,7 +173,6 @@ of the last three we relied on contradicted the SDK's own documentation.
 - **Background workflow sub-agents get refused at random**, upstream of our hook,
   with the CLI's "The user doesn't want to take this action right now". It is
   tool-agnostic and arrives in bursts, so a workflow's coverage is best-effort.
-  Measured 2026-07-26, `scripts/spike-workflow-grep.ts`.
 - **xhigh effort** needs Fable 5, Opus 4.7+ or Sonnet 5; elsewhere the SDK falls
   back to `high` silently. Opus 5 refuses a request that disables thinking at
   xhigh or max, so do not set a thinking option.
@@ -169,9 +180,10 @@ of the last three we relied on contradicted the SDK's own documentation.
 ## Process rules
 
 - **Do not add documents.** See the top of this file.
-- **Spike before building on SDK behaviour.** Probes go in the scratchpad, or
-  `scripts/spike-<name>.ts` if worth keeping, and run against a throwaway fixture
-  directory. Never a real repo, never a real deploy path.
+- **Probe before building on SDK behaviour.** Write the throwaway probe in the
+  scratchpad, run it against a throwaway fixture directory — never a real repo —
+  and then delete it. What you learned goes in a plain comment next to the code
+  that depends on it, stated as a fact. Not the story of how you found out.
 - **Build-time safety:** point the system only at a throwaway git repo while
   developing Condotto itself. Slack development runs in the real company
   workspace by explicit architect decision; prefer a dedicated test channel.

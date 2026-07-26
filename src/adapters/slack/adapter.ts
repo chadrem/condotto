@@ -172,9 +172,6 @@ export function parseMentionCommand(
   if (first === "plan" && words.length === 2) return { name: "plan", args: words[1]! };
   // Single whitespace-free token, so `split(/\s+/)` keeps it intact.
   if (first === "workflows" && words.length === 2) return { name: "workflows", args: words[1]! };
-  if (first === "workflows" && second === "write" && words.length === 3) {
-    return { name: "workflows", args: `write ${words[2]!}` };
-  }
   // Role delegation. args carry the resolved principal key (or "?") + the
   // lowercased remainder: grant -> "<key|?> <role> [everywhere]", revoke -> "<key|?> [everywhere]".
   if (first === "grant" && words.length >= 2 && words.length <= 4) {
@@ -396,10 +393,10 @@ export class SlackAdapter implements SurfaceAdapter {
             "`/condotto stop` (list this channel's sessions).\n" +
             "Inside a session thread (mention me): `@Condotto stop`, `@Condotto cancel` (stop the running turn), " +
             "`@Condotto clear` (forget the conversation, keep the worktree), " +
-            "`@Condotto status`, `@Condotto land`/`deploy` (gated), `@Condotto budget <usd>`.\n" +
+            "`@Condotto status`, `@Condotto budget <usd>`.\n" +
             "Tune the implementer: `@Condotto model <opus|sonnet|fable>`, `@Condotto effort <low…max>`, " +
             "`@Condotto subagents on|off`, `@Condotto workflows on|off`, `@Condotto ultra on|off`.\n" +
-            "Plan before building: `@Condotto plan on|off` — I propose a plan and nothing changes until you approve it.\n" +
+            "Plan before building: `@Condotto plan on|off` — I propose a plan and change nothing until you turn it off.\n" +
             "Run one of my skills: `@Condotto /<skill> [args]` — `@Condotto skills` lists them.\n" +
             "Roles: " +
             "`@Condotto grant @user architect [everywhere]`, `@Condotto revoke @user`.\n" +
@@ -536,18 +533,11 @@ export class SlackAdapter implements SurfaceAdapter {
     });
   }
 
-
   /**
-   * An Approve/Deny click. Bolt has already verified the request signature, so
-   * `body.user.id` is a genuine platform identity. We do the ephemeral
-   * "architects only" gate here for UX; the daemon re-verifies authority
-   * server-side before it acts on the emitted decision.
-   */
-
-  /**
-   * A guided-choice button click, e.g. picking a repo to assign. Same
-   * pattern as approvals: Bolt has verified the signature; we pre-check authority
-   * for UX on architect-only choices, and the core re-verifies when it acts.
+   * A guided-choice button click, e.g. picking a repo to assign. Bolt has already
+   * verified the request signature, so `body.user.id` is a genuine platform
+   * identity. We pre-check authority here for UX on architect-only choices; the
+   * core re-verifies server-side when it acts.
    */
   private async handleChoiceAction(args: {
     body: Record<string, any>;

@@ -102,16 +102,6 @@ function inflate(row: RawSessionRow | null): SessionRow | null {
   };
 }
 
-function parseJsonArray(json: string | null): string[] {
-  if (!json) return [];
-  try {
-    const v = JSON.parse(json);
-    return Array.isArray(v) ? v.filter((x) => typeof x === "string") : [];
-  } catch {
-    return [];
-  }
-}
-
 /**
  * Where a role mapping came from. `config` rows are wiped + reseeded from
  * `condotto.toml` (`architects`/`[[roles]]`) / `CONDOTTO_ARCHITECTS` on every boot
@@ -761,14 +751,12 @@ export class Store {
     this.db.query(`UPDATE sessions SET subagents = $v WHERE id = $id`).run({ id, v: on ? 1 : 0 });
   }
 
-  /** Toggle a session's architect self-approve (`@Condotto auto-approve`). */
-
   /**
    * Toggle a session's plan mode (`@Condotto plan on|off`).
    *
    * Deliberately couples to nothing. Unlike `setSessionWorkflows`, plan mode
-   * implies no other setting and is implied
-   * by none: it pauses workflows for the duration, but that is computed at turn
+   * implies no other setting and is implied by none: it pauses workflows for the
+   * duration, but that is computed at turn
    * time from `plan_mode` rather than written here, so `plan off` restores
    * whatever posture the thread had. Do not add an invariant.
    */
@@ -789,9 +777,8 @@ export class Store {
     }
   }
 
-
   /**
-   * Cumulative spend for a session in USD (runaway cap, DESIGN ). Sums the
+   * Cumulative spend for a session in USD (the runaway cap). Sums the
    * per-turn `cost_usd` the harness reported; SQLite returns NULL for an empty
    * set, coalesced to 0.
    */
@@ -1014,15 +1001,6 @@ export class Store {
         `SELECT role, source FROM roles WHERE principal = $p AND scope = $s`,
       )
       .get({ p: principal, s: scope });
-  }
-
-  /**
-   * Remove all role mappings. Config is the source of truth for roles, so
-   * the daemon clears and re-seeds at boot — removing a principal from config
-   * must actually revoke their authority, not leave a stale row behind.
-   */
-  clearRoles(): void {
-    this.db.run(`DELETE FROM roles`);
   }
 
 }

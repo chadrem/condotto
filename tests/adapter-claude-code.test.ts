@@ -160,7 +160,7 @@ describe("env-scrub the agent shell (rider a)", () => {
     expect(out.PATH).toBe("/usr/bin");
     expect(out.HOME).toBe("/Users/x");
     // The Claude subscription token never matches the prefixes — the SDK needs it
-    // (keychain OAuth AND a headless CLAUDE_CODE_OAUTH_TOKEN both survive; spike a).
+    // (keychain OAuth AND a headless CLAUDE_CODE_OAUTH_TOKEN both survive).
     expect(out.CLAUDE_CODE_OAUTH_TOKEN).toBe("oauth-keep");
     expect(out.MY_TOOLCHAIN).toBe("keep");
     expect("UNSET" in out).toBe(false); // undefined values are dropped
@@ -246,7 +246,7 @@ describe("claude-code adapter: background cost/cancel (rider b)", () => {
       yield { type: "system", subtype: "init", session_id: "s1" };
       yield { type: "system", subtype: "task_started", task_id: "w1", workflow_name: "audit" };
       yield { type: "system", subtype: "task_progress", description: "agent a", usage: { total_tokens: 100 } };
-      // The SDK budget brake fires, but the detached task keeps spending (spike b)…
+      // The SDK budget brake fires, but the detached task keeps spending…
       yield { type: "result", subtype: "error_max_budget_usd", terminal_reason: "budget_exhausted", total_cost_usd: 0.6 };
       // …until our interrupt() halts it; the SDK then settles with an aborted result.
       yield { type: "result", subtype: "error_during_execution", terminal_reason: "aborted_streaming", total_cost_usd: 0.63 };
@@ -271,7 +271,7 @@ describe("claude-code adapter: background cost/cancel (rider b)", () => {
       yield { type: "system", subtype: "task_progress", description: "agent a", usage: { total_tokens: 100 } };
       await held; // block until interrupt() releases (models a long-running workflow)
       yield { type: "result", subtype: "error_during_execution", terminal_reason: "aborted_streaming", total_cost_usd: 0.42 };
-      throw new Error("[ede_diagnostic] result_type=user stop_reason=tool_use"); // SDK post-abort throw (spike b)
+      throw new Error("[ede_diagnostic] result_type=user stop_reason=tool_use"); // SDK post-abort throw
     }, () => { interrupts++; releaseHold(); });
 
     const session = await new ClaudeCodeAdapter(q).create({ cwd: "/wt/x", system: "s" });
@@ -402,7 +402,7 @@ describe("claude-code adapter: tool posture", () => {
   // availability. Naming a read in `allowedTools` also happened to supply it, so
   // when workflows became the shipped default and emptied that list, the native
   // runtime — which does not ship Grep/Glob in its default set — left the agent
-  // with no search at all (spike 2026-07-26, scripts/spike-tools.ts). An SDK
+  // with no search at all. An SDK
   // upgrade must not be able to take search away again silently.
   for (const workflows of [true, false]) {
     test(`search tools are in the model's context with workflows ${workflows ? "on" : "off"}`, async () => {
@@ -560,7 +560,7 @@ describe("claude-code adapter: model + effort resolution", () => {
 // ---------------------------------------------------------------------------
 // Human skill dispatch.
 //
-// `scripts/spike-skills.ts` established live (2026-07-25) that putting `/name args`
+// Established live that putting `/name args`
 // at the start of the prompt expands a `disable-model-invocation: true` skill — the
 // only route to one, since that flag is enforced on the model-invocation path only —
 // and that a tool call inside such a turn still defers and re-drives normally.

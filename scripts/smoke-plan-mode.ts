@@ -4,11 +4,10 @@
 // What it exercises, in the order the daemon does it:
 //   1. plan mode ON  — the adapter runs permissionMode:"plan" with an absolute
 //      plansDirectory inside the worktree; reads run; an ordinary write is DENIED
-//      by our policy (not gated — nobody should be asked to approve one mid-plan);
-//   2. the PLAN arrives as the plan-file WRITE, gated with concern
-//      "plan-approval", and the whole plan text is readable in its `content`;
-//   3. approval — plan mode goes OFF and the session RESUMES with an empty prompt,
-//      the deferred write re-drives and is allowed from the recorded decision;
+//      by our policy;
+//   2. the PLAN arrives as the plan-file WRITE — the one write plan mode allows —
+//      and the whole plan text is readable in its `content`;
+//   3. an architect turns plan mode OFF and the session resumes;
 //   4. the agent IMPLEMENTS: the real code change lands in the worktree.
 //
 // The assertions are against the FILESYSTEM, not the transcript. An agent that
@@ -39,13 +38,8 @@ console.log(`[smoke] plans dir: ${plansDir}`);
 // Observations, all of which have to hold for a PASS.
 let planWritten = false; // the plan reached the gate as a plan
 let planTextSeen = ""; // and carried readable plan text
-let ordinaryWriteDenied = false; // an ordinary write was DENIED, not gated
+let ordinaryWriteDenied = false; // an ordinary write was DENIED while planning
 let readAllowedWhilePlanning = false;
-let deferredId = ""; // the tool_use_id the approval is recorded against
-
-/** Stands in for the approvals table: tool_use_id -> architect's decision. */
-const approved = new Set<string>();
-
 /** Plan mode is a per-turn posture, exactly as the session manager treats it. */
 let planMode = true;
 
@@ -77,7 +71,7 @@ const session = await adapter.create({
   cwd: worktree.path,
   system:
     "You are Condotto (plan-mode smoke). Be terse. When you are planning, write your plan " +
-    "to your plan file — that is how you present it for approval.",
+    "to your plan file — that is how you present it.",
 });
 
 // ---------------------------------------------------------------- 1 + 2: plan
@@ -104,7 +98,7 @@ console.log(`[smoke] the PLAN was written and flagged as the plan:   ${planWritt
 console.log(`[smoke] the plan text is readable (${planTextSeen.length} chars)`);
 if (planTextSeen) console.log(`[smoke] plan opens: ${JSON.stringify(planTextSeen.slice(0, 160))}`);
 
-// ------------------------------------------------------- 3 + 4: approve, build
+// -------------------------------------------------- 3 + 4: plan off, build
 let implemented = false;
 let planFileLanded = false;
 if (planWritten) {
@@ -128,7 +122,7 @@ if (planWritten) {
   implemented = existsSync(ledger) && (await Bun.file(ledger).text()).includes("subtract");
 }
 
-console.log(`\n[smoke] the approved plan file landed:                 ${planFileLanded}`);
+console.log(`\n[smoke] the plan file landed:                          ${planFileLanded}`);
 console.log(`[smoke] the agent IMPLEMENTED (src/ledger.ts changed):  ${implemented}`);
 
 const ok =
@@ -144,7 +138,7 @@ if (!ok) {
   process.exit(1);
 }
 console.log(
-  "[smoke] PASS — plan mode: read-only while planning, the plan gated and readable, " +
-    "approval resumed into a real code change. Through the real adapter and the real policy.",
+  "[smoke] PASS — plan mode: read-only while planning, the plan readable in the write " +
+    "that presents it, and `plan off` led to a real code change. Real adapter, real policy.",
 );
 process.exit(0);

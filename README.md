@@ -155,13 +155,13 @@ Create the app at <https://api.slack.com/apps> using **From scratch**. Then:
    `app_token`.
 2. **OAuth & Permissions → Bot Token Scopes**:
    - `chat:write`: post replies and buttons
-   - `chat:write.customize`: per-session display names, optional
    - `commands`: the `/condotto` slash command
    - `app_mentions:read`: the `@Condotto …` path
    - `channels:history`, `groups:history`: read thread messages. Add
      `im:history` / `mpim:history` only if you want DMs.
-   - `files:read`, `files:write`: files dropped in and files produced
    - `users:read`: so the agent calls people by name instead of by user ID
+
+   That is the whole list. Condotto asks for nothing else.
 3. **Install to workspace.** This mints the bot token (`xoxb-…`), your `bot_token`.
 4. **Event Subscriptions** on. Subscribe to `message.channels`, `message.groups`
    (plus `.im` / `.mpim` if used), and `app_mention`.
@@ -185,9 +185,11 @@ cp condotto.example.toml condotto.toml
 $EDITOR condotto.toml
 ```
 
-It is gitignored, because it holds your Slack tokens. Every value can also come
-from an environment variable, and the env var wins, so you can keep secrets out of
-the file if you prefer.
+It is gitignored, because it holds your Slack tokens. The tokens and the
+daemon-wide settings can each come from an environment variable instead
+(`SLACK_BOT_TOKEN`, `CONDOTTO_DB_PATH`, `CONDOTTO_COST_CAP_USD`, and so on), and
+the env var wins, so you can keep secrets out of the file. Repos and roles are
+file-only, and `ANTHROPIC_API_KEY` is the one value the file wins over.
 
 At a glance:
 

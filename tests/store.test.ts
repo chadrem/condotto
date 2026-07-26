@@ -366,17 +366,6 @@ describe("store session activation", () => {
   });
 });
 
-describe("store roles (revocation)", () => {
-  test("clearRoles removes all mappings so config can be authoritative (review #8)", () => {
-    const store = memoryStore();
-    store.setRole("slack:U1", "architect");
-    expect(store.isArchitect("slack:U1", "C1")).toBe(true);
-    store.clearRoles();
-    expect(store.isArchitect("slack:U1", "C1")).toBe(false);
-    expect(store.roleOf("slack:U1", "C1")).toBe("member");
-  });
-});
-
 describe("store roles — runtime grants", () => {
   test("setRole defaults to source='config'; a grant carries provenance", () => {
     const store = memoryStore();

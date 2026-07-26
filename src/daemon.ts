@@ -127,8 +127,8 @@ async function main(): Promise<void> {
   const architects = config.roles.filter((r) => r.role === "architect").length;
   if (architects === 0) {
     log(
-      "[daemon] WARNING: no architects configured — gated actions (writes, bash, deploys) " +
-        "will have no one who can approve them. Set `architects` in condotto.toml (or CONDOTTO_ARCHITECTS).",
+      "[daemon] WARNING: no architects configured — nobody can assign a thread or run the agent. " +
+        "Set `architects` in condotto.toml (or CONDOTTO_ARCHITECTS).",
     );
   } else {
     log(`[daemon] seeded ${config.roles.length} role mapping(s), ${architects} architect(s)`);

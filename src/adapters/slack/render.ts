@@ -1,6 +1,6 @@
 // Minimal model-markdown -> Slack mrkdwn rendering. Slack does not speak
 // GitHub markdown: bold is *text*, links are <url|text>, headers don't exist.
-// Escaping happens BEFORE link/mention markup is substituted (Appendix A4).
+// Escaping happens BEFORE link/mention markup is substituted.
 
 import type { ChoicePrompt } from "../../core/types";
 import { MENTION_TOKEN_RE } from "../../core/types";
@@ -22,7 +22,7 @@ const MAX_MENTIONS_PER_MESSAGE = 8; // bounded blast radius, counted per DISTINC
  * The core's surface-neutral mention token -> real Slack mention markup. This is
  * the ONE place in the daemon that mints a mention in message text.
  *
- * Ordering matters (Appendix A4): this runs AFTER `escapeSlack`, so the `<@…>` it
+ * Ordering matters: this runs AFTER `escapeSlack`, so the `<@…>` it
  * emits is not escaped back into literal text, and WHILE code is still held in
  * placeholders, so a token inside backticks or a fence stays literal — quoting a
  * token must never ping anyone.
@@ -83,9 +83,8 @@ export function renderMrkdwn(markdown: string): string {
 
 // -- guided choice rendering (Block Kit) ------------------------------------
 //
-// The only interactive control Condotto still posts. Approve/Deny buttons lived
-// here until 2026-07-26; the repo picker is what remains, and it is a question
-// rather than a permission.
+// The only interactive control Condotto posts: a repo picker. It asks a question;
+// it never grants a permission.
 
 export const CHOICE_ACTION = "condotto_choice";
 

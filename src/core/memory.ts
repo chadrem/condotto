@@ -21,34 +21,26 @@ import { dirname, join, resolve, sep } from "node:path";
 // A channel is the natural working context, so this keeps the value and respects
 // the existing scoping.
 //
-// HOW THE LEXICAL GAP IS CLOSED — three layers, in order of how much they carry.
-// `offendingPath` in the policy engine is purely LEXICAL (never realpath), a
-// deliberate documented trade that only holds while nothing inside a containment
+// HOW THE LEXICAL GAP IS CLOSED. `offendingPath` in the policy engine is purely
+// LEXICAL (never realpath), which only holds while nothing inside a containment
 // root can point outside it. The worktree earns that: `verifyWorkdir` proves it and
 // the tree dies at teardown. A memory root earns it neither way — it is
-// agent-writable and it is meant to OUTLIVE every worktree.
+// agent-writable and it is meant to OUTLIVE every worktree. So, three layers:
 //
 //  1. SHAPE (`isMemoryFile`, policy.ts). A memory path must be a `.md` file
-//     DIRECTLY in the root. No path can traverse THROUGH anything planted there,
-//     which is what turned `<memory>/r -> /` into a general host-read channel.
-//  2. PER-CALL PROOF (`verifyMemoryTarget`, below, called from the session
-//     manager's gate). Resolves the actual file at the moment of use and refuses
-//     symlinks, hard links, and anything not really inside the root.
-//  3. SWEEP (`prepare`, below). Hygiene: clears planted links between turns and
-//     surfaces them in the audit.
+//     DIRECTLY in the root, so no path can traverse THROUGH anything planted there
+//     — which is what turned `<memory>/r -> /` into a general host-read channel.
+//  2. PER-CALL PROOF (`verifyMemoryTarget`, below). Resolves the actual file at the
+//     moment of use and refuses symlinks, hard links, and anything not really
+//     inside the root. THIS is the boundary.
+//  3. SWEEP (`prepare`, below). Hygiene only: clears planted links between turns
+//     and surfaces them in the audit.
 //
-// Layer 2 is the one that holds. The original design leaned on layer 3 alone and
-// that was wrong (review 2026-07-20): a sweep is a start-of-turn SNAPSHOT, while
-// the agent goes on making tool calls after it, its shell can plant a link with any
-// program at all (the `ln` floor catches `ln`, not `python3 -c 'os.symlink(...)'`),
-// hard links were never swept, and a session whose own repo has memory OFF carries
-// no memory floor and can plant one from outside. None of that is reachable when
-// the question is asked per call, against the filesystem.
-//
-// Bash is also floored against this path in the policy engine (the agent does reach
-// for `cat MEMORY.md` unprompted — observed in the spike), but that floor is a
-// literal substring match and therefore best-effort: `~/…` and relative spellings
-// slip past it. It is a convenience rail, NOT a boundary — layer 2 is the boundary.
+// Leaning on layer 3 alone was wrong (review 2026-07-20): a sweep is a start-of-turn
+// snapshot, the agent keeps making calls after it, its shell can plant a link with
+// any program at all (the `ln` floor catches `ln`, not `python3 -c os.symlink`),
+// hard links were never swept, and a session whose repo has memory OFF carries no
+// memory floor and can plant one from outside. Asking per call closes all of it.
 
 /** A memory root that has been proven safe to hand to the policy engine. */
 export type MemoryCheck =
@@ -130,15 +122,8 @@ export class MemoryManager {
 }
 
 /**
- * Verify ONE memory target immediately before the call that uses it runs.
- *
- * This is the control that actually holds, and `prepare`'s sweep is only hygiene
- * around it. A start-of-turn sweep is a snapshot: the agent makes many tool calls
- * after it, and its shell can plant a link mid-turn with any program at all (the
- * `ln` floor catches `ln`, not `python3 -c 'os.symlink(...)'`). A second session
- * whose repo has memory off carries no memory floor and can plant one from
- * outside. So the question has to be asked per call, against the filesystem, at
- * the moment of use (review 2026-07-20).
+ * Verify ONE memory target immediately before the call that uses it runs. This is
+ * the control that holds — see the header comment for why a sweep cannot be.
  *
  * Three things are checked, and each closes a demonstrated attack:
  *  - **symlink** (`lstat`, never followed) — `<mem>/leak.md -> /etc/passwd`.

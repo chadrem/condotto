@@ -4,7 +4,7 @@
 //
 // Why this exists: without it, the framed header the agent reads carries only
 // `user=slack:U0ABBY`, so the agent's ONLY handle on a human is the raw id — and
-// it echoes that into replies (the raw-id bug, DECISIONS 2026-07-20). A name lets
+// it echoes that into replies (the raw-id bug). A name lets
 // it address people naturally and reserves the mention token for real pings.
 //
 // SECURITY: a display name is attacker-chosen free text. It never carries

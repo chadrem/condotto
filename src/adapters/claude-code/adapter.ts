@@ -28,8 +28,7 @@ export type QueryFn = (args: { prompt: unknown; options: Record<string, any> }) 
 
 // Claude Code harness adapter over the Agent SDK.
 //
-// Verified facts this code builds on (spike 2026-07-16 + live docs, see
-// Verified SDK facts (see CLAUDE.md, "SDK gotchas"):
+// Verified SDK facts this code builds on (see CLAUDE.md, "SDK gotchas"):
 //  - Auth is EITHER an Anthropic API key OR the machine's Claude subscription
 //    login (keychain OAuth / headless CLAUDE_CODE_OAUTH_TOKEN). The credential is
 //    resolved by the composition root (core/config loadAuthConfig) and handed in;
@@ -49,7 +48,7 @@ export type QueryFn = (args: { prompt: unknown; options: Record<string, any> }) 
 //    variable the subprocess needs inherited). That means it is readable from the
 //    agent's own shell, exactly as CLAUDE_CODE_OAUTH_TOKEN already is; what
 //    guards it is the policy hard-deny on commands naming either variable
-//    (core/policy.ts) plus CommandRunner's scrub. Do not weaken either.
+//    (core/policy.ts). Do not weaken it.
 //  - `resume: <sessionId>` + same cwd resumes a session across processes;
 //    session storage is keyed by encoded cwd, so cwd must be stable.
 //  - Without the claude_code systemPrompt preset the model has no environment
@@ -60,12 +59,9 @@ export type QueryFn = (args: { prompt: unknown; options: Record<string, any> }) 
 //  - allow -> PreToolUse `allow` (the hook still confines, which beats
 //             allowedTools per the SDK precedence).
 //  - deny  -> PreToolUse `deny` with a reason fed back to the agent.
-// There used to be a third answer, `gate`, mapped to the SDK's `defer` so a turn
-// could end un-executed and resume on an architect's click. Deleted 2026-07-26
-// with the approval loop. `canUseTool` remains as a deny-by-default backstop for
-// calls that reach the permission flow instead of the hook (a batched call, or a
-// workflow agent's call that carried no agent_id) — it runs the same core policy,
-// so the answer is identical wherever the call lands.
+// `canUseTool` is a backstop for calls that reach the permission flow instead of
+// the hook (a batched call, or a workflow agent's call that carried no agent_id).
+// It runs the same core policy, so the answer is identical wherever a call lands.
 
 /**
  * Opaque to the core. Owned entirely by this adapter. Deliberately does NOT
@@ -92,26 +88,26 @@ interface ClaudeCodeHandle {
 
 // `allowedTools` auto-approves reads (the hook still denies out-of-worktree
 // reads — a hook `deny` beats an allow rule). Write/Edit/Bash are deliberately
-// NEITHER allowed (they must gate) NOR disallowed (they must be reachable so the
-// agent can propose them). NOTE: when the Workflow tool is enabled we clear
+// NEITHER allowed (they must reach the hook) NOR disallowed (they must be
+// reachable at all). NOTE: when the Workflow tool is enabled we clear
 // allowedTools and drive reads through the PreToolUse hook instead — in
 // allowedTools a tool is "auto-approved before the callback is consulted", and for
 // a background workflow's sub-agents that shadow path silently DENIES the read
-// (spike 2026-07-18). Via the hook, reads still auto-allow (confined) for the main
+// Via the hook, reads still auto-allow (confined) for the main
 // agent and the workflow agents alike.
 //
 // This list governs AUTO-APPROVAL ONLY. Whether a tool exists for the session at
 // all is `BASE_TOOLS` below — a distinction that used to be invisible because
 // naming a tool here also happened to supply it, which is how emptying this list
-// silently took Grep and Glob away (spike 2026-07-26).
+// silently took Grep and Glob away.
 const ALLOWED_TOOLS = ["Read", "Glob", "Grep", "TodoWrite"];
 // Always removed from context, regardless of capability flags: slash commands and
 // network reads are out of scope for the implementer.
 //
 // `ExitPlanMode` stays listed but the entry is now belt-and-braces, not the
 // control: the runtime does not expose a plan-exit tool in a headless session at
-// all (spike 2026-07-25 — the model itself reported "ExitPlanMode isn't available
-// in this session" and its own ToolSearch found nothing), so removing it from this
+// all — the model itself reports "ExitPlanMode isn't available in this session"
+// and its own ToolSearch finds nothing — so removing it from this
 // list changes nothing. Condotto's plan mode does not need it: the model presents
 // a plan by WRITING it to `plansDirectory`, and that write is what gates. If a
 // future SDK restores the tool, leave it in NEITHER list — `allowedTools` is an
@@ -125,7 +121,7 @@ const BASE_DISALLOWED = ["ExitPlanMode", "SlashCommand", "WebFetch", "WebSearch"
  * `disallowedTools` still subtracts from it, so the per-turn capability toggles
  * below keep working exactly as before.
  *
- * Why this exists (spike 2026-07-26, `scripts/spike-tools.ts`): the native runtime
+ * Why this exists: the native runtime
  * does not ship `Grep`/`Glob` in its default set — sdk.d.ts says as much under
  * `tools` ("native builds may provide search via Bash `find`/`grep` instead...
  * List Grep/Glob here or in `allowedTools` to get them"). Naming them in
@@ -136,9 +132,9 @@ const BASE_DISALLOWED = ["ExitPlanMode", "SlashCommand", "WebFetch", "WebSearch"
  * `grep` through Bash. Putting them back in `allowedTools` is not available to us:
  * that is the shadow-deny this whole arrangement exists to avoid. `tools` is.
  *
- * The `{type:'preset',preset:'claude_code'}` value is NOT an alternative — the
- * spike measured it as byte-identical to omitting the option, Grep/Glob still
- * absent. Only an explicit list works.
+ * The `{type:'preset',preset:'claude_code'}` value is NOT an alternative — it is
+ * byte-identical to omitting the option, Grep/Glob still absent. Only an explicit
+ * list works.
  *
  * An explicit list REPLACES the default set, so this is also, deliberately, the
  * reachable tool surface. What it drops is everything the runtime ships that
@@ -155,7 +151,7 @@ const BASE_DISALLOWED = ["ExitPlanMode", "SlashCommand", "WebFetch", "WebSearch"
  * Names the runtime does not currently expose are harmless here (verified: a
  * `tools` entry that matches nothing is ignored, not an error), so tools
  * `policy.ts` classifies are listed even when this runtime lacks them —
- * `TodoWrite` and `MultiEdit` are absent from every posture the spike measured,
+ * `TodoWrite` and `MultiEdit` are absent from every posture measured,
  * and `Agent` is exposed only under its legacy `Task` name.
  *
  * NOTE for anything that later un-disallows a tool: removing a name from
@@ -170,7 +166,8 @@ const BASE_TOOLS = [
   // Side-effect-free (policy `NO_FS_TOOLS`).
   "ToolSearch",
   "TodoWrite",
-  // Gated actions — reachable so the agent can PROPOSE them, never auto-allowed.
+  // Actions. Reachable, and routed through the hook rather than auto-allowed, so
+  // the worktree boundary and the floor are applied to every one.
   "Bash",
   "Write",
   "Edit",
@@ -190,10 +187,10 @@ const BASE_TOOLS = [
  * default code-implementation phases; the CLI still wraps it with its own
  * read-only preamble and plan protocol.
  *
- * SHAPE ONLY, deliberately. What plan mode permits, what approval means, and what
- * a denial means are Condotto policy and live in `condottoSystemPrompt`, which the
- * core re-supplies on every resume. Restating the rules here would create a second
- * copy that ages independently — and the stale one would be this one.
+ * SHAPE ONLY, deliberately. What plan mode permits and what a denial means are
+ * Condotto policy and live in `condottoSystemPrompt`, which the core re-supplies on
+ * every resume. Restating the rules here would create a second copy that ages
+ * independently — and the stale one would be this one.
  */
 const PLAN_MODE_INSTRUCTIONS = [
   "You are planning inside a chat thread, not a terminal. Someone reads your plan on a phone.",
@@ -205,23 +202,22 @@ const PLAN_MODE_INSTRUCTIONS = [
   "- Write the plan to your plan file. Keep it short enough to read in one message: what you",
   "  would change, which files you would touch, and how the change gets verified. Ordered",
   "  steps, no headers, no preamble. Say what you would NOT do if that is the risky part.",
-  "- Writing the plan file is how you present the plan for approval; it is the one write you",
-  "  can make right now. Do not try to implement anything first.",
+  "- Writing the plan file is how you present the plan; it is the one write you can make",
+  "  right now. Do not try to implement anything first.",
 ].join("\n");
 // Subagent tools, disabled BY DEFAULT (subagents are architect opt-in). Both the
 // current `Agent` name and the legacy `Task` alias are listed so "subagents off"
 // is genuinely off regardless of which the runtime exposes. Un-disallowed per-turn
 // only when the session enables the capability; even then every tool call a
-// subagent makes still hits the PreToolUse gate (agent_id-tagged).
+// subagent makes still hits the PreToolUse hook (agent_id-tagged).
 const SUBAGENT_TOOLS = ["Agent", "Task"];
 // The multi-agent Workflow tool (architect opt-in). Disabled by default and
 // re-enabled per-turn only when the session enables workflows. When enabled the
 // query runs under `permissionMode: "bypassPermissions"` so the background
 // workflow's sub-agent tool calls route THROUGH the PreToolUse hook (agent_id-
-// tagged) where the read-only subagent policy confines them — the hook still
-// outranks permission mode, so main-agent defer/deny are unaffected (spike
-// 2026-07-18). Was disabled outright earlier (which used
-// permissionMode "default", under which the same agents default-DENY off-gate).
+// tagged), where the same policy confines them as everything else. The hook
+// outranks permission mode. Leaving it on permissionMode
+// "default" instead made those agents default-DENY off-hook.
 const WORKFLOW_TOOL = "Workflow";
 
 // Model/effort. The core passes an opaque model token; the adapter is the only
@@ -241,13 +237,13 @@ const SUPPORTED_MODELS = Object.keys(MODEL_IDS);
 const SUPPORTED_EFFORTS = ["low", "medium", "high", "xhigh", "max"];
 
 /**
- * Daemon-side subagent definitions. When the architect enables
- * subagents, the implementer fans out to these for parallel READ-ONLY work; their
- * tool calls still hit the gate (agent_id-tagged), and the restricted `tools` list
- * is defense-in-depth. Subagents never write/run shell — the policy engine denies
- * any subagent-initiated gated call (defer→resume is main-agent-only), so the main
- * agent performs mutations through the approval loop. Daemon-defined (not from repo
- * config), so enabling them needs no repo trust.
+ * Daemon-side subagent definitions, offered to the implementer when the architect
+ * enables subagents.
+ *
+ * `explorer` is read-only by its own `tools` list, not by policy — the policy is
+ * origin-blind. Investigation is what fan-out is good at, and one agent holding the
+ * whole edit is what keeps a change coherent, so the narrow list is a deliberate
+ * shape rather than a confinement.
  */
 const SUBAGENT_DEFS = {
   explorer: {
@@ -300,7 +296,7 @@ function toolPosture(h: HarnessTurnOptions | undefined): {
 // Skill enumeration
 //
 // Condotto builds its OWN list of dispatchable skills rather than trusting the
-// runtime's `slash_commands`, for four reasons the spike made concrete:
+// runtime's `slash_commands`, for four reasons:
 //
 //  1. Provenance. `slash_commands` is a flat `string[]`; it cannot say WHICH file
 //     a name resolves to. Since a repo skill and an operator skill may share a
@@ -311,15 +307,14 @@ function toolPosture(h: HarnessTurnOptions | undefined): {
 //     ships next. A denylist over that set fails OPEN on upgrade, silently. An
 //     allowlist of files we found ourselves fails closed.
 //  3. Frontmatter is inspectable before dispatch. `context: fork` runs the skill
-//     as a SUBAGENT (verified: its Read and Bash carried an `agent_id`), where
-//     `evaluateConfined` denies bash — so it would half-run. Refuse it up front.
+//     as a SUBAGENT (verified: its Read and Bash carried an `agent_id`), which
+//     re-enables a fan-out the architect may have turned off. Refuse it up front.
 //  4. `@path` in a skill BODY inlines a file with no tool call at all, outside
 //     worktree confinement (verified live). Refuse bodies that use it.
 //
-// This is a *shape* check over vouched content, not a sandbox: repo skills load
-// only for `trusted` repos and operator skills are the operator's own. It exists
-// so an architect is never surprised by which file ran, not to make hostile skills
-// safe — nothing here would.
+// This is a *shape* check, not a sandbox: the skills are the operator's own and
+// the repo's own. It exists so an architect is never surprised by which file ran,
+// not to make a hostile skill safe — nothing here would.
 
 /** Where a dispatchable skill may come from, and what it is called there. */
 const SKILL_DIRS = [
@@ -329,9 +324,9 @@ const SKILL_DIRS = [
 
 /** Frontmatter keys that change HOW a skill runs in ways Condotto must not lose. */
 const REFUSED_FRONTMATTER: { key: string; value?: string; why: string }[] = [
-  // Runs the skill in a subagent, which re-enables fan-out the architect may have
-  // turned off AND lands its calls in `evaluateConfined`, where bash is denied.
-  { key: "context", value: "fork", why: "it runs in a subagent, where Condotto denies the shell it would need" },
+  // Runs the skill in a subagent, re-enabling a fan-out the architect may have
+  // turned off, and hiding which file actually ran behind a delegation.
+  { key: "context", value: "fork", why: "it runs in a subagent instead of this thread's session" },
   // The architect owns model/effort through `@Condotto model` / `effort`.
   { key: "model", why: "it overrides the model the architect chose for this thread" },
   { key: "effort", why: "it overrides the reasoning effort the architect chose for this thread" },
@@ -479,7 +474,7 @@ export function enumerateSkills(opts: {
  * (CLAUDE_SDK_CAN_USE_TOOL_SHADOWED). For Condotto that is expected and correct:
  * read-only tools are auto-approved by allowedTools and confined by the
  * PreToolUse hook, so they must never reach the deny-by-default canUseTool
- * backstop — only gated tools do. Left alone it masquerades
+ * backstop. Left alone the warning masquerades
  * as an error in the daemon log after every turn. Silence exactly that one
  * warning code (nothing else) across every emission path. Idempotent; runs once
  * on import so both the daemon and the smoke scripts get clean output.
@@ -517,22 +512,19 @@ suppressKnownSdkWarnings();
 /** Abort a turn if the SDK produces nothing at all for this long. */
 const TURN_INACTIVITY_MS = 10 * 60_000;
 /** After we ask for an interrupt, wait only this long to drain the final result's
- *  cost before giving up (the SDK settles the aborted turn fast — spike b, ~567ms). */
+ *  cost before giving up (the SDK settles an aborted turn in well under a second). */
 const DRAIN_AFTER_ABORT_MS = 30_000;
 
 /**
- * rider (a): env-scrub the agent shell. The SDK's `options.env` REPLACES the
+ * Env-scrub the agent shell. The SDK's `options.env` REPLACES the
  * subprocess environment entirely (sdk.d.ts:1411), so this is a DENYLIST over a
  * spread of `process.env`: drop the daemon's own secret namespaces (`SLACK_*`,
  * `CONDOTTO_*`) so an in-worktree Bash command can never read the daemon's Slack
  * tokens or config from its own environ, while PRESERVING everything the toolchain
  * and the Claude Code CLI need — `PATH`/`HOME`, the repo's build env, and the Claude
  * auth token (which never matches these prefixes, so keychain OAuth AND a headless
- * `CLAUDE_CODE_OAUTH_TOKEN` both survive). Belt-and-braces over the  policy floor
- * (credential/secret hard-deny stays); spike-proven under keychain OAuth
- * (verified 2026-07-19). Distinct from CommandRunner's scrub, which
- * drops a fixed NAME list incl. the Claude auth token because a deploy command,
- * unlike the agent, does not need it.
+ * `CLAUDE_CODE_OAUTH_TOKEN` both survive). Belt-and-braces over the policy floor's
+ * credential hard-deny. Verified under keychain OAuth.
  */
 const DAEMON_SECRET_ENV_PREFIXES = ["SLACK_", "CONDOTTO_"];
 
@@ -720,7 +712,7 @@ class ClaudeCodeSession implements HarnessSession {
 
   /**
    * The prompt for a turn. A skill is dispatched by putting `/name args` at the
-   * START of the prompt — verified end to end (spike 2026-07-25), including with
+   * START of the prompt — verified end to end, including with
    * `SlashCommand` still in `disallowedTools` and with `resume` set. Minting the
    * `/` is this adapter's job and only this adapter's; the core passes a bare name.
    */
@@ -763,9 +755,8 @@ class ClaudeCodeSession implements HarnessSession {
           id: toolUseID ?? "",
           name: call.tool_name ?? "unknown",
           input: call.tool_input,
-          // Present ONLY inside a subagent. The core policy treats
-          // subagent-initiated calls read-only (gated actions denied) since a
-          // subagent call can't be paused for approval (defer is main-thread-only).
+          // Present ONLY inside a subagent. Audit detail — the core policy is
+          // origin-blind and gives it the same answer as the main agent's call.
           agentId: call.agent_id,
         });
       } catch (err) {
@@ -800,18 +791,13 @@ class ClaudeCodeSession implements HarnessSession {
     const settingSources: ("user" | "project" | "local")[] = ["project"];
 
     // Workflows run under bypassPermissions ONLY so the background workflow's
-    // sub-agent tool calls route through the PreToolUse hook (agent_id-tagged) where
-    // the policy confines them — NOT to weaken gating. Hooks outrank permission
-    // mode, so main-agent defer/deny and the canUseTool backstop still hold (spike
-    // 2026-07-18: diag3/diag4). Non-workflow sessions stay "default" (unchanged).
+    // sub-agent tool calls route through the PreToolUse hook (agent_id-tagged) and
+    // get evaluated — NOT to weaken the boundary. Hooks outrank permission mode, so
+    // the hook and the canUseTool backstop both still hold.
     //
-    // Plan mode wins over workflows: the option holds one value, and a workflow
-    // launch is gate-tier, which the policy denies while planning — so
-    // bypassPermissions would be a mode with nothing left to serve. The core
-    // already stops sending `workflows` during plan mode; this ordering is the
-    // belt to that braces. Verified 2026-07-25 (spike Q1): the PreToolUse hook
-    // still fires under "plan" and `defer` still yields deferred_tool_use, so the
-    // whole gate handshake survives the mode.
+    // Plan mode wins over workflows: the option holds one value, and the core
+    // already stops sending `workflows` during plan mode. Verified 2026-07-25: the
+    // PreToolUse hook still fires under "plan", so the boundary survives the mode.
     const permissionMode = h?.planMode
       ? ("plan" as const)
       : h?.workflows
@@ -850,11 +836,11 @@ class ClaudeCodeSession implements HarnessSession {
         // when cwd already IS the root, keeping ordinary sessions byte-identical.
         ...(this.root && this.root !== this.cwd ? { additionalDirectories: [this.root] } : {}),
         resume: this._handle.sessionId ?? undefined,
-        // rider (a): scrub the daemon's own SLACK_*/CONDOTTO_* secrets from the
-        // environment the agent's Bash inherits (belt-and-braces over the  policy
+        // Scrub the daemon's own SLACK_*/CONDOTTO_* secrets from the environment
+        // the agent's Bash inherits (belt-and-braces over the policy
         // floor). options.env REPLACES the subprocess env, so this is a denylist
         // spread of process.env that keeps PATH/HOME + the toolchain + the Claude
-        // auth token the SDK needs (spike-proven under keychain OAuth).
+        // auth token the SDK needs (verified under keychain OAuth).
         env: scrubDaemonEnv(process.env, this.auth),
         // Point the SDK at the native `claude` CLI when running as a compiled
         // binary; omitted under `bun run`, where the SDK finds it itself.
@@ -877,10 +863,10 @@ class ClaudeCodeSession implements HarnessSession {
         ...(typeof input.budgetUsd === "number" && input.budgetUsd > 0
           ? { maxBudgetUsd: input.budgetUsd }
           : {}),
-        // When subagents are enabled, offer the read-only `explorer`
-        // subagent (restricted toolset — defense-in-depth over the gate).
+        // When subagents are enabled, offer the read-only `explorer` subagent. Its
+        // narrow toolset is a deliberate shape, not a confinement — see SUBAGENT_DEFS.
         ...(h?.subagents ? { agents: SUBAGENT_DEFS } : {}),
-        // Load the trusted repo's skills alongside its project settings.
+        // Load the repo's own skills alongside its project settings.
         skills: "all" as const,
         // Untrusted (default): never load filesystem settings (CLAUDE.md,
         // .mcp.json, .claude/) from the worktree — repo content is untrusted
@@ -900,8 +886,8 @@ class ClaudeCodeSession implements HarnessSession {
           //         memory on by themselves. Memory outlives the worktree, which is
           //         what makes it worth the operator naming the repo.
           // The agent writes memory with ordinary Write/Edit, so those calls hit the
-          // hook below and the core's memory rules govern them (spike 2026-07-20).
-          // NOTE: deliberately NOT added to `additionalDirectories` — the spike showed
+          // hook below and the core's memory rules govern them.
+          // NOTE: deliberately NOT added to `additionalDirectories` — that showed
           // the write lands without it, so widening the SDK's own scope buys nothing.
           ...(h?.memoryDir
             ? { autoMemoryEnabled: true, autoMemoryDirectory: h.memoryDir }
@@ -909,7 +895,7 @@ class ClaudeCodeSession implements HarnessSession {
           // Where the runtime writes plan files. REQUIRED whenever plan mode is on,
           // and the core supplies it absolute (see HarnessTurnOptions.plansDir).
           // Two facts make this load-bearing rather than cosmetic, both verified
-          // 2026-07-25 (spike Q3):
+          // Verified:
           //   - the default is `~/.claude/plans/`, OUTSIDE the worktree, which
           //     policy.ts hard-denies with no approval possible — the agent could
           //     never present a plan at all;
@@ -939,7 +925,7 @@ class ClaudeCodeSession implements HarnessSession {
     let sawResult = false;
     // A workflow turn produces MULTIPLE `result` messages: an intermediate
     // "workflow launched; waiting…" success, then the FINAL synthesized success
-    // once the background workflow completes (spike 2026-07-18). Buffer the latest
+    // once the background workflow completes. Buffer the latest
     // success and deliver only it at turn end, so the human sees the real answer,
     // not "launched; waiting". A terminal deferred/error supersedes and clears it.
     let pendingReply: { text: string; costUsd?: number } | null = null;
@@ -951,7 +937,7 @@ class ClaudeCodeSession implements HarnessSession {
     // `@Condotto cancel`, or a budget breach that hit a RUNNING workflow — we stop the
     // (possibly detached) background task and DRAIN the aborted result's cost into the
     // ledger, then post one notice. `q.interrupt()` is the only lever that actually
-    // halts a detached workflow (maxBudgetUsd does NOT — spike b), and the aborted
+    // halts a detached workflow (maxBudgetUsd does NOT), and the aborted
     // result still carries total_cost_usd, so the runaway cap stays accurate.
     let abortReason: AbortReason | null = null;
     let drainedCost: number | undefined;
@@ -980,7 +966,7 @@ class ClaudeCodeSession implements HarnessSession {
           step = await Promise.race([pending, timeout]).finally(() => clearTimeout(timer));
         } catch (pullErr) {
           // After an interrupt/abort the SDK can THROW on the pull that FOLLOWS the
-          // terminal result (observed: [ede_diagnostic] … stop_reason=tool_use — spike
+          // terminal result (observed: [ede_diagnostic] … stop_reason=tool_use
           // b). The result + cost already arrived, so if an abort is in flight this is
           // the expected clean end. Otherwise it's a real failure — rethrow.
           if (aborting) break;
@@ -1100,7 +1086,7 @@ class ClaudeCodeSession implements HarnessSession {
             if (sawWorkflow) {
               // The budget brake fired DURING a workflow. The SDK signal alone does
               // NOT stop the detached background task — it keeps spending past the cap
-              // (spike b). Interrupt to actually halt it (auto-cancel on breach), then
+              // Interrupt to actually halt it (auto-cancel on breach), then
               // drain + report once via the post-loop notice.
               abortReason = "budget";
               if (cost !== undefined) drainedCost = cost;
@@ -1185,7 +1171,7 @@ class ClaudeCodeSession implements HarnessSession {
   /**
    * Interrupt the in-flight turn's query: halts a wedged/over-cap multi-agent
    * workflow — `q.interrupt()` is the only lever that actually stops the DETACHED
-   * background task (spike b) — and lets the turn loop drain the aborted result's
+   * background task — and lets the turn loop drain the aborted result's
    * cost. A no-op when no turn is running, so an architect `@Condotto cancel` on an
    * idle session does nothing. Only sets `cancelRequested` when a query is actually
    * live, so it can never taint a subsequent normal turn.
@@ -1289,11 +1275,10 @@ export class ClaudeCodeAdapter implements HarnessAdapter {
     // A human can dispatch a skill by name: `prompt: "/name args"` expands it
     // inline, which is the ONLY route to a `disable-model-invocation: true` skill
     // (that flag is enforced on the model-invocation route only). Verified live,
-    // spike 2026-07-25.
     skillInvocation: true,
     // `permissionMode: "plan"` runs a read-only planning turn, and the PreToolUse
     // gate survives it intact — the hook still fires and `defer` still yields a
-    // deferred_tool_use (spike 2026-07-25, Q1). The plan reaches Condotto as the
+    // deferred_tool_use. The plan reaches Condotto as the
     // plan-file write, since the runtime exposes no plan-exit tool headless.
     planMode: true,
   };

@@ -42,9 +42,12 @@ export function mentionToken(p: Principal | string): string {
 export const MENTION_TOKEN_RE = /@\[\[([a-z0-9_]+:[^\][\s]{1,64})\]\]/gi;
 
 /**
- * Command authority. Only `architect` may approve gated actions,
- * order landings/deploys, or stop sessions. `member` converses; `observer` is
- * read-as-context only. Anyone not explicitly mapped defaults to `member`.
+ * Command authority. Only an `architect` runs the agent or stops a session.
+ * `member` and `observer` both converse: their messages are held and folded into
+ * the next architect turn. Anyone not explicitly mapped defaults to `member`.
+ *
+ * The two non-architect roles are deliberately identical in behaviour — the
+ * distinction is a label an operator can record, not a rule the code enforces.
  */
 export type Role = "architect" | "member" | "observer";
 
@@ -62,6 +65,16 @@ export interface ConversationRef {
   conversationId: string; // stable thread key within the container
 }
 
+/**
+ * A file someone dropped in the thread.
+ *
+ * NOT WIRED THROUGH YET. The Slack adapter fills these in, the core carries them
+ * on the event, and nothing reads them: `TurnInput` has no attachment field, so
+ * the agent never learns a file was attached. `HarnessCapabilities.imageInput`
+ * says the runtime would accept one. Whoever closes the gap needs a `TurnInput`
+ * field, a fetch of `url` in the adapter (which needs the `files:read` scope the
+ * README does not currently ask for), and a line in the README.
+ */
 export interface Attachment {
   kind: "image" | "file";
   name?: string;
@@ -78,32 +91,29 @@ export type CommandName =
   // interrupt the session's IN-FLIGHT turn (a wedged/over-cap multi-agent
   // workflow) without ending the session, mirroring `stop`'s architect-only,
   // thread-scoped shape. The detached background task is halted via q.interrupt()
-  // and its spend is drained into the ledger (spike 2026-07-19).
+  // and its spend is drained into the ledger.
   | "cancel"
   // wipe the agent's conversation context WITHOUT ending the session: the thread,
   // worktree, branch, uncommitted work, settings, roles, memory and cost ledger all
   // survive. The core drops the opaque harness handle so the next attach takes
   // getOrAttachHarness's create() branch — no harness feature is required and no
-  // model turn is spent. The worktree-write opt-in is revoked (its consent was bound
-  // to the context that just went away).
+  // model turn is spent.
   | "clear"
   | "budget"
   | "help"
   // harness capability controls (architect-only). model/effort tune the
-  // implementer; subagents/ultra expose multi-agent power (opt-in, gated).
+  // implementer; subagents/workflows/ultra widen the fan-out. Args are "on"|"off".
   | "model"
   | "effort"
   | "subagents"
-  // the multi-agent Workflow tool (opt-in, gated + confined). Args are
-  // "on"|"off" or "write on"|"write off" (the worktree-write opt-in).
   | "workflows"
   | "ultra"
   // Dispatch a harness skill / slash command on an architect's behalf
   // (`@Condotto /ship <args>`). Args are "<name> [raw args…]". This is the only
   // path to a skill the AGENT cannot invoke: a skill marked
   // `disable-model-invocation` is withheld from the model and reachable only by a
-  // human naming it. The core validates the name and REFUSES unsafe argument text
-  // (see `checkSkillArgs`); the adapter owns the harness's invocation syntax.
+  // human naming it. The core validates the name and normalizes the argument text
+  // (`checkSkillArgs`); the adapter owns the harness's invocation syntax.
   | "skill"
   // List what this session's harness will dispatch (architect-only).
   | "skills"
@@ -116,9 +126,8 @@ export type CommandName =
   | "revoke"
   // read-only planning for this thread ("on"|"off", architect-only, in-thread
   // only — no config knob and no repo default, because it is a per-TASK mode).
-  // While on, only genuine reads run; the agent presents a plan, the plan is
-  // posted for Approve/Deny, and approving flips the mode off and resumes
-  // straight into implementation.
+  // While on, only genuine reads run and the agent presents a plan into the
+  // thread. `plan off` is how it ends; there is no button.
   | "plan";
 
 export type InboundEvent =
@@ -214,15 +223,13 @@ export interface ToolCall {
    * under bypassPermissions the background workflow's tool calls route through
    * the PreToolUse hook with an `agent_id`.
    *
-   * AUDIT DETAIL ONLY since 2026-07-26. It used to make the policy stricter —
-   * a subagent's gated call was denied because it could not be paused for
-   * approval — and with no approval to wait for, origin no longer changes the
-   * answer.
+   * AUDIT DETAIL ONLY. The policy is origin-blind — a subagent acting inside an
+   * architect's turn is the architect's turn.
    */
   agentId?: string;
   /**
-   * Set when the call reached the gate via the harness's backstop path (Claude
-   * Code: `canUseTool`) rather than the main PreToolUse hook. Audit detail, like
+   * Set when the call arrived on the harness's backstop path (Claude Code:
+   * `canUseTool`) rather than the main PreToolUse hook. Audit detail, like
    * `agentId`: the floor applies identically on both paths.
    */
   escaped?: boolean;
@@ -230,15 +237,10 @@ export interface ToolCall {
 
 /**
  * THE capability: called for every tool call; the adapter must hold the call
- * un-executed until this resolves.
+ * un-executed until this resolves. That is what makes a deny mean something —
+ * never simulate it by watching output.
  *  - `allow` — run it now (optionally with rewritten input).
  *  - `deny`  — refuse; the reason is fed back to the agent so it adapts.
- *
- * There used to be a third answer, `gate`, which the adapter mapped to the SDK's
- * `defer`: the turn ended with the call preserved and a Slack button resumed it.
- * It is gone (2026-07-26) along with the approval loop. Holding the call
- * un-executed until this resolves is still the non-negotiable capability — that
- * is what makes a deny mean something.
  */
 export type GateDecision =
   | { decision: "allow"; updatedInput?: unknown }
@@ -270,15 +272,12 @@ export type TurnEvent =
 export type SessionHandle = unknown;
 
 /**
- * Per-turn harness capability configuration. Everything here is OPAQUE to
- * the core: it persists these values and passes them through, never interpreting
- * them as policy. The adapter maps `model`
- * tokens to concrete SDK model IDs and validates `effort`; `subagents`/`workflows`
- * toggle multi-agent tools (every call still hits the PreToolUse hook
- * inside subagents too, so their tool calls are gated exactly like the main
- * agent's). The core
- * validates `model`/`effort` against `HarnessCapabilities` before they ever
- * reach here (a bad value is rejected at the command, never silently applied).
+ * Per-turn harness capability configuration. Everything here is OPAQUE to the
+ * core: it persists these values and passes them through, never interpreting them
+ * as policy. The adapter maps `model` tokens to SDK model IDs and validates
+ * `effort`; `subagents`/`workflows` toggle the multi-agent tools. The core
+ * validates `model`/`effort` against `HarnessCapabilities` before they ever reach
+ * here, so a bad value is rejected at the command rather than silently applied.
  */
 export interface HarnessTurnOptions {
   /** Model token (e.g. "opus"); the adapter maps it to the SDK model ID. Omit = default. */
@@ -292,12 +291,10 @@ export interface HarnessTurnOptions {
    * When on, the adapter re-enables the `Workflow` tool AND switches the query to
    * `permissionMode: "bypassPermissions"` — which, contrary to its name, routes the
    * background workflow's sub-agent tool calls THROUGH our PreToolUse hook (with an
-   * `agent_id`) instead of the SDK's default-deny, so the hook still gates them
-   * read-only (spike 2026-07-18). The main agent's defer→approve→
-   * resume loop is unaffected (hooks outrank permission mode). Implies subagents.
+   * `agent_id`) instead of the SDK's default-deny, so every one of them is still
+   * evaluated. Hooks outrank permission mode. Implies subagents.
    */
   workflows?: boolean;
-  /** Load the repo's project settings + skills. TRUSTED repos only. */
   /**
    * Absolute directory for this session's durable agent memory, or omitted when
    * the repo has not been vouched for memory. Supplied by the core only after
@@ -319,10 +316,9 @@ export interface HarnessTurnOptions {
    * never mints an SDK mode string, just as it never mints a model id.
    *
    * This is a CAPABILITY flag, not the policy. What actually keeps a planning
-   * session read-only is `PolicyContext.planMode` in the core gate; the harness
-   * layer is a second, weaker line (it does not cover allowlisted bash or the
-   * worktree-write opt-in). Turning this on without the policy flag would be a
-   * session that only looks read-only.
+   * session read-only is `PolicyContext.planMode`; the harness layer is a second,
+   * weaker line. Turning this on without the policy flag would be a session that
+   * only looks read-only.
    */
   planMode?: boolean;
   /**
@@ -331,17 +327,13 @@ export interface HarnessTurnOptions {
    *
    * Not a detail the core could leave to the adapter. The Claude Code runtime
    * defaults to `~/.claude/plans/`, which is outside the worktree and therefore
-   * hard-denied with no approval possible — the agent could never present a plan
-   * at all. And a relative path resolves against `cwd`, which for a monorepo
-   * session is the sub-project rather than the worktree root (spike 2026-07-25).
-   * The core owns the confinement boundary, so the core names the directory.
+   * hard-denied — the agent could never present a plan at all. And a relative path
+   * resolves against `cwd`, which for a monorepo session is the sub-project rather
+   * than the worktree root. The core owns the confinement
+   * boundary, so the core names the directory.
    */
   plansDir?: string;
 }
-// NOTE: the informed worktree-write opt-in is NOT a harness-tool
-// option — it does not change the model, tools, or permission mode. It is a POLICY
-// decision (PolicyContext.workflowWrite, set by the session manager from the
-// session row), so it lives in the core gate, not in HarnessTurnOptions.
 
 /**
  * A skill / slash command a human may dispatch into a session. DISPLAY DATA ONLY —
@@ -391,9 +383,8 @@ export interface TurnInput {
    *
    * A skill turn carries `text: ""`: there is no message, so there is no framed
    * body. Authority was established at the command, where the invoker was proven an
-   * architect on a `verified` surface. Everything the skill then does still passes
-   * the gate — verified end to end (spike 2026-07-25: a Write inside a skill turn
-   * defers and re-drives on the empty-prompt resume).
+   * architect on a `verified` surface. Every tool call the skill then makes is
+   * evaluated exactly like any other turn's.
    */
   skill?: { name: string; args?: string };
 }
@@ -438,7 +429,7 @@ export interface HarnessCapabilities {
    *
    * Unlike `mechanicalGating` this is negotiable: a harness without it simply has
    * no plan mode. The read-only guarantee itself does NOT depend on it, since the
-   * core gate enforces that independently.
+   * core policy enforces that independently.
    */
   planMode: boolean;
 }
@@ -455,10 +446,10 @@ export interface HarnessAdapter {
    */
   create(opts: { cwd: string; system: string; root?: string }): Promise<HarnessSession>;
   /**
-   * `system` is re-supplied on every resume: the Condotto protocol prompt is
-   * core policy, not session state, so a posture change (e.g. read-only → gated)
-   * must reach existing sessions. The adapter must NOT freeze it in the handle.
-   * `root` carries the same meaning as in `create`.
+   * `system` is re-supplied on every resume: the Condotto protocol prompt is core
+   * policy, not session state, so a posture change (plan mode on, memory enabled,
+   * workflows off) must reach existing sessions. The adapter must NOT freeze it in
+   * the handle. `root` carries the same meaning as in `create`.
    */
   resume(handle: SessionHandle, cwd: string, system: string, root?: string): Promise<HarnessSession>;
 }
@@ -486,38 +477,29 @@ export interface RepoConfig {
   defaultModel?: string;
   defaultEffort?: string;
   /**
-   * Per-repo default for the architect self-approve setting. Seeded onto
-   * each new session (the architect can then toggle it per thread with
-   * `@Condotto auto-approve on|off`). `undefined` = fall back to the daemon-wide
-   * default (`SessionManagerOptions.defaultAutoApprove`, on by default).
-   */
-  autoApprove?: boolean;
-  /**
    * Per-repo harness posture, seeded onto each new session (the architect can
    * then toggle either per thread). `undefined` = fall back to the daemon-wide
    * default (`SessionManagerOptions.defaultSubagents`/`defaultWorkflows`, both
    * on). `workflows` implies `subagents` — the seed asserts that invariant, so
    * `workflows = true, subagents = false` still starts with subagents on.
    *
-   * NOT a vouch like `memory`: these widen how much work a session
-   * can do in parallel, not what authority it carries. Confined (subagent-,
-   * workflow-, and escaped-origin) calls stay read-only under `evaluateConfined`
-   * either way.
+   * NOT a vouch like `memory`: these widen how much work a session can do in
+   * parallel, not what it may reach. A subagent is confined exactly as the main
+   * agent is.
    */
   subagents?: boolean;
   workflows?: boolean;
   /**
    * Durable agent memory for this repo. When on, the session gets a
    * Condotto-owned memory directory (scoped per repo AND channel) that the SDK's
-   * auto-memory feature reads at session start and the agent writes through the
-   *  gate, so knowledge compounds across threads instead of dying with each
+   * auto-memory feature reads at session start and the agent writes with
+   * Write/Edit, so knowledge compounds across threads instead of dying with each
    * worktree. Default (false/undefined) = off, and auto-memory is pinned off in
    * the harness rather than merely unreachable.
    *
-   * An operator VOUCH, not a per-session toggle: what one thread
-   * records is loaded into the SYSTEM PROMPT of every later thread in that
-   * channel — above `framing.ts`, and so outside the `user=`-header authority
-   * rule. See DECISIONS 2026-07-20.
+   * An operator decision, not a per-session toggle: what one thread records is
+   * loaded into the SYSTEM PROMPT of every later thread in that channel — above
+   * `framing.ts`, and so outside the `user=`-header authority rule.
    */
   memory?: boolean;
 }

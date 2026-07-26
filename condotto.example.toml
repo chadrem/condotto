@@ -97,10 +97,10 @@ effort = "xhigh"            # reasoning effort: low | medium | high | xhigh | ma
                             #   coding and agentic work. Costs meaningfully more
                             #   than high; step down if your threads don't need it.
                             #   Env override: CONDOTTO_DEFAULT_EFFORT
-subagents = true            # the agent can fan out to parallel READ-ONLY subagents.
-                            #   They cannot write, run shell, or reach the network —
-                            #   every mutation still comes back through the main
-                            #   agent and the gate.
+subagents = true            # the agent can fan out to subagents for parallel
+                            #   exploration. They are confined to the worktree
+                            #   exactly as the main agent is; the main agent makes
+                            #   the edits, so one agent holds the whole change.
                             #   Env override: CONDOTTO_SUBAGENTS=off|false|0|no
 workflows = true            # the agent can launch multi-agent workflows for big
                             #   cross-cutting jobs. Workflow agents are confined
@@ -136,22 +136,17 @@ max_concurrent_turns = 6    # cap on harness turns running at once across all
 # name = "webapp"                 # simple identifier used by /condotto assign
 # path = "~/Projects/webapp"      # absolute path to the git repo (required)
 # default_branch = "main"         # base branch for session worktrees (default "main")
-# trusted = false                 # true loads the repo's own CLAUDE.md/skills/.claude
-#                                 #   config — set ONLY for repos you vouch for
-#                                 #   (it also loads that repo's permissions/hooks/MCP).
-#                                 #   It is also what makes the repo's own skills
-#                                 #   runnable in a thread (`@Condotto /<skill>`);
-#                                 #   your own ~/.claude skills are runnable either
-#                                 #   way. There is no separate switch for skills.
+#                                 # Every repo loads its own CLAUDE.md, skills and
+#                                 # .claude config. There is no switch for that.
 # memory = false                  # true gives the agent durable memory for this repo:
 #                                 #   markdown notes it keeps about the codebase and
 #                                 #   picks up again in LATER threads. Scoped per
 #                                 #   (repo, channel) — threads in one channel share
 #                                 #   what they learn, another channel starts clean.
-#                                 #   A vouch like `trusted`: what one thread writes
-#                                 #   lands in the system prompt of every later thread
-#                                 #   in that channel. Every write is audited, and
-#                                 #   the agent's shell cannot reach the directory.
+#                                 #   Your call, not the agent's: what one thread
+#                                 #   writes lands in the system prompt of every later
+#                                 #   thread in that channel. Every write is audited,
+#                                 #   and the agent's shell cannot reach the directory.
 # cost_cap_usd = 25               # per-thread cost ceiling for this repo
 #                                 #   (overrides [defaults].cost_cap_usd).
 # default_model = "sonnet"        # per-repo default model token (overrides [defaults]).

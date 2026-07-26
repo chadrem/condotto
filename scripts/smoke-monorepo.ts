@@ -15,8 +15,7 @@
 //
 // It drives the real ClaudeCodeAdapter through the real policy engine, against a
 // throwaway monorepo fixture it provisions itself (build-time safety: never a
-// repo anyone cares about). A `gate` decision is treated as approved, standing in
-// for an architect's click, so gated writes actually execute.
+// repo anyone cares about).
 //
 // Run: bun run scripts/smoke-monorepo.ts
 import { join } from "node:path";
@@ -152,7 +151,6 @@ const gate: GateFn = async (call) => {
     denied.push(`${call.name} ${String(target).slice(0, 60)}`);
     return { decision: "deny", reason: d.reason };
   }
-  // A `gate` stands in for an approved architect click, so gated writes run.
   return { decision: "allow" };
 };
 

@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { checkSkillArgs, frameMessage, sanitizeDisplayName, sanitizeSkillText } from "../src/core/framing";
 import { MENTION_TOKEN_RE } from "../src/core/types";
 
-// Appendix A1 / DESIGN section 4: framing must be unforgeable by message content
+// Framing must be unforgeable by message content
 // — the exact content-forges-authority attack found in the prototype. The framing
 // red-teams it: header-only authority, an unforgeable random-nonce body fence,
 // and line quoting after normalizing every break + stripping control/bidi chars.
@@ -372,7 +372,7 @@ describe("mention-token defang", () => {
 // Arguments to an architect-invoked skill are the one piece of human text that
 // reaches the harness OUTSIDE the fence: they are substituted into the skill body
 // at `$ARGUMENTS` during EXPANSION, before the model and therefore before the
-// PreToolUse hook. `scripts/spike-skills.ts` proved live (2026-07-25) that
+// PreToolUse hook. Proved live that
 // `!`cmd`` in argument text EXECUTES — and that `disableSkillShellExecution`,
 // which does neutralize the same syntax in a skill's own body, does NOT cover
 // substituted arguments. Nothing downstream sees this text: not evaluateBash, not

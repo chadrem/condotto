@@ -44,7 +44,7 @@ describe("parseMentionCommand — assign", () => {
   });
 });
 
-describe("parseMentionCommand — grant/revoke/auto-approve", () => {
+describe("parseMentionCommand — grant/revoke", () => {
   test("grant resolves the target and lowercases the role, preserving the id case", () => {
     expect(parse("grant <@U0ABBY> architect")).toEqual({ name: "grant", args: "slack:U0ABBY architect" });
     expect(parse("grant <@U0ABBY> Architect")).toEqual({ name: "grant", args: "slack:U0ABBY architect" });
@@ -91,7 +91,6 @@ describe("parseMentionCommand — existing forms still parse (regression)", () =
   test("controls are unchanged", () => {
     expect(parse("model opus")).toEqual({ name: "model", args: "opus" });
     expect(parse("subagents on")).toEqual({ name: "subagents", args: "on" });
-    expect(parse("workflows write on")).toEqual({ name: "workflows", args: "write on" });
     expect(parse("stop")).toEqual({ name: "stop", args: "" });
   });
 
