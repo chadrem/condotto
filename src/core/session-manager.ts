@@ -168,18 +168,32 @@ function condottoSystemPrompt(opts: {
       `subagents — those are gated and only you, the main agent, may do them so an architect can ` +
       `approve. Use subagents to gather findings; you make the edits yourself.`
     : null;
-  // Guidance when the architect has enabled multi-agent workflows. Note the
-  // real toolset limit: workflow sub-agents reliably READ/analyze files in parallel,
-  // but can't Grep or run shell (an SDK background-task restriction), so do the
-  // grep/enumeration YOURSELF first, then fan the found files out to be read.
+  // Guidance when the architect has enabled multi-agent workflows.
+  //
+  // This used to say workflow sub-agents CANNOT Grep and must be fed files the main
+  // agent enumerated first. Re-probed 2026-07-26 (`scripts/spike-workflow-grep.ts`)
+  // and that was wrong twice over:
+  //   - Grep works. Sub-agent Grep calls reach our hook with an `agent_id` and the
+  //     policy engine allows them as confined reads. The original 2026-07-18 finding
+  //     was measuring ABSENCE, not denial: under that posture the session had no
+  //     `Grep` at all (allowedTools was empty and `tools` unset), so sub-agents told
+  //     to search called `ToolSearch{select:Grep}` and got nothing. Our bug, fixed by
+  //     the 2026-07-26 `tools` allowlist.
+  //   - There is no reliable/unreliable tool tier. The runtime still refuses SOME
+  //     sub-agent calls upstream of our hook, but tool-agnostically — measured runs
+  //     where every `Grep` ran and every `Read` was refused, and runs where all
+  //     twelve calls ran. So the prompt promises no tier; it warns about refusals.
+  // Shell stays out, and that one is OURS, not the SDK's: `evaluateConfined` denies
+  // bash to any call that can't be paused for approval.
   const workflow = opts.workflows
     ? `- For a big cross-cutting job (auditing a pattern across the codebase, reviewing many files), ` +
       `you can launch a multi-agent WORKFLOW (the Workflow tool): it fans out ${opts.workflowWrite ? "" : "read-only "}` +
       `agents in parallel and synthesizes their findings. Workflow agents are confined to this ` +
-      `worktree. Their reliable tools are Read and Glob — they CANNOT Grep or run shell — so when a ` +
-      `job needs search, YOU grep/enumerate first to find the files, then launch a workflow whose ` +
-      `agents each Read and analyze a slice in parallel. Launching a workflow needs an architect's ` +
-      `approval (it fans out and spends budget).` +
+      `worktree and have the same confined read tools you do — Read, Glob and Grep — so they can ` +
+      `search for themselves; they cannot run shell commands. Some of their calls get refused by ` +
+      `the runtime before Condotto ever sees them: that is not an architect's denial and retrying ` +
+      `rarely helps, so treat a workflow's coverage as best-effort and check anything important ` +
+      `yourself. Launching a workflow needs an architect's approval (it fans out and spends budget).` +
       (opts.workflowWrite
         ? ` The architect has enabled WORKTREE-WRITE mode: workflow agents may WRITE files in this ` +
           `worktree without per-write approval (still confined — no out-of-worktree, credential, or ` +

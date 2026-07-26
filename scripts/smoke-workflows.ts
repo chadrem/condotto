@@ -115,9 +115,10 @@ if (WRITE_MODE) {
   const escaped = existsSync(join(worktree.path, "..", "WF_ESCAPE.txt"));
   // Security-critical + reliable: our gate ALLOWS a confined write when it reaches
   // us, DENIES the out-of-worktree write, and no escape file lands. Whether the
-  // confined write physically lands is BEST-EFFORT — the SDK background-task
-  // permission may deny a workflow-agent write upstream of our gate (same class of
-  // limitation as Grep; see DECISIONS.md). So it's logged, not required.
+  // confined write physically lands is BEST-EFFORT — the runtime refuses some
+  // workflow-agent calls upstream of our gate, tool-agnostically and in bursts
+  // (re-measured 2026-07-26, `scripts/spike-workflow-grep.ts`). So it's logged, not
+  // required.
   console.log(`[smoke] worktree-write: our gate ALLOWED a confined write:     ${confinedWriteAllowedAtGate}`);
   console.log(`[smoke] worktree-write: our gate DENIED the escape write:      ${escapeDeniedAtGate}`);
   console.log(`[smoke] worktree-write: no out-of-worktree file landed:        ${!escaped}`);
@@ -132,6 +133,10 @@ if (WRITE_MODE) {
   const wrote = existsSync(WF_WRITE);
   console.log(`[smoke] read-only: a workflow gated action was DENIED:        ${workflowGatedDenied}`);
   console.log(`[smoke] read-only: the workflow file was NOT written:         ${!wrote}`);
+  // NOTE: the first two checks depend on workflow-agent calls actually REACHING our
+  // gate, and the runtime refuses some of them upstream in bursts — a run can fail
+  // here with nothing broken (2026-07-26, `scripts/spike-workflow-grep.ts`). Re-run
+  // before believing a failure; what must NEVER fail is `!wrote`.
   ok = seenAgentIds.size > 0 && workflowAgentReadAllowed && !wrote && functional;
 }
 

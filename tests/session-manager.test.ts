@@ -1818,6 +1818,30 @@ describe("harness capabilities — workflows", () => {
     expect(w.harness.created.at(-1)!.system).toMatch(/workflow/i);
   });
 
+  test("the workflow guidance says agents can search, and warns instead of promising a tool tier", async () => {
+    // Pins the 2026-07-26 re-probe (`scripts/spike-workflow-grep.ts`). The prompt
+    // used to tell the agent workflow sub-agents CANNOT Grep and that Read/Glob are
+    // their "reliable tools", so the agent enumerated everything itself and fanned
+    // out Reads. Both halves were false: Grep runs (the old symptom was our own
+    // empty tool list), and refusals are tool-agnostic, so no tool can be promised.
+    const w = makeWorld();
+    const c = conv("wfgrep.000001");
+    await assign(w, "wfgrep.000001"); // shipped posture: workflows on
+    await w.manager.handleEvent({ kind: "message", conv: c, author: architect, text: "audit auth", attachments: [] });
+    const system = w.harness.created.at(-1)!.system;
+
+    // Search is available to workflow agents and the prompt says so.
+    expect(system).toMatch(/Read, Glob and Grep/);
+    expect(system).not.toMatch(/CANNOT Grep|can't Grep|cannot Grep/i);
+    expect(system).not.toMatch(/reliable tools are Read and Glob/i);
+    // Shell stays out — that one is Condotto's own rule, not an SDK limit.
+    expect(system).toMatch(/cannot run shell commands/i);
+    // The real limit is named as best-effort, and explicitly not read as a denial,
+    // so the agent neither retries in a loop nor reports a phantom architect deny.
+    expect(system).toMatch(/best-effort/i);
+    expect(system).toMatch(/not an architect's denial/i);
+  });
+
   test("a member cannot toggle workflows; a bad arg shows usage", async () => {
     const w = makeWorld();
     const c = conv("wf3.000001");

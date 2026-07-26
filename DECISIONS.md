@@ -3397,3 +3397,87 @@ dropped, and that `disallowedTools` still subtracts. Live, through the real
 `ClaudeCodeAdapter` under the shipped posture: a search question produced one
 `Grep`, auto-allowed by the policy engine, answered correctly — no approval click.
 `bun run smoke:plan` still passes end to end.
+
+## 2026-07-26 — Workflow agents can Grep: half the "SDK limitation" was our own tool list
+
+The system prompt has told every workflow-enabled session, since M3.6, that
+workflow sub-agents "CANNOT Grep or run shell" and that "their reliable tools are
+Read and Glob" — so the agent should grep and enumerate everything itself, then fan
+the found files out to be read one slice each. `DESIGN.md` §8 and `CLAUDE.md` said
+the same thing as a Known SDK limitation. The premise moved on 2026-07-26, when the
+`tools` allowlist restored `Grep`/`Glob` to the session, so PLAN.md's first item was
+to re-probe before deleting anything. Re-probed, and the sentence was wrong in both
+of its halves.
+
+**Verified by probe** (`scripts/spike-workflow-grep.ts`, agent-sdk 0.3.220 /
+claude-code 2.1.220, throwaway git fixture, fable-5/low, 53 sub-agent tool calls
+across 11 workflow runs; ground truth read from the runtime's own per-sub-agent
+transcripts, because an upstream refusal is by definition invisible at our hook):
+
+- **Grep works.** Sub-agent `Grep` calls reach the `PreToolUse` hook carrying an
+  `agent_id`, the real policy engine allows them as confined reads, and they return
+  correct results. Best window: 6/6.
+- **The original finding was measuring absence, not denial.** Under the old posture
+  (no `tools` option) the sub-agents did not call `Grep` at all — they called
+  `ToolSearch{query:"select:Grep"}`, hunting for a tool that was not in the session.
+  M3.6 recorded a tool-availability bug of ours as a task-permission bug of the
+  SDK's; the 2026-07-26 `tools` allowlist had already fixed the half that was ours.
+- **There is no reliable/unreliable tool tier.** The refusal that remains is
+  TOOL-AGNOSTIC. One run had all three sub-agent `Grep`s run and all three `Read`s
+  refused — the exact inverse of what we documented. Aggregate in the same bad
+  window: `Grep` 4/8, `Read` 0/6. Twenty minutes later, same script, same fixture:
+  `Grep` 6/6, `Read` 5/6.
+- **Contention is not the mechanism.** A workflow containing exactly one agent
+  making exactly one call was refused half the time (1/2) with no siblings at all.
+- **Whose bug it is stays unsettled.** A control arm with NO `PreToolUse` hook ran
+  24/24 clean — but a hooked run minutes later ran 11/12, and the bad window
+  contained only hooked runs, so the control is confounded by time. What is
+  established: refusals arrive in bursts, are not a deterministic consequence of
+  gating, and cannot be provoked on demand.
+
+**The change.** The workflow paragraph of `condottoSystemPrompt` now says workflow
+agents have the same confined read tools the main agent does — Read, Glob and Grep —
+and that they cannot run shell. It promises no tool tier. In its place it names the
+real limit: some of their calls are refused by the runtime before Condotto sees
+them, that is NOT an architect's denial, retrying rarely helps, and a workflow's
+coverage is best-effort. Both consequences are ones the old text got wrong in
+practice: an agent told "Read is reliable" reports a phantom deny when a Read is
+refused, and an agent told "you cannot Grep" burns its own turn enumerating a
+codebase it could have fanned out. `DESIGN.md` §8 and `CLAUDE.md` updated to match.
+
+**Shell is ours, not the SDK's.** Worth stating because the old sentence bundled it
+with Grep as one restriction: `evaluateConfined` denies Bash to any call that cannot
+be paused for approval, and it would do so if the SDK permitted every call. Nothing
+here touches that, and nothing here widens the gate — a refused call is a call that
+never ran, and the security boundary is unchanged in both directions.
+
+**Two side findings, logged to PLAN.md rather than fixed here.** (1)
+`StructuredOutput`, which the Workflow runtime forces an agent to call when a script
+passes `agent(prompt, {schema})`, was refused on every observed attempt in both
+postures — so a schema'd workflow discards work that actually succeeded and the main
+agent reports the agents returned nothing. It is absent from `BASE_TOOLS`, which is
+the obvious suspect, but the same refusal appeared with no `tools` option at all, so
+it needs proving. (2) The SDK now emits `CLAUDE_SDK_CAN_USE_TOOL_SHADOWED` on every
+workflows-on query — "canUseTool will not be invoked: permissionMode
+'bypassPermissions' auto-approves every tool call before the callback is consulted"
+— which contradicts DESIGN §8's claim that the batching backstop still holds there
+(2026-07-18 diag4). DESIGN was deliberately NOT edited on the strength of a warning
+string; that one gets its own probe, and the actual boundary, the hook, is
+unaffected either way.
+
+**What surprised us.** That the tidy two-tier story survived three documents for
+eight days on a single observation, and that the tier turned out to be inverted in
+the very first run that measured both tools side by side. Also that the refusal
+message is the CLI's ordinary "The user doesn't want to take this action right
+now. STOP what you are doing" — which a sub-agent obediently obeys, so one refused
+call ends that agent's work rather than costing it a retry.
+
+**Verification.** 633 pass / 0 fail; `check:ports` clean. A new
+`session-manager.test.ts` case pins the prompt: it must name Read, Glob and Grep,
+must not carry either half of the old claim, must still refuse shell, and must
+describe refusals as best-effort and explicitly not an architect's denial.
+`bun run smoke:workflows` passes end to end against the real adapter, twice, and
+incidentally reproduced the finding: the earlier run had three of four agent calls
+reach the gate (two Reads allowed and confined, the Write correctly denied by
+policy), the later one had two of its three Reads refused upstream and never
+reached us at all. Nothing was written in either case.

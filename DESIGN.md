@@ -966,9 +966,18 @@ confined subagent/workflow/escaped calls WRITE within the worktree without
 per-write approval — bash stays gated to the main agent (it has no worktree
 confinement), and out-of-worktree/credential/production-data stay hard-denied while
 land/deploy still gate. **Known SDK limitation:** a background workflow sub-agent's
-Grep/Bash/Write can be denied by the SDK's task permission UPSTREAM of our gate, so
-those are best-effort (Read/Glob route reliably; the security boundary holds
-regardless).
+tool calls are sometimes refused by the runtime UPSTREAM of our gate ("The user
+doesn't want to take this action right now"), so a workflow's COVERAGE is
+best-effort. Re-measured 2026-07-26 (`scripts/spike-workflow-grep.ts`): the refusal
+is tool-AGNOSTIC — runs where every sub-agent `Grep` ran and every `Read` was
+refused, and runs where all twelve calls ran — which retires the earlier
+"Read/Glob reliable, Grep/Bash/Write unreliable" split. Half of that split was
+Condotto's own bug: the posture it was measured under supplied no `Grep` at all, so
+sub-agents told to search reached for `ToolSearch` and the absence was recorded as a
+denial. Workflow agents now have the full confined read set (Read/Glob/Grep) and the
+system prompt says so. The security boundary is unaffected either way — a refused
+call is a call that never ran, and shell stays denied to confined calls by
+`evaluateConfined`, not by the SDK.
 
 **Plan mode.** `@Condotto plan on|off` (architect-only both ways) turns the thread
 read-only: the agent investigates and proposes a plan, an architect approves it,

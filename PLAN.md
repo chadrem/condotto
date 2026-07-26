@@ -95,16 +95,6 @@ fixtures under a `HOME` override rather than the operator's own directory.
 Small, mechanical, and the difference between a good session and a frustrating
 one. Everything here is adapter-local.
 
-- **Re-probe, then delete, the comment at `session-manager.ts:171-188`,** which
-  tells the agent that workflow sub-agents cannot Grep because of an SDK
-  background-task restriction. The premise has changed under it: `Grep` was not in
-  the session's tool set at all when that was observed, and now is (2026-07-26).
-  Whether a background workflow sub-agent can *now* Grep is an open empirical
-  question — do not just delete the sentence on the strength of the old audit
-  claim; run a workflow and watch for a `Grep` call carrying an `agent_id`. The
-  same text appears in `DESIGN.md` (§8's "Known SDK limitation" and the
-  workflow-confinement passage), so fix all three or none.
-
 - **Re-enable `WebFetch` and `WebSearch`.** Remove them from `BASE_DISALLOWED`
   (`adapter.ts:118`) **and add them to `BASE_TOOLS`** — since 2026-07-26 the
   adapter passes an explicit `tools` allowlist, so un-disallowing a tool no longer
@@ -121,6 +111,29 @@ one. Everything here is adapter-local.
   configuration — re-confirmed 2026-07-26, absent even when named explicitly in
   `tools`. Either surface an equivalent progress signal or drop the dead
   branch at `policy.ts:191`.
+
+- **A schema'd workflow returns nothing.** `StructuredOutput` — the tool the
+  Workflow runtime forces an agent to call when the script passes
+  `agent(prompt, {schema})` — was refused upstream of our gate on every observed
+  attempt, in both tool postures (2026-07-26, `scripts/spike-workflow-grep.ts`).
+  The agents' work succeeds and is then discarded: the main agent reports "the
+  agents completed without returning anything" over correct findings. It is absent
+  from `BASE_TOOLS` (`adapter.ts:168`), which is the first thing to try — but the
+  same refusal appeared with no `tools` option at all, so prove the fix rather than
+  assuming it. Schemas are the documented way to get structured results out of a
+  workflow, so this quietly caps what the fan-out is good for.
+
+- **Re-verify the `canUseTool` backstop under `bypassPermissions`.** Security, and
+  currently a documentation claim with a live contradiction. The SDK emits
+  `CLAUDE_SDK_CAN_USE_TOOL_SHADOWED` on every workflows-on query — "canUseTool will
+  not be invoked: permissionMode 'bypassPermissions' auto-approves every tool call
+  (except explicit deny rules) before the callback is consulted" — while DESIGN.md
+  §8 and `adapter.ts:859-881` both say the backstop still holds there (spike
+  2026-07-18 diag4). One of the two is now wrong. The PreToolUse hook, which is the
+  actual boundary, is unaffected either way, so this is about defence in depth, not
+  a hole: drive a batched gated call under workflows-on and watch whether
+  `canUseTool` fires. Then fix either the code or DESIGN §8 — do not edit DESIGN on
+  the strength of the warning alone.
 
 ## Milestone 2 — Close the trusted-repo shell hole
 
