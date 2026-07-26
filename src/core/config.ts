@@ -35,8 +35,12 @@ export interface CondottoConfig {
   memoryRoot: string;
   repos: RepoConfig[];
   roles: RoleMapping[]; // seeded into the store at boot
-  /** Daemon-wide per-thread cost ceiling, used when a repo sets none. */
-  defaultCostCapUsd: number;
+  /**
+   * Daemon-wide per-thread cost ceiling, used when a repo sets none.
+   * `null` = no ceiling, which is the default: an architect who cares about
+   * spend sets one, rather than everyone tripping over a number we invented.
+   */
+  defaultCostCapUsd: number | null;
   /** Max harness turns running at once across all sessions (concurrency). */
   maxConcurrentTurns: number;
   /**
@@ -89,12 +93,14 @@ export interface AuthConfig {
 }
 
 /**
- * Fallback per-thread cost ceiling in USD when neither repo nor config sets one.
- * Sized for the shipped posture below: xhigh effort with subagents and workflows
- * on spends real money per thread, and a cap that pauses healthy work is worse
- * than no cap at all — this is a runaway brake, not a budget.
+ * No per-thread ceiling unless someone sets one. A cap that pauses healthy work
+ * mid-task is worse than no cap: the thread stalls, and whoever was waiting has
+ * to find an architect to raise a number they never chose. Spend is bounded by
+ * the Console spend cap under API-key auth and by the plan's rate limits under
+ * subscription auth, both of which are real and neither of which depends on
+ * Condotto being correct. `@Condotto budget <usd>` opts a thread in.
  */
-export const DEFAULT_COST_CAP_USD = 50;
+export const DEFAULT_COST_CAP_USD = null;
 /** Default cap on concurrently-executing harness turns (protects the box). */
 export const DEFAULT_MAX_CONCURRENT_TURNS = 6;
 /**

@@ -169,7 +169,7 @@ async function main(): Promise<void> {
     log(`[daemon] WARNING: default effort "${config.defaultEffort}" not in harness efforts [${harness.capabilities.supportedEfforts.join(", ")}]`);
   }
   log(
-    `[daemon] cost cap $${config.defaultCostCapUsd}/thread (default), ` +
+    `[daemon] cost cap ${config.defaultCostCapUsd === null ? "none (default)" : `$${config.defaultCostCapUsd}/thread (default)`}, ` +
       `max ${config.maxConcurrentTurns} concurrent turns, ` +
       `default model ${config.defaultModel} @ ${config.defaultEffort} effort, ` +
       `subagents ${config.defaultSubagents ? "ON" : "off"} / workflows ${config.defaultWorkflows ? "ON" : "off"} / ` +

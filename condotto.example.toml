@@ -114,10 +114,15 @@ workflows = true            # the agent can launch multi-agent workflows for big
                             #   cross-cutting jobs. Workflow agents are confined
                             #   to the worktree, exactly like the main agent.
                             #   Env override: CONDOTTO_WORKFLOWS=off|false|0|no
-cost_cap_usd = 50           # per-thread cost ceiling; a runaway thread pauses here.
-                            #   Sized for the posture above — xhigh with subagents
-                            #   and workflows spends real money per thread. This is
-                            #   a runaway brake, not a budget.
+# cost_cap_usd = 50         # per-thread cost ceiling. COMMENTED OUT ON PURPOSE:
+                            #   with no value there is no ceiling, which is the
+                            #   default. A cap that pauses healthy work mid-task
+                            #   is worse than no cap — the thread stalls and
+                            #   someone has to find an architect. Set it here if
+                            #   you want every thread to start with one; an
+                            #   architect can set one per thread with
+                            #   `@Condotto budget <usd>`. Your real backstop is
+                            #   the spend cap in Claude Console.
                             #   Env override: CONDOTTO_COST_CAP_USD
 max_concurrent_turns = 6    # cap on harness turns running at once across all
                             #   sessions. Env override: CONDOTTO_MAX_CONCURRENT_TURNS
@@ -139,7 +144,7 @@ max_concurrent_turns = 6    # cap on harness turns running at once across all
 # care about. Sessions only ever see COMMITTED content (each runs in a
 # fresh git worktree), so a repo's working tree, untracked files, and .gitignored
 # files are never visible to the agent.
-#
+
 # [[repos]]
 # name = "webapp"                 # simple identifier used by /condotto assign
 # path = "~/Projects/webapp"      # absolute path to the git repo (required)
@@ -157,7 +162,8 @@ max_concurrent_turns = 6    # cap on harness turns running at once across all
 #                                 #   thread in that channel. Every write is audited,
 #                                 #   and the agent's shell cannot reach the directory.
 # cost_cap_usd = 25               # per-thread cost ceiling for this repo
-#                                 #   (overrides [defaults].cost_cap_usd).
+#                                 #   (overrides [defaults].cost_cap_usd). Omit for
+#                                 #   no ceiling, which is the default.
 # default_model = "sonnet"        # per-repo default model token (overrides [defaults]).
 # default_effort = "high"         # per-repo default effort (overrides [defaults]).
 

@@ -220,7 +220,7 @@ effort = "xhigh"           # low | medium | high | xhigh | max
 subagents = true           # parallel exploration
 workflows = true           # multi-agent workflows
 memory = true              # durable notes per (repo, channel)
-cost_cap_usd = 50          # per-thread runaway brake
+# cost_cap_usd = 50        # per-thread ceiling; unset means no ceiling
 max_concurrent_turns = 6   # box-wide cap on live turns
 
 [[repos]]
@@ -232,8 +232,9 @@ default_branch = "main"
 ```
 
 Those defaults are the full-strength posture, so a new thread starts there instead
-of waiting for someone to turn it up. It is also the expensive end, which is why
-the runaway brake sits at $50. Dial it down here, per repo, or per thread in Slack.
+of waiting for someone to turn it up. It is also the expensive end, and there is no
+spend ceiling unless you set one — see [Cost](#cost). Dial any of it down here, per
+repo, or per thread in Slack.
 
 **At least one repo is required.** There is no default repo, and the daemon refuses
 to start without one. A monorepo is one entry; you pick the sub-project when you
@@ -265,7 +266,7 @@ A clean boot looks like:
 
 ```
 … [daemon] seeded 1 role mapping(s), 1 architect(s)
-… [daemon] cost cap $50/thread (default), max 6 concurrent turns, default model opus @ xhigh effort, subagents ON / workflows ON / memory ON
+… [daemon] cost cap none (default), max 6 concurrent turns, default model opus @ xhigh effort, subagents ON / workflows ON / memory ON
 … [daemon] ready — db=…/condotto.sqlite, sessions on record: 0
 ```
 
@@ -317,7 +318,7 @@ In a channel the bot has been invited to:
 | `@Condotto cancel` | architect | — | Interrupt the running turn. The session lives on. |
 | `@Condotto clear` | architect | — | Forget the conversation. Worktree, branch, uncommitted work, settings, memory and spend all survive. |
 | `@Condotto plan on\|off` | architect | **off** | Read-only mode. The agent investigates and posts a plan, and changes nothing until you turn it off. |
-| `@Condotto budget <usd>` | architect | **$50** | Raise this thread's cost ceiling. From `cost_cap_usd`. |
+| `@Condotto budget <usd\|off>` | architect | **none** | Set this thread's cost ceiling. `off` removes it. From `cost_cap_usd`. |
 | `@Condotto model <opus\|sonnet\|fable>` | architect | **`opus`** | Set the model. From `[defaults].model`. |
 | `@Condotto effort <low\|medium\|high\|xhigh\|max>` | architect | **`xhigh`** | Set reasoning effort. From `[defaults].effort`. Prefer setting it early; changing it mid-thread drops the prompt cache. |
 | `@Condotto subagents on\|off` | architect | **on** | Parallel exploration. From `[defaults].subagents`. |
@@ -329,8 +330,8 @@ In a channel the bot has been invited to:
 
 Every default above comes from `condotto.toml` and can be changed there, per repo,
 or per thread with the command. A thread starts at full strength: `opus` at `xhigh`
-with subagents, workflows and memory all on. That is also the expensive end, which
-is why the runaway brake sits at $50 — see [Cost](#cost).
+with subagents, workflows and memory all on, and no spend ceiling — see
+[Cost](#cost).
 
 **Not in this table because they are not per-thread:** durable memory is on by
 default and set per repo (`memory = false` to opt out, see [Memory](#memory)); the
@@ -568,9 +569,15 @@ parked session, so a parked thread always resumes.
 
 ### Cost
 
-Each thread has a ceiling. A runaway thread pauses and pings the architect, who
-raises it with `@Condotto budget <usd>`. `@Condotto cancel` interrupts a wedged or
-over-spending turn, including a detached background workflow.
+**There is no spend ceiling by default.** A cap that pauses healthy work mid-task
+is worse than no cap: the thread stalls and whoever was waiting has to find an
+architect to raise a number they never picked. So it is opt-in. `@Condotto budget
+<usd>` gives one thread a ceiling; it then pauses and pings the architect on
+reaching it. `@Condotto budget off` removes it again. Set `cost_cap_usd` in
+`condotto.toml` if you want every thread to start with one.
+
+`@Condotto cancel` interrupts a wedged or over-spending turn, including a detached
+background workflow — that works whether or not a ceiling is set.
 
 Under API key auth those numbers are real money, billed per token. Set a spend cap
 in Console as the backstop that does not depend on Condotto being correct. Under

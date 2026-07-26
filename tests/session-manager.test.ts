@@ -62,7 +62,7 @@ interface World {
 function makeWorld(
   store?: Store,
   opts: {
-    costCap?: number;
+    costCap?: number | null;
     maxConcurrentTurns?: number;
     identityStrength?: "verified" | "weak";
     /** Isolated worktree root (GC tests count orphans within it). Default: shared. */
@@ -89,7 +89,9 @@ function makeWorld(
   const harness = new FakeHarness();
   const root = opts.worktreesRoot ?? worktreesRoot;
   const manager = new SessionManager(s, harness, new WorktreeManager(root), () => {}, {
-    defaultCostCapUsd: opts.costCap ?? 10,
+    // `null` means no ceiling; `undefined` means the test didn't care, so keep
+    // the old $10 convenience for every test written before the default changed.
+    defaultCostCapUsd: opts.costCap === undefined ? 10 : opts.costCap,
     maxConcurrentTurns: opts.maxConcurrentTurns,
     worktreeRetentionMs: opts.worktreeRetentionMs,
     startedAt: opts.startedAt,
@@ -806,6 +808,42 @@ describe("cost budgets & runaway cap", () => {
     w.store.insertTurn({ sessionId: sid, direction: "out", text: "prior", costUsd: spent });
     return sid;
   }
+
+  test("with NO ceiling (the default) a thread never pauses, however much it spends", async () => {
+    // makeWorld's default costCap is a test convenience; null is the shipped
+    // default, and the point of it is that nobody hits a number they never chose.
+    const w = makeWorld(undefined, { costCap: null });
+    const sid = await assignAndSpend(w, "e0u.000001", 9_999);
+    await w.manager.handleEvent({ kind: "message", conv: conv("e0u.000001"), author: architect, text: "keep going", attachments: [] });
+    expect(w.store.listAudit(sid).some((a) => a.event === "budget_exceeded")).toBe(false);
+    expect(w.harness.allTurns.length).toBeGreaterThan(0);
+    // And no per-turn cap reaches the SDK, so it does not stop on one either.
+    expect(w.harness.allTurns.at(-1)!.budgetUsd).toBeUndefined();
+  });
+
+  test("the settings block says so rather than printing a number", async () => {
+    const w = makeWorld(undefined, { costCap: null });
+    await w.manager.handleEvent({ kind: "command", conv: conv("e0v.000001"), author: architect, name: "assign", args: "testrepo" });
+    expect(w.surface.posts.at(-1)!.text).toContain("cost budget no limit");
+  });
+
+  test("`budget off` removes a ceiling an architect set — otherwise it is one-way", async () => {
+    const w = makeWorld(undefined, { costCap: null });
+    const c = conv("e0w.000001");
+    await w.manager.handleEvent({ kind: "command", conv: c, author: architect, name: "assign", args: "testrepo" });
+    const sid = w.store.getSessionByConversation("fake", "e0w.000001")!.id;
+    await w.manager.handleEvent({ kind: "command", conv: c, author: architect, name: "budget", args: "5" });
+    expect(w.store.getSession(sid)!.budget_limit_usd).toBe(5);
+
+    await w.manager.handleEvent({ kind: "command", conv: c, author: architect, name: "budget", args: "off" });
+    expect(w.store.getSession(sid)!.budget_limit_usd).toBeNull();
+    expect(w.surface.posts.at(-1)!.text).toContain("no ceiling");
+
+    // And it really is unbounded again: spend past the old cap still runs.
+    w.store.insertTurn({ sessionId: sid, direction: "out", text: "prior", costUsd: 500 });
+    await w.manager.handleEvent({ kind: "message", conv: c, author: architect, text: "go", attachments: [] });
+    expect(w.store.listAudit(sid).some((a) => a.event === "budget_exceeded")).toBe(false);
+  });
 
   test("a new turn passes the remaining budget to the harness as a per-turn cap", async () => {
     const w = makeWorld(undefined, { costCap: 5 });

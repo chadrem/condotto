@@ -6,9 +6,8 @@ This file and `README.md` are the only documents. This one is for whoever is
 editing the code; `README.md` is the product overview, install and runbook. Keep
 each fact in exactly one of them.
 
-`DESIGN.md`, `PLAN.md` and `DECISIONS.md` were deleted on 2026-07-26. One fact
-lived in four places, so every correction cost four edits and the copies drifted
-apart faster than they helped. Do not recreate them. A new fact goes in the code
+Do not add a third. One fact in four documents costs four edits per correction
+and the copies drift apart faster than they help. A new fact goes in the code
 comment nearest the thing it explains, or here if a future session would trip
 without it.
 
@@ -26,11 +25,8 @@ plus a Slack adapter (`src/adapters/slack/`) and a Claude Code adapter
 ## The security model, in full
 
 Condotto runs on one team's machine, against their own repos, driven by people
-they trust. On 2026-07-26 the approval loop was deleted along with everything
-built to support it: the gate tier, per-call Approve/Deny, architect
-auto-approve, the bash allowlist, the production-data gate, the read-only
-confinement for subagents, and the per-repo `trusted` flag. What follows is all
-of it now. Nothing here ever asks a human anything, which is the point.
+they trust. Nothing here ever asks a human anything — there is no approval step
+and no gate tier to add one back to. What follows is the whole model.
 
 - **Worktree containment.** Every path-bearing tool call resolves inside the
   session's worktree. The boundary is the worktree ROOT, which may sit above the
@@ -50,8 +46,9 @@ of it now. Nothing here ever asks a human anything, which is the point.
   attaches only to the verified `user=` id in the header, never to display names
   or message content. This is the control that a trusted team does not replace:
   the attacker here is a string in a dependency README, not a person in Slack.
-- **Cost cap and runaway brake.** Not security, money. A wedged thread can spend
-  real cash overnight.
+- **Cost cap.** Off by default, money not security. `@Condotto budget <usd>` opts
+  a thread in; `budget off` opts back out. The backstop that does not depend on
+  Condotto being correct is the Console spend cap.
 - **The audit log.** Free at runtime, and the only record of what the agent did.
 - **Agent memory.** Per (repo, channel), outside the worktree, the one named
   exception to containment. `verifyMemoryTarget` re-proves every target against
@@ -77,8 +74,9 @@ seams:
 - **Surface port** — how humans reach Condotto (Slack v1; Teams/email/web later).
   Adapters own their transport and prefer outbound connections. Slack uses Bolt
   over Socket Mode, and that is a hard requirement: no public URL. Capabilities
-  are flags (`threads`, `buttons`, `editMessages`, `identityStrength`), not a
-  lowest common denominator.
+  are flags, not a lowest common denominator: `buttons`, `editMessages`,
+  `attachments` and `identityStrength` each gate real behaviour. (`threads` is
+  declared and read nowhere — every surface so far has them.)
 - **Harness port** — how Condotto drives a coding agent (Claude Code via the
   Agent SDK v1; others later). The non-negotiable capability is mechanically
   stopping a tool call before it runs. Never simulate that by watching output.
@@ -141,6 +139,12 @@ Runtime is **Bun 1.2+**. TypeScript runs directly, no build step.
   either variable is what guards it. Pinned by a regression test. Do not weaken.
 - Distribution: `bun build --compile` to a single binary, with the native
   `claude` runtime riding alongside as a sidecar.
+- **`Bun.TOML.parse` silently drops a table header preceded by a bare `#` line.**
+  A comment line that is exactly `#` — no space, no text — makes the `[[repos]]`
+  or `[section]` under it disappear, and its keys fold into the PREVIOUS table.
+  `# `, `# text` and two bare `#`s are all fine, which is why it hides. It shipped
+  in `condotto.example.toml` and surfaced as "No repos configured" pointing at the
+  wrong thing. Pinned by a test that loads the example file for real.
 
 Bun compatibility with the SDK is verified (Bun 1.3.14): spawn, streaming, hooks
 and resume all work. If a future SDK update trips on Bun, the hedges are to
@@ -195,7 +199,6 @@ of the last three we relied on contradicted the SDK's own documentation.
 
 ## Process rules
 
-- **Do not add documents.** See the top of this file.
 - **Probe before building on SDK behaviour.** Write the throwaway probe in the
   scratchpad, run it against a throwaway fixture directory — never a real repo —
   and then delete it. What you learned goes in a plain comment next to the code

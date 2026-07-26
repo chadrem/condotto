@@ -1,5 +1,5 @@
 import { describe, expect, test, spyOn } from "bun:test";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { loadConfig, loadSlackConfig, loadAuthConfig, subscriptionScaleWarning } from "../src/core/config";
@@ -49,6 +49,55 @@ describe("config discovery + validation", () => {
     } finally {
       warn.mockRestore();
     }
+  });
+});
+
+describe("condotto.example.toml is a working template", () => {
+  // The file people copy. A parse quirk in it does not fail our tests unless we
+  // load it here, and one did: see the bare-# case below.
+  const uncommentRepo = (): string => {
+    const src = readFileSync(join(import.meta.dir, "..", "condotto.example.toml"), "utf8");
+    const live = src
+      .split("\n")
+      .map((l) => (/^# (\[\[repos\]\]|name = |path = |default_branch = )/.test(l) ? l.slice(2) : l))
+      .join("\n")
+      .replace("~/Projects/webapp", "/tmp");
+    return tomlFile(live);
+  };
+
+  test("uncommenting the [[repos]] block, as the file instructs, actually boots", () => {
+    const cfg = loadConfig({}, uncommentRepo());
+    expect(cfg.repos.map((r) => r.name)).toEqual(["webapp"]);
+    expect(cfg.repos[0]!.memory).toBe(true);
+    // And the documented daemon defaults are what the file actually produces.
+    expect(cfg.defaultModel).toBe("opus");
+    expect(cfg.defaultEffort).toBe("xhigh");
+    expect(cfg.defaultCostCapUsd).toBeNull();
+    expect(cfg.defaultSubagents).toBe(true);
+    expect(cfg.defaultWorkflows).toBe(true);
+    expect(cfg.defaultMemory).toBe(true);
+  });
+
+  test("no bare `#` line sits directly above a table header", () => {
+    // Bun.TOML.parse SILENTLY DROPS a table header preceded by a comment line that
+    // is exactly "#" — the keys under it fold into the previous table instead. A
+    // "# " (trailing space) or "# text" line is fine, and so are two bare ones.
+    // This shipped in the example file and made `[[repos]]` vanish, which surfaced
+    // as "No repos configured" pointing at the wrong thing.
+    const lines = readFileSync(join(import.meta.dir, "..", "condotto.example.toml"), "utf8").split("\n");
+    const offenders = lines
+      .map((l, i) => ({ i, prev: lines[i - 1], cur: l }))
+      .filter((x) => x.prev === "#" && /^\s*(#\s*)?\[\[?[a-z_]+\]\]?\s*$/.test(x.cur));
+    expect(offenders.map((o) => `line ${o.i + 1}: ${o.cur}`)).toEqual([]);
+  });
+
+  test("the quirk itself, so the guard above is not cargo-culted", () => {
+    const parse = (s: string): any => (Bun as unknown as { TOML: { parse(s: string): unknown } }).TOML.parse(s);
+    // Dropped: the header vanishes and `name` lands in [a].
+    expect(parse(`[a]\nx=1\n#\n[[repos]]\nname="r"\n`)).toEqual({ a: { x: 1, name: "r" } });
+    // Fine with any other comment shape.
+    expect(parse(`[a]\nx=1\n# hi\n[[repos]]\nname="r"\n`)).toEqual({ a: { x: 1 }, repos: [{ name: "r" }] });
+    expect(parse(`[a]\nx=1\n\n[[repos]]\nname="r"\n`)).toEqual({ a: { x: 1 }, repos: [{ name: "r" }] });
   });
 });
 
@@ -208,9 +257,9 @@ path = "/srv/bare"
 describe("loadConfig defaults + env overrides", () => {
   test("cost cap and concurrency: defaults, file values, and env override", () => {
     const def = loadConfig({}, cfgFile(""));
-    // $50, not $10: the shipped posture (xhigh + subagents + workflows) spends
-    // real money per thread, and this is a runaway brake rather than a budget.
-    expect(def.defaultCostCapUsd).toBe(50);
+    // NO ceiling by default: a cap that pauses healthy work mid-task is worse
+    // than no cap, so an architect opts a thread in with `@Condotto budget`.
+    expect(def.defaultCostCapUsd).toBeNull();
     expect(def.maxConcurrentTurns).toBe(6);
 
     const fromFile = loadConfig({}, cfgFile(`[defaults]\ncost_cap_usd = 20\nmax_concurrent_turns = 4\n`));

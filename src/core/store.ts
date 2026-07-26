@@ -761,8 +761,8 @@ export class Store {
       .run({ id, now: new Date().toISOString() });
   }
 
-  /** Raise/lower a session's cost ceiling (architect `@Condotto budget`). */
-  setSessionBudgetLimit(id: string, usd: number): void {
+  /** Set a session's cost ceiling (`@Condotto budget`). null = no ceiling. */
+  setSessionBudgetLimit(id: string, usd: number | null): void {
     this.db.query(`UPDATE sessions SET budget_limit_usd = $usd WHERE id = $id`).run({ id, usd });
   }
 

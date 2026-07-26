@@ -293,7 +293,7 @@ function threadCommandHelp(): string {
     `• \`@Condotto model <opus|sonnet|fable>\` / \`@Condotto effort <low…max>\` — tune the implementer`,
     `• \`@Condotto subagents on|off\` · \`@Condotto workflows on|off\` — multi-agent power (both on by default)`,
     `• \`@Condotto grant @user architect [everywhere]\` · \`@Condotto revoke @user\` — delegate authority (this channel, or everywhere)`,
-    `• \`@Condotto budget <usd>\` — raise this thread's cost budget · \`@Condotto cancel\` — stop the running turn (e.g. a runaway workflow)`,
+    `• \`@Condotto budget <usd>\` — cap this thread's spend (\`off\` to remove it) · \`@Condotto cancel\` — stop the running turn (e.g. a runaway workflow)`,
     `• \`@Condotto plan on|off\` — research first: I propose a plan and change nothing until you turn it off`,
     `• \`@Condotto clear\` — forget the conversation and start fresh (the worktree, your uncommitted work, and these settings all stay)`,
     `• \`@Condotto /<skill> [args]\` — run one of my skills · \`@Condotto skills\` — list what's available`,
@@ -329,8 +329,8 @@ interface LiveEntry {
 const MAX_PENDING_CONTEXT = 20;
 
 export interface SessionManagerOptions {
-  /** Per-thread cost ceiling (USD) when a repo sets none. */
-  defaultCostCapUsd?: number;
+  /** Per-thread cost ceiling (USD) when a repo sets none; null = no ceiling. */
+  defaultCostCapUsd?: number | null;
   /** Max harness turns running at once across all sessions. */
   maxConcurrentTurns?: number;
   /** Runs repo land/deploy commands; injectable for tests. */
@@ -429,7 +429,7 @@ export class SessionManager {
   private surfaces = new Map<string, SurfaceAdapter>();
   /** Live harness sessions + a per-session FIFO so turns never interleave. */
   private live = new Map<string, LiveEntry>();
-  private readonly defaultCostCapUsd: number;
+  private readonly defaultCostCapUsd: number | null;
   private readonly defaultModel: string;
   private readonly defaultEffort: string;
   private readonly defaultSubagents: boolean;
@@ -482,6 +482,26 @@ export class SessionManager {
   private effectiveEffort(session: SessionRow): string {
     return session.effort ?? this.defaultEffort;
   }
+  /**
+   * This session's cost ceiling, or null for no ceiling. The default is null: a
+   * cap that pauses healthy work mid-task is worse than no cap, so an architect
+   * opts in with `@Condotto budget <usd>`. One definition, because "unlimited"
+   * read as `0` or `Infinity` anywhere would be a silently unbounded thread or a
+   * permanently stalled one.
+   */
+  private budgetLimitFor(session: SessionRow): number | null {
+    return session.budget_limit_usd ?? this.defaultCostCapUsd;
+  }
+
+  /**
+   * How a ceiling reads in a message: a dollar amount, or "no limit". Every place
+   * that prints one goes through here, so "no ceiling" cannot render as `$0.00`
+   * in a corner someone forgot.
+   */
+  private static budgetLabel(limit: number | null): string {
+    return limit === null ? "no limit" : `$${limit.toFixed(2)}`;
+  }
+
   /** One-line human summary of a session's harness capabilities. */
   private capabilitySummary(session: SessionRow): string {
     const parts = [
@@ -511,7 +531,7 @@ export class SessionManager {
     const subagents = session.subagents === 1;
     const workflows = this.effectiveWorkflows(session);
     const planMode = session.plan_mode === 1;
-    const budget = session.budget_limit_usd ?? this.defaultCostCapUsd;
+    const budget = this.budgetLimitFor(session);
     const lines = [
       `⚙️ *Session settings*`,
       // Only shown when ON, unlike everything else in this block. Plan mode can
@@ -527,7 +547,7 @@ export class SessionManager {
         : []),
       `• model \`${this.effectiveModel(session)}\`  ·  effort \`${this.effectiveEffort(session)}\``,
       `• subagents ${subagents ? "*on*" : "off"}  ·  workflows ${workflows ? "*on*" : planMode && session.workflows === 1 ? "paused" : "off"}`,
-      `• cost budget $${budget.toFixed(2)}`,
+      `• cost budget ${SessionManager.budgetLabel(budget)}`,
     ];
     if (repo?.memory === 1) {
       lines.push(
@@ -1106,7 +1126,7 @@ export class SessionManager {
       `• sessions: *${active}* active · *${parked}* parked · ${stopped} stopped`,
       `• turns in flight: *${inFlight}*`,
       `• config: default model \`${this.defaultModel}\` · effort \`${this.defaultEffort}\` · ` +
-        `cost cap $${this.defaultCostCapUsd.toFixed(2)}/thread · ` +
+        `cost cap ${SessionManager.budgetLabel(this.defaultCostCapUsd)}${this.defaultCostCapUsd === null ? "" : "/thread"} · ` +
         `subagents ${this.defaultSubagents ? "on" : "off"} · workflows ${this.defaultWorkflows ? "on" : "off"} · ` +
         `${repos} repo${repos === 1 ? "" : "s"} · ${architects} architect${architects === 1 ? "" : "s"}`,
     ].join("\n");
@@ -1311,7 +1331,7 @@ export class SessionManager {
           live.pendingContext = [];
         }
         const spentUsd = this.store.sessionCostUsd(s.id);
-        const budgetUsd = s.budget_limit_usd ?? this.defaultCostCapUsd;
+        const budgetUsd = this.budgetLimitFor(s);
         this.store.audit({
           sessionId: s.id,
           actor: principalKey(author),
@@ -1342,8 +1362,11 @@ export class SessionManager {
           lines.push("• Notes I've saved to memory for this repo aren't affected — they'll load again on my next turn.");
         }
         lines.push(
-          `• Spend still counts: $${spentUsd.toFixed(2)} of $${budgetUsd.toFixed(2)} used in this thread. ` +
-            `Clearing my context doesn't refund it — \`@Condotto budget <usd>\` to raise the cap.`,
+          budgetUsd === null
+            ? `• Spend still counts: $${spentUsd.toFixed(2)} used in this thread so far. Clearing my ` +
+              `context doesn't refund it.`
+            : `• Spend still counts: $${spentUsd.toFixed(2)} of $${budgetUsd.toFixed(2)} used in this thread. ` +
+              `Clearing my context doesn't refund it — \`@Condotto budget <usd>\` to raise the cap.`,
         );
         await surface.post(conv, { text: lines.join("\n") });
       })
@@ -1456,7 +1479,11 @@ export class SessionManager {
     return { cleaned, orphans };
   }
 
-  /** `@Condotto budget <usd>` — architect raises/lowers the thread cost cap. */
+  /**
+   * `@Condotto budget <usd>` — architect sets the thread's cost cap.
+   * `off` (or `none`/`unlimited`) removes it, which is also the default. Without
+   * a way back, setting a cap once would be irreversible for the thread.
+   */
   private async setBudget(conv: ConversationRef, author: Principal, args: string): Promise<void> {
     const surface = this.surfaceFor(conv);
     const session = this.store.getSessionByConversation(conv.surfaceId, conv.conversationId);
@@ -1469,14 +1496,29 @@ export class SessionManager {
       await surface.post(conv, { text: "Only architects can change the cost budget." });
       return;
     }
-    const amount = Number(args.trim().replace(/^\$/, ""));
+    const raw = args.trim().toLowerCase();
+    const spent = this.store.sessionCostUsd(session.id);
+    if (raw === "off" || raw === "none" || raw === "unlimited") {
+      this.store.setSessionBudgetLimit(session.id, null);
+      this.store.audit({ sessionId: session.id, actor: principalKey(author), event: "budget_set", detail: { limitUsd: null } });
+      await surface.post(conv, {
+        text:
+          `Cost budget removed — this thread has no ceiling now (spent so far: $${spent.toFixed(2)}). ` +
+          `Your Console spend cap still applies.`,
+      });
+      return;
+    }
+    const amount = Number(raw.replace(/^\$/, ""));
     if (!Number.isFinite(amount) || amount <= 0) {
-      await surface.post(conv, { text: "Usage: `@Condotto budget <amount>` — e.g. `@Condotto budget 20` (US dollars)." });
+      await surface.post(conv, {
+        text:
+          "Usage: `@Condotto budget <amount>` — e.g. `@Condotto budget 20` (US dollars), " +
+          "or `@Condotto budget off` for no ceiling.",
+      });
       return;
     }
     this.store.setSessionBudgetLimit(session.id, amount);
     this.store.audit({ sessionId: session.id, actor: principalKey(author), event: "budget_set", detail: { limitUsd: amount } });
-    const spent = this.store.sessionCostUsd(session.id);
     await surface.post(conv, {
       text: `Cost budget set to $${amount.toFixed(2)} for this session (spent so far: $${spent.toFixed(2)}).`,
     });
@@ -2152,11 +2194,11 @@ export class SessionManager {
     if (!session || session.status === "stopped") return;
     const surface = this.surfaceFor(conv);
 
-    // Runaway cost cap. Block a NEW human turn once cumulative spend reaches the
-    // thread budget; an architect raises it with `@Condotto budget`.
-    const budgetLimit = session.budget_limit_usd ?? this.defaultCostCapUsd;
+    // Runaway cost cap, when the thread has one. Blocks a NEW human turn once
+    // cumulative spend reaches it; an architect raises it with `@Condotto budget`.
+    const budgetLimit = this.budgetLimitFor(session);
     const spent = this.store.sessionCostUsd(sessionId);
-    if (inbound && spent >= budgetLimit) {
+    if (inbound && budgetLimit !== null && spent >= budgetLimit) {
       this.store.audit({ sessionId, actor: "system", event: "budget_exceeded", detail: { spentUsd: spent, limitUsd: budgetLimit } });
       await surface
         .post(conv, {
@@ -2171,7 +2213,8 @@ export class SessionManager {
     // Per-turn cap: the remaining headroom, so the SDK's own budget signal arms
     // the adapter's auto-cancel — which is the only thing that actually halts a
     // detached background workflow (the signal alone does not).
-    const remaining = budgetLimit - spent;
+    // Omitted when the thread has no ceiling, so the SDK runs without one too.
+    const remaining = budgetLimit === null ? 0 : budgetLimit - spent;
     const turnBudgetUsd = remaining > 0 ? remaining : undefined;
 
     const repo = this.store.getRepo(session.repo_id);
