@@ -610,6 +610,19 @@ Stop the daemon, swap the binary (keep its `claude` sidecar in sync), start it. 
 daemon runs ordered schema migrations on boot, so an upgrade never strands an
 install. Running an older binary against a newer store is refused.
 
+**A new scope needs a reinstall.** Slack only grants scopes at install time, so if
+an upgrade adds one, adding it under **OAuth & Permissions** is not enough — click
+**Reinstall to workspace** and the bot token is reissued with it. Coming from an
+install that predates [Files](#files), add `files:read` and `files:write`, then
+reinstall. Without them, files people attach never reach the agent and it cannot
+send any back; Condotto says so in the thread rather than failing silently.
+
+**Upgrading from a version before durable memory was on by default:** every repo
+starts keeping notes at the next boot. Set `memory = false` on a repo, or
+`[defaults].memory = false`, if you would rather it did not. And if your
+`condotto.toml` still has a `role = "observer"` entry, change it to `member` —
+there are only two roles now, and the daemon will refuse to start until you do.
+
 ### Worktrees and cleanup
 
 Per-session worktrees live under `[paths].worktrees_root`. The daemon sweeps hourly
