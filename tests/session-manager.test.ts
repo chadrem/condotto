@@ -589,7 +589,7 @@ describe("operator status & slash stop guidance", () => {
     expect(text).toContain("*1* parked");
     expect(text).toContain("turns in flight: *0/6*"); // idle, default cap
     expect(text).toContain("default model `opus`");
-    expect(text).toContain("effort `xhigh`");
+    expect(text).toContain("effort `high`");
     expect(text).toContain("cost cap $10.00/thread"); // this world pins its own cap
     expect(text).toContain("subagents on");
     expect(text).toContain("workflows on");
@@ -1243,12 +1243,12 @@ describe("harness capabilities — model & effort", () => {
     await w.manager.handleEvent({ kind: "command", conv: conv(id), author: architect, name: "assign", args: "testrepo" });
   }
 
-  test("assign advertises the default model & effort (Opus + xhigh)", async () => {
+  test("assign advertises the default model & effort (Opus + high)", async () => {
     const w = makeWorld();
     await assign(w, "cap1.000001");
     const intro = w.surface.posts.at(-1)!.text;
     expect(intro).toContain("model `opus`");
-    expect(intro).toContain("effort `xhigh`");
+    expect(intro).toContain("effort `high`");
   });
 
   test("architect sets the model; it persists and reaches the next turn", async () => {
@@ -1262,7 +1262,7 @@ describe("harness capabilities — model & effort", () => {
     await w.manager.handleEvent({ kind: "message", conv: c, author: architect, text: "hi", attachments: [] });
     const last = w.harness.allTurns.at(-1)!;
     expect(last.harness?.model).toBe("sonnet");
-    expect(last.harness?.effort).toBe("xhigh"); // unchanged default
+    expect(last.harness?.effort).toBe("high"); // unchanged default
     expect(last.harness?.subagents).toBe(true); // shipped posture: both on
     expect(last.harness?.workflows).toBe(true);
   });
@@ -1366,7 +1366,7 @@ describe("harness capabilities — subagents & workflows", () => {
     const intro = w.surface.posts.at(-1)!.text;
     expect(intro).toContain("Session settings");
     expect(intro).toContain("model `opus`");
-    expect(intro).toContain("effort `xhigh`");
+    expect(intro).toContain("effort `high`");
     expect(intro).toContain("subagents *on*");
     expect(intro).toContain("workflows *on*");
     expect(intro).toContain("cost budget");

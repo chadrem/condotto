@@ -46,15 +46,14 @@ export interface CondottoConfig {
   /**
    * Daemon-wide default model/effort tokens, used when a repo sets
    * none. Opaque tokens the harness adapter validates. The default is Opus 5.5 +
-   * xhigh: the implementer has to be first-class for a PM to build a real feature.
+   * high; an architect raises a thread to xhigh or max when the work needs it.
    */
   defaultModel: string;
   defaultEffort: string;
   /**
    * Daemon-wide default harness posture for a new session, used when a repo sets
-   * no `subagents`/`workflows`. Both on by default: together with the `xhigh`
-   * effort default, a thread arrives at full strength instead of waiting for an
-   * architect to remember to raise it.
+   * no `subagents`/`workflows`. Both on by default, so a thread can fan out
+   * without waiting for an architect to remember to turn them on.
    * Override with `[defaults].subagents = false` / `CONDOTTO_SUBAGENTS=off`
    * (same for workflows). Confinement is unchanged — see DEFAULT_SUBAGENTS.
    */
@@ -104,12 +103,12 @@ export const DEFAULT_COST_CAP_USD = null;
 /** Default cap on concurrently-executing harness turns (protects the box). */
 export const DEFAULT_MAX_CONCURRENT_TURNS = 6;
 /**
- * Default implementer model/effort. Opus 5.5 + xhigh: Anthropic's guidance is to
- * step up to xhigh for demanding coding and agentic work. Opaque tokens — the
+ * Default implementer model/effort. Opus 5.5 + high: xhigh costs meaningfully
+ * more, so a thread steps up to it by choice. Opaque tokens — the
  * harness adapter maps/validates them.
  */
 export const DEFAULT_MODEL = "opus";
-export const DEFAULT_EFFORT = "xhigh";
+export const DEFAULT_EFFORT = "high";
 /**
  * Default harness posture for a NEW session: subagents and workflows both on.
  *
@@ -465,8 +464,7 @@ export function loadConfig(
   const defaults = toml.defaults === undefined ? {} : asTable(toml.defaults, "[defaults]");
   warnUnknownKeys(defaults, DEFAULTS_KEYS, "[defaults]");
 
-  // Both on unless explicitly disabled, which with `[defaults].effort = "xhigh"`
-  // is the full-strength posture a new thread starts in.
+  // Both on unless explicitly disabled.
   const defaultSubagents = resolveBoolDefault(
     env.CONDOTTO_SUBAGENTS,
     defaults.subagents,

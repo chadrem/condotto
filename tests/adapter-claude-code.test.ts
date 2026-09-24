@@ -593,7 +593,7 @@ describe("claude-code adapter: model + effort resolution", () => {
   });
 
   test("effort passes through verbatim; an unsupported one falls back to the SDK default", async () => {
-    // xhigh is the shipped default and Opus 5.5 supports it.
+    // Opus 5.5 supports xhigh.
     expect((await captureOpts({ model: "opus", effort: "xhigh" })).effort).toBe("xhigh");
     expect((await captureOpts({ model: "opus", effort: "max" })).effort).toBe("max");
     expect((await captureOpts({ model: "opus", effort: "bogus" })).effort).toBeUndefined();

@@ -87,17 +87,16 @@ memory_root = "~/.condotto/memory"          # durable agent memory, per (repo, c
 # ---------------------------------------------------------------------------
 # Daemon-wide defaults. Each is used when a repo (below) doesn't set its own.
 #
-# The shipped values below are the full-strength posture: xhigh effort, subagents
-# and workflows. Dial any of them down here, per repo, or per thread. A new thread starts
-# at full strength; dial any of it down here, per-repo, or per-thread in Slack.
+# The shipped values below are high effort with subagents and workflows on. Change
+# any of them here, per repo, or per thread in Slack.
 [defaults]
 model = "opus"              # implementer model token: opus | sonnet | fable.
                             #   `opus` is Claude Opus 5.5.
                             #   Env override: CONDOTTO_DEFAULT_MODEL
-effort = "xhigh"            # reasoning effort: low | medium | high | xhigh | max.
+effort = "high"             # reasoning effort: low | medium | high | xhigh | max.
                             #   xhigh is Anthropic's recommendation for demanding
-                            #   coding and agentic work. Costs meaningfully more
-                            #   than high; step down if your threads don't need it.
+                            #   coding and agentic work, and costs meaningfully
+                            #   more than high. Step up if your threads need it.
                             #   Env override: CONDOTTO_DEFAULT_EFFORT
 subagents = true            # the agent can fan out to subagents for parallel
                             #   exploration. They are confined to the worktree

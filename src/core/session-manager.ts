@@ -357,15 +357,14 @@ export interface SessionManagerOptions {
   /**
    * Daemon-wide default model/effort tokens, used when a session
    * (and its repo) sets none. Opaque — validated against the harness adapter's
-   * capabilities. Default Opus 5.5 + xhigh.
+   * capabilities. Default Opus 5.5 + high.
    */
   defaultModel?: string;
   defaultEffort?: string;
   /**
    * Daemon-wide default harness posture, used when a session's repo sets no
-   * `default_subagents`/`default_workflows`. Both on by default: with the `xhigh`
-   * effort default, a thread starts at full strength. Seeds NEW sessions only —
-   * an existing session keeps its own row.
+   * `default_subagents`/`default_workflows`. Both on by default. Seeds NEW
+   * sessions only — an existing session keeps its own row.
    */
   defaultSubagents?: boolean;
   defaultWorkflows?: boolean;
