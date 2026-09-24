@@ -45,7 +45,7 @@ export interface CondottoConfig {
   maxConcurrentTurns: number;
   /**
    * Daemon-wide default model/effort tokens, used when a repo sets
-   * none. Opaque tokens the harness adapter validates. The default is Opus 5 +
+   * none. Opaque tokens the harness adapter validates. The default is Opus 5.5 +
    * xhigh: the implementer has to be first-class for a PM to build a real feature.
    */
   defaultModel: string;
@@ -104,7 +104,7 @@ export const DEFAULT_COST_CAP_USD = null;
 /** Default cap on concurrently-executing harness turns (protects the box). */
 export const DEFAULT_MAX_CONCURRENT_TURNS = 6;
 /**
- * Default implementer model/effort. Opus 5 + xhigh: Anthropic's guidance is to
+ * Default implementer model/effort. Opus 5.5 + xhigh: Anthropic's guidance is to
  * step up to xhigh for demanding coding and agentic work. Opaque tokens — the
  * harness adapter maps/validates them.
  */

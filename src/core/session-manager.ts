@@ -357,7 +357,7 @@ export interface SessionManagerOptions {
   /**
    * Daemon-wide default model/effort tokens, used when a session
    * (and its repo) sets none. Opaque — validated against the harness adapter's
-   * capabilities. Default Opus 5 + xhigh.
+   * capabilities. Default Opus 5.5 + xhigh.
    */
   defaultModel?: string;
   defaultEffort?: string;

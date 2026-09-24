@@ -92,7 +92,7 @@ memory_root = "~/.condotto/memory"          # durable agent memory, per (repo, c
 # at full strength; dial any of it down here, per-repo, or per-thread in Slack.
 [defaults]
 model = "opus"              # implementer model token: opus | sonnet | fable.
-                            #   `opus` is Claude Opus 5.
+                            #   `opus` is Claude Opus 5.5.
                             #   Env override: CONDOTTO_DEFAULT_MODEL
 effort = "xhigh"            # reasoning effort: low | medium | high | xhigh | max.
                             #   xhigh is Anthropic's recommendation for demanding

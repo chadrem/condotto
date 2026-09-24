@@ -220,7 +220,7 @@ worktrees_root = "~/tmp/condotto-worktrees"  # per-session git worktrees
 memory_root = "~/.condotto/memory"           # durable agent memory
 
 [defaults]                 # used when a repo sets none
-model = "opus"             # opus (Opus 5) | sonnet | fable
+model = "opus"             # opus (Opus 5.5) | sonnet | fable
 effort = "xhigh"           # low | medium | high | xhigh | max
 subagents = true           # parallel exploration
 workflows = true           # multi-agent workflows

@@ -228,13 +228,13 @@ const WORKFLOW_TOOL = "Workflow";
 // pass through (the SDK also accepts bare aliases / full IDs), but the core has
 // already validated against `supportedModels`, so that path is belt-and-braces.
 const MODEL_IDS: Record<string, string> = {
-  opus: "claude-opus-5",
+  opus: "claude-opus-5-5",
   sonnet: "claude-sonnet-5",
   fable: "claude-fable-5",
 };
 const SUPPORTED_MODELS = Object.keys(MODEL_IDS);
 // Independent of extended thinking. xhigh needs Fable 5 / Opus 4.7+ / Sonnet 5
-// (our Opus 5 default qualifies, and is why xhigh is the shipped default); the
+// (our Opus 5.5 default qualifies, and is why xhigh is the shipped default); the
 // SDK silently falls back to `high` elsewhere. Note that Opus 5 refuses a request
 // that DISABLES thinking at xhigh/max — we set no thinking option, so don't start.
 const SUPPORTED_EFFORTS = ["low", "medium", "high", "xhigh", "max"];
@@ -871,7 +871,7 @@ class ClaudeCodeSession implements HarnessSession {
         disallowedTools,
         permissionMode,
         // Exact SDK model id + reasoning effort. Omitted = SDK
-        // defaults; the core always supplies them (default Opus 5 + xhigh).
+        // defaults; the core always supplies them (default Opus 5.5 + xhigh).
         ...(model ? { model } : {}),
         ...(effort ? { effort: effort as "low" | "medium" | "high" | "xhigh" | "max" } : {}),
         // Intra-turn runaway brake. The SDK stops the turn if it

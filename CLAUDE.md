@@ -137,8 +137,8 @@ Runtime is **Bun 1.2+**. TypeScript runs directly, no build step.
   via `bun:sqlite`. **Bolt is pinned to v4 and must stay there**: Bolt 5 pulls
   `@slack/socket-mode@^3`, which Bun cannot run. On an existing clone always
   `bun install --frozen-lockfile`, never a bare `bun add @slack/bolt`.
-- Requires agent-sdk **>= 0.3.220**, the release at parity with Claude Code
-  2.1.220, which is what added `claude-opus-5`. An older sidecar has no such
+- Requires agent-sdk **>= 0.3.280**, the release at parity with Claude Code
+  2.1.280, which is what added `claude-opus-5-5`. An older sidecar has no such
   model id.
 - Auth: two modes, chosen by `[auth].mode` (`core/config.ts`, `loadAuthConfig`).
   `api_key` resolves `[auth].api_key` then env `ANTHROPIC_API_KEY`; this is the

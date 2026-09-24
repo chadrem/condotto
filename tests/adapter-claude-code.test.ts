@@ -584,16 +584,16 @@ describe("claude-code adapter: model + effort resolution", () => {
 
   test("the core's opaque tokens map to exact SDK model ids", async () => {
     // Pinned deliberately: the core only ever passes `opus`, so the SDK model
-    // this resolves to is invisible from anywhere else. `opus` means Opus 5 —
-    // which needs the sidecar shipped with agent-sdk >= 0.3.220 (CC 2.1.220 is
-    // the release that added `claude-opus-5`); an older sidecar has no such id.
-    expect((await captureOpts({ model: "opus" })).model).toBe("claude-opus-5");
+    // this resolves to is invisible from anywhere else. `opus` means Opus 5.5 —
+    // which needs the sidecar shipped with agent-sdk >= 0.3.280 (CC 2.1.280 is
+    // the release that added `claude-opus-5-5`); an older sidecar has no such id.
+    expect((await captureOpts({ model: "opus" })).model).toBe("claude-opus-5-5");
     expect((await captureOpts({ model: "sonnet" })).model).toBe("claude-sonnet-5");
     expect((await captureOpts({ model: "fable" })).model).toBe("claude-fable-5");
   });
 
   test("effort passes through verbatim; an unsupported one falls back to the SDK default", async () => {
-    // xhigh is the shipped default and Opus 5 supports it.
+    // xhigh is the shipped default and Opus 5.5 supports it.
     expect((await captureOpts({ model: "opus", effort: "xhigh" })).effort).toBe("xhigh");
     expect((await captureOpts({ model: "opus", effort: "max" })).effort).toBe("max");
     expect((await captureOpts({ model: "opus", effort: "bogus" })).effort).toBeUndefined();
