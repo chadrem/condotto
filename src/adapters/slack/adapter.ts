@@ -206,18 +206,24 @@ export function parseMentionCommand(
     const target = resolveUserMention(words[1]!, botUserId) ?? "?";
     return { name: "revoke", args: `${target} ${words.slice(2).map((w) => w.toLowerCase()).join(" ")}`.trim() };
   }
-  // Thread members. `member`/`members` are never ordinary prose openers, so any
-  // arguments make them a command (a bad target gets a usage reply rather than
-  // reaching the agent). `add`/`remove` ARE prose ("@Condotto add a test for x"),
-  // so they are commands only when EVERY following word is a user mention.
+  // Thread members. `member`/`members` take an optional verb and then only
+  // things that look like people: a linked mention, or a plain `@name` typed
+  // without autocomplete (a command with an unresolved target, so the architect
+  // gets a usage reply rather than the agent getting the line). Anything else —
+  // "@Condotto members of QA reported…" — is conversation. `add`/`remove` are
+  // prose openers too ("@Condotto add a test for x"), so bare they are commands
+  // only when EVERY following word is a linked user mention.
   const keysOf = (ws: string[]) => ws.map((w) => resolveUserMention(w, botUserId) ?? "?").join(" ");
   const allMentions = (ws: string[]) => ws.length > 0 && ws.every((w) => SLACK_USER_MENTION.test(w));
+  const allPeople = (ws: string[]) => ws.every((w) => w.startsWith("<@") || w.startsWith("@"));
   if (first === "member" || first === "members") {
-    if (words.length === 1) return { name: "members", args: "list" };
-    if ((second === "add" || second === "remove") && words.length >= 3) {
-      return { name: "members", args: `${second} ${keysOf(words.slice(2))}` };
+    const verb = second;
+    if (words.length === 1 || (verb === "list" && words.length === 2)) return { name: "members", args: "list" };
+    if ((verb === "add" || verb === "remove") && allPeople(words.slice(2))) {
+      return { name: "members", args: `${verb} ${keysOf(words.slice(2))}`.trim() };
     }
-    return { name: "members", args: `add ${keysOf(words.slice(1))}` };
+    if (allPeople(words.slice(1))) return { name: "members", args: `add ${keysOf(words.slice(1))}` };
+    return null;
   }
   if ((first === "add" || first === "remove") && allMentions(words.slice(1))) {
     return { name: "members", args: `${first} ${keysOf(words.slice(1))}` };

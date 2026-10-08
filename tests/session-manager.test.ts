@@ -279,6 +279,38 @@ describe("thread members", () => {
     expect(w.harness.allTurns.at(-1)!.text).not.toContain("held before revoke");
   });
 
+  test("a member removed while an architect turn waits in the queue is dropped from that turn", async () => {
+    const w = makeWorld();
+    const c = await session(w, "tm16.000001");
+    await members(w, c, "add fake:U_OUT");
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    w.harness.beforeReply = () => gate;
+    const first = say(w, c, architect, "first turn");
+    await Bun.sleep(0);
+    await say(w, c, outsider, "queued member line");
+    const second = say(w, c, architect, "second turn");
+    await Bun.sleep(5); // let it fold the held line into its queued turn
+    expect(w.harness.allTurns.at(-1)!.text).toContain("first turn"); // still blocked
+    await members(w, c, "remove fake:U_OUT");
+    w.harness.beforeReply = null;
+    release();
+    await first;
+    await second;
+    const turn = w.harness.allTurns.at(-1)!.text;
+    expect(turn).toContain("second turn");
+    expect(turn).not.toContain("queued member line");
+  });
+
+  test("a remote message that arrives after the bridge closed sends no note to Slack", async () => {
+    const w = makeWorld();
+    const c = await session(w, "tm17.000001");
+    await say(w, c, { surface: "remote", externalId: "operator" }, "from the phone", { mentioned: true });
+    expect(w.surface.ephemerals).toHaveLength(0);
+    await say(w, c, architect, "go");
+    expect(w.harness.allTurns.at(-1)!.text).not.toContain("from the phone");
+  });
+
   test("a member removed while their file is still downloading is not carried", async () => {
     const w = makeWorld();
     const c = await session(w, "tm15.000001");

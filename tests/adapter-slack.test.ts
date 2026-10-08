@@ -110,6 +110,18 @@ describe("parseMentionCommand — thread members", () => {
     expect(parse(`member <@${BOT}>`)).toEqual({ name: "members", args: "add ?" });
   });
 
+  test("member list, and a verb with no target, are commands", () => {
+    expect(parse("member list")).toEqual({ name: "members", args: "list" });
+    expect(parse("members list")).toEqual({ name: "members", args: "list" });
+    expect(parse("member remove")).toEqual({ name: "members", args: "remove" });
+  });
+
+  test("prose that opens with member/members stays conversation", () => {
+    expect(parse("members of QA reported the export is broken")).toBeNull();
+    expect(parse("member signups dropped last week")).toBeNull();
+    expect(parse("member <@U0DAVE> keeps hitting this bug")).toBeNull();
+  });
+
   test("add/remove in prose stay conversation", () => {
     expect(parse("add a test for the parser")).toBeNull();
     expect(parse("remove the dead code")).toBeNull();

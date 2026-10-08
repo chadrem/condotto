@@ -2470,6 +2470,9 @@ export class SessionManager {
    * from anyone not an architect, configured member, or thread member is dropped
    * before the agent or the turn log ever sees it. Architect-only, and decided
    * here from the surface-verified ids the adapter resolved — never by the agent.
+   * Allowed even under `runtime_grants = false`, deliberately: that pins who can
+   * DRIVE the agent, and a thread member drives nothing — their words only wait
+   * for an architect's turn. Gating it would put every PM behind a config edit.
    * args: "add <key|?>…", "remove <key|?>…" or "list".
    */
   private async threadMembers(conv: ConversationRef, author: Principal, args: string): Promise<void> {
@@ -2549,6 +2552,18 @@ export class SessionManager {
     await surface.post(conv, { text: lines.join("\n") });
   }
 
+  /**
+   * Whether a principal's messages in this session may reach the agent. A
+   * remote-control message counts while the bridge is on (it is still only held,
+   * like a member's, unless `remote:operator` was granted architect).
+   */
+  private hears(principal: string, channelId: string, sessionId: string): boolean {
+    return (
+      this.store.isHeard(principal, channelId, sessionId) ||
+      (principal === principalKey(REMOTE_PRINCIPAL) && !!this.store.getSession(sessionId)?.remote_control)
+    );
+  }
+
   /** Forget messages held from `principal` that no turn has carried yet. */
   private dropHeld(sessionId: string, principal: string): void {
     const entry = this.live.get(sessionId);
@@ -2584,15 +2599,14 @@ export class SessionManager {
     // a configured member, or a member of this thread is dropped HERE — before its
     // files are fetched, before it is framed, before the turn log — so nothing
     // they write can reach the agent. Only who/when is audited, never the text.
-    // A remote-control message counts as heard while the architect who turned the
-    // bridge on keeps it on (its messages are still only held, like a member's).
+    // A remote-control message counts as heard while the bridge is on (`hears`).
     const actor = principalKey(event.author);
-    const isHeard = () =>
-      this.store.isHeard(actor, event.conv.channelId, session.id) ||
-      (actor === principalKey(REMOTE_PRINCIPAL) && !!this.store.getSession(session.id)?.remote_control);
+    const isHeard = () => this.hears(actor, event.conv.channelId, session.id);
     if (!isHeard()) {
       this.store.audit({ sessionId: session.id, actor, event: "message_ignored" });
-      if (event.mentioned) {
+      // The note goes to the author on this thread's own surface; a remote
+      // principal has no identity there to send it to.
+      if (event.mentioned && event.author.surface === event.conv.surfaceId) {
         await this.surfaceFor(event.conv)
           .postEphemeral?.(event.conv, event.author, {
             text: "You're not a member of this thread, so I can't see your messages here — ask an architect to add you with `@Condotto member @you`.",
@@ -2657,10 +2671,11 @@ export class SessionManager {
     }
 
     // Carry anything held since the last turn, oldest first, ahead of this
-    // message. Cleared only once the turn is actually enqueued.
+    // message. Taken off the queue now, but filtered again when the turn starts:
+    // it may wait behind a running one, and a `remove` or `revoke` in between
+    // must still keep that person's words from the agent.
     const held = entry.pendingContext ?? [];
     entry.pendingContext = [];
-    const framedText = held.length > 0 ? [...held.map((h) => h.framed), framed].join("\n\n") : framed;
 
     // Serialize turns per session; different sessions run concurrently.
     entry.chain = entry.chain
@@ -2668,7 +2683,10 @@ export class SessionManager {
         this.executeTurn({
           sessionId: session.id,
           conv: event.conv,
-          framedText,
+          framedText: [
+            ...held.filter((h) => this.hears(h.principal, event.conv.channelId, session.id)).map((h) => h.framed),
+            framed,
+          ].join("\n\n"),
           placeholder: "…thinking",
           inbound: { principal: principalKey(event.author), text: event.text },
         }),
