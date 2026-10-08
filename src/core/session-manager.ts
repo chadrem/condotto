@@ -311,6 +311,7 @@ function threadCommandHelp(opts: { runtimeGrants: boolean; remoteControl: boolea
     ...(opts.runtimeGrants
       ? [`• \`@Condotto grant @user architect [everywhere]\` · \`@Condotto revoke @user\` — delegate authority (this channel, or everywhere)`]
       : []),
+    `• \`@Condotto member @user\` · \`@Condotto remove @user\` · \`@Condotto members\` — who else I listen to in this thread (nobody until you add them)`,
     `• \`@Condotto budget <usd>\` — cap this thread's spend (\`off\` to remove it) · \`@Condotto cancel\` — stop the running turn (e.g. a runaway workflow)`,
     `• \`@Condotto plan on|off\` — research first: I propose a plan and change nothing until you turn it off`,
     ...(opts.remoteControl
@@ -343,7 +344,7 @@ interface LiveEntry {
    * Persisting them would mean a schema, an eviction policy, and a way for a
    * six-week-old aside to surface in an unrelated turn.
    */
-  pendingContext?: string[];
+  pendingContext?: { principal: string; framed: string }[];
 }
 
 /** How many un-driven messages to carry into the next architect turn. */
@@ -841,6 +842,9 @@ export class SessionManager {
         break;
       case "revoke":
         await this.revokeRole(event.conv, event.author, event.args);
+        break;
+      case "members":
+        await this.threadMembers(event.conv, event.author, event.args);
         break;
       case "help":
         await this.guide(event.conv);
@@ -2446,6 +2450,79 @@ export class SessionManager {
     await surface.post(conv, { text: `No runtime grant to revoke for ${mentionToken(target)} ${where}.` });
   }
 
+  /**
+   * `@Condotto member @user…` / `remove @user…` / `members`. Who, besides the
+   * architects, this ONE thread listens to. Nobody is heard by default: a message
+   * from anyone not an architect, configured member, or thread member is dropped
+   * before the agent or the turn log ever sees it. Architect-only, and decided
+   * here from the surface-verified ids the adapter resolved — never by the agent.
+   * args: "add <key|?>…", "remove <key|?>…" or "list".
+   */
+  private async threadMembers(conv: ConversationRef, author: Principal, args: string): Promise<void> {
+    const surface = this.surfaceFor(conv);
+    const actor = principalKey(author);
+    const [verb = "", ...targets] = args.trim().split(/\s+/).filter(Boolean);
+    if (!this.store.isArchitect(actor, conv.channelId)) {
+      this.store.audit({ actor, event: "authz_denied", detail: { action: `members_${verb}`, channel: conv.channelId } });
+      await surface.post(conv, { text: "Only architects can change who I listen to in a thread." });
+      return;
+    }
+    const session = this.store.getSessionByConversation(conv.surfaceId, conv.conversationId);
+    if (!session || session.status === "stopped") {
+      await surface.post(conv, { text: "Members belong to a session thread — assign me here first (`@Condotto assign <repo>`)." });
+      return;
+    }
+
+    if (verb === "list") {
+      const members = this.store.sessionMembers(session.id);
+      await surface.post(conv, {
+        text:
+          members.length === 0
+            ? "Only architects are heard in this thread. Add someone with `@Condotto member @user`."
+            : `Besides the architects, I listen to ${members.map(mentionToken).join(", ")} in this thread. ` +
+              "They're heard, not obeyed: only an architect's message sets me working.",
+      });
+      return;
+    }
+
+    const usage = "Usage: `@Condotto member @user` (add), `@Condotto remove @user`, `@Condotto members` (list).";
+    if ((verb !== "add" && verb !== "remove") || targets.length === 0) {
+      await surface.post(conv, { text: usage });
+      return;
+    }
+    if (targets.some((t) => !VALID_PRINCIPAL.test(t))) {
+      await surface.post(conv, { text: `Couldn't find one of those people — @-mention them with Slack's autocomplete so it links to their account. ${usage}` });
+      return;
+    }
+
+    const lines: string[] = [];
+    for (const target of [...new Set(targets)]) {
+      if (verb === "add") {
+        if (this.store.isArchitect(target, conv.channelId)) {
+          lines.push(`${mentionToken(target)} is an architect — already heard.`);
+        } else if (this.store.addSessionMember(session.id, target, actor)) {
+          this.store.audit({ sessionId: session.id, actor, event: "member_added", detail: { target } });
+          lines.push(`Added ${mentionToken(target)} — I'll see their messages in this thread from now on (not earlier ones), and only an architect's message sets me working.`);
+        } else {
+          lines.push(`${mentionToken(target)} is already a member of this thread.`);
+        }
+      } else if (this.store.removeSessionMember(session.id, target)) {
+        this.store.audit({ sessionId: session.id, actor, event: "member_removed", detail: { target } });
+        this.dropHeld(session.id, target);
+        lines.push(`Removed ${mentionToken(target)} — I won't see their messages in this thread any more.`);
+      } else {
+        lines.push(`${mentionToken(target)} isn't a member of this thread.`);
+      }
+    }
+    await surface.post(conv, { text: lines.join("\n") });
+  }
+
+  /** Forget messages held from `principal` that no turn has carried yet. */
+  private dropHeld(sessionId: string, principal: string): void {
+    const entry = this.live.get(sessionId);
+    if (entry?.pendingContext) entry.pendingContext = entry.pendingContext.filter((h) => h.principal !== principal);
+  }
+
   /** Resolve a grant/revoke scope modifier: none = this channel, everywhere/global = '*'. */
   private scopeFromModifier(modifier: string | undefined, channelId: string): string | null {
     if (modifier === undefined) return channelId;
@@ -2468,6 +2545,28 @@ export class SessionManager {
       // @-mentioned Condotto, in which case guide them into setup rather
       // than staying silent.
       if (event.mentioned) await this.guide(event.conv);
+      return;
+    }
+
+    // Nobody is heard by default. A message from someone who is not an architect,
+    // a configured member, or a member of this thread is dropped HERE — before its
+    // files are fetched, before it is framed, before the turn log — so nothing
+    // they write can reach the agent. Only who/when is audited, never the text.
+    // A remote-control message counts as heard while the architect who turned the
+    // bridge on keeps it on (its messages are still only held, like a member's).
+    const actor = principalKey(event.author);
+    const heard =
+      this.store.isHeard(actor, event.conv.channelId, session.id) ||
+      (actor === principalKey(REMOTE_PRINCIPAL) && !!session.remote_control);
+    if (!heard) {
+      this.store.audit({ sessionId: session.id, actor, event: "message_ignored" });
+      if (event.mentioned) {
+        await this.surfaceFor(event.conv)
+          .postEphemeral?.(event.conv, event.author, {
+            text: "You're not a member of this thread, so I can't see your messages here — ask an architect to add you with `@Condotto member @you`.",
+          })
+          .catch(() => {});
+      }
       return;
     }
 
@@ -2499,9 +2598,9 @@ export class SessionManager {
     // into the next one, so a thread where a PM and an engineer are talking still
     // reaches the agent whole — it just does not spend a turn (and an unanswered
     // interjection) on every line of a human conversation.
-    if (!this.store.isArchitect(principalKey(event.author), event.conv.channelId)) {
+    if (!this.store.isArchitect(actor, event.conv.channelId)) {
       const pending = (entry.pendingContext ??= []);
-      pending.push(framed);
+      pending.push({ principal: actor, framed });
       if (pending.length > MAX_PENDING_CONTEXT) pending.splice(0, pending.length - MAX_PENDING_CONTEXT);
       this.store.insertTurn({ sessionId: session.id, direction: "in", principal: principalKey(event.author), text: event.text });
       this.store.audit({ sessionId: session.id, actor: principalKey(event.author), event: "message_held" });
@@ -2512,9 +2611,7 @@ export class SessionManager {
           .post(event.conv, {
             text:
               "Noted — I've kept that, and I'll have it in front of me next time an architect sends me something. " +
-              (this.runtimeGrants
-                ? "Only architects run me in this thread; ask one to `@Condotto grant` you if you should be driving."
-                : "Only architects run me in this thread."),
+              "Only architects run me in this thread.",
           })
           .catch(() => {});
       }
@@ -2525,7 +2622,7 @@ export class SessionManager {
     // message. Cleared only once the turn is actually enqueued.
     const held = entry.pendingContext ?? [];
     entry.pendingContext = [];
-    const framedText = held.length > 0 ? [...held, framed].join("\n\n") : framed;
+    const framedText = held.length > 0 ? [...held.map((h) => h.framed), framed].join("\n\n") : framed;
 
     // Serialize turns per session; different sessions run concurrently.
     entry.chain = entry.chain

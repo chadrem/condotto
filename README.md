@@ -336,6 +336,9 @@ In a channel the bot has been invited to:
 | `@Condotto skills` | architect | — | List the skills this thread can run, and the file each one is. |
 | `@Condotto grant @user <architect\|member> [everywhere]` | architect | — | Let someone else drive. The role is required. This channel unless you add `everywhere`. Survives restarts. |
 | `@Condotto revoke @user [everywhere]` | architect | — | Take it back. |
+| `@Condotto member @user [@user…]` | architect | **nobody** | Let someone be heard in *this* thread. Also `@Condotto add @user`. |
+| `@Condotto remove @user [@user…]` | architect | — | Stop hearing them here. Anything of theirs not yet passed on is dropped. |
+| `@Condotto members` | architect | — | Who, besides architects, this thread hears. |
 
 Every default above comes from `condotto.toml` and can be changed there, per repo,
 or per thread with the command. A thread starts with `opus` at `high` effort
@@ -344,14 +347,18 @@ with subagents, workflows and memory all on, and no spend ceiling — see
 
 **Not in this table because they are not per-thread:** durable memory is on by
 default and set per repo (`memory = false` to opt out, see [Memory](#memory)); the
-concurrency cap `max_concurrent_turns` (**6**) is daemon-wide; and anyone not
-granted a role is a **member**, who talks in the thread without running the agent.
+concurrency cap `max_concurrent_turns` (**6**) is daemon-wide.
 
-**Who can do what.** Only an architect's message runs the agent. Everyone else can
-talk in the thread, and what they say is carried into the next architect turn as
-context, so the conversation reaches the agent whole. It just does not spend a turn
-on every line of two people talking. Granting someone architect is the whole
-decision: hand it to people you would hand a laptop and a git remote to.
+**Who can do what.** Only an architect's message runs the agent. A **member** is
+heard: what they say is carried into the next architect turn as context, so a
+conversation reaches the agent whole without spending a turn on every line. Anyone
+else is **not heard at all** — their messages and files are dropped before the
+agent, the turn log or the disk ever see them, and if they mention Condotto they
+get a private note saying so. Someone becomes a member of one thread when an
+architect says `@Condotto member @them` there (a Condotto command, decided from
+Slack's verified user id, never by the agent), or of a whole channel through
+`[[roles]]` or `grant`. Granting someone architect is the whole decision: hand it
+to people you would hand a laptop and a git remote to.
 
 ---
 
@@ -535,7 +542,7 @@ architects = ["slack:U0123ABC", "remote:operator"]
 ```
 
 Until you do, a message from the app is held for the next architect turn rather than
-run, which is the same thing that happens to anyone else without the role.
+run, like a member's, for as long as remote control is on in that thread.
 
 Files are the one gap: send them in the thread, not from the app. Plan mode and remote
 control are mutually exclusive — turn plan mode off first.

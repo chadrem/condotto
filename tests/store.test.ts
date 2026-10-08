@@ -329,13 +329,23 @@ describe("store cost accounting", () => {
 });
 
 describe("store roles", () => {
-  test("unmapped principals are members; architects are explicit", () => {
+  test("unmapped principals have no role; architects are explicit", () => {
     const store = memoryStore();
-    expect(store.roleOf("slack:U_ANY", "C1")).toBe("member");
+    expect(store.roleOf("slack:U_ANY", "C1")).toBeNull();
     expect(store.isArchitect("slack:U_ANY", "C1")).toBe(false);
     store.setRole("slack:U_ARCH", "architect");
     expect(store.isArchitect("slack:U_ARCH", "C1")).toBe(true);
     expect(store.isArchitect("slack:U_ARCH", "C_OTHER")).toBe(true); // '*' scope spans channels
+  });
+
+  test("only architects, configured members and thread members are heard", () => {
+    const store = memoryStore();
+    store.setRole("slack:U_ARCH", "architect");
+    store.setRole("slack:U_CHAN", "member", "C1");
+    expect(store.isHeard("slack:U_ARCH", "C1", "s1")).toBe(true);
+    expect(store.isHeard("slack:U_CHAN", "C1", "s1")).toBe(true);
+    expect(store.isHeard("slack:U_CHAN", "C2", "s1")).toBe(false); // a channel member, not this channel
+    expect(store.isHeard("slack:U_ANY", "C1", "s1")).toBe(false);
   });
 
   test("a channel-scoped mapping overrides the '*' mapping", () => {
@@ -436,7 +446,7 @@ describe("store schema migrations", () => {
   // The current schema version == the number of migrations in the runner. Bump
   // this constant in lockstep whenever a migration is appended — the tests below
   // pin the runner's behavior to it.
-  const CURRENT_SCHEMA_VERSION = 13;
+  const CURRENT_SCHEMA_VERSION = 14;
 
   const migPath = (name: string): string => join(mkdtempSync(join(tmpdir(), "condotto-mig-")), name);
   const userVersion = (path: string): number => {
@@ -474,6 +484,7 @@ describe("store schema migrations", () => {
     raw.run("ALTER TABLE repos ADD COLUMN policy_overrides TEXT NOT NULL DEFAULT '{}'");
     raw.run("ALTER TABLE sessions DROP COLUMN remote_control");
     raw.run("ALTER TABLE repos DROP COLUMN instructions"); // v13
+    raw.run("DROP TABLE session_members"); // v14
     raw.run("PRAGMA user_version = 9");
     raw.close();
     const store = new Store(path);
@@ -510,6 +521,7 @@ describe("store schema migrations", () => {
     const raw = new Database(path);
     raw.run("ALTER TABLE sessions DROP COLUMN remote_control");
     raw.run("ALTER TABLE repos DROP COLUMN instructions"); // v13 re-runs too
+    raw.run("DROP TABLE session_members"); // v14 re-runs too
     raw.run("PRAGMA user_version = 11");
     raw.close();
 
@@ -570,6 +582,7 @@ describe("store schema migrations", () => {
     raw.run("ALTER TABLE sessions DROP COLUMN plan_mode"); // v6
     raw.run("ALTER TABLE sessions DROP COLUMN remote_control"); // v12
     raw.run("ALTER TABLE repos DROP COLUMN instructions"); // v13
+    raw.run("DROP TABLE session_members"); // v14
     // v7 dropped these; a v0 store had them, and the baseline's `CREATE TABLE IF
     // NOT EXISTS` cannot re-add a column to a table that already exists.
     raw.run("ALTER TABLE repos ADD COLUMN land_cmd TEXT"); // v1-era, dropped at v7

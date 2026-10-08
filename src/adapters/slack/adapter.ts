@@ -127,8 +127,11 @@ function threadTsOf(conv: ConversationRef): string | undefined {
  * port, and a `grant` can never target Condotto. Built via `principalKey` so the key
  * format stays in lockstep with the core. Pure (no `this`) for unit testing.
  */
+/** One linkified Slack user mention, the whole word: `<@U123>` or `<@U123|name>`. */
+const SLACK_USER_MENTION = /^<@([A-Z0-9]+)(?:\|[^>]*)?>$/;
+
 export function resolveUserMention(token: string, botUserId: string | null): string | null {
-  const m = token.match(/^<@([A-Z0-9]+)(?:\|[^>]*)?>$/);
+  const m = token.match(SLACK_USER_MENTION);
   if (!m) return null;
   if (botUserId && m[1] === botUserId) return null;
   return principalKey({ surface: SURFACE_ID, externalId: m[1]! });
@@ -202,6 +205,22 @@ export function parseMentionCommand(
   if (first === "revoke" && words.length >= 2 && words.length <= 3) {
     const target = resolveUserMention(words[1]!, botUserId) ?? "?";
     return { name: "revoke", args: `${target} ${words.slice(2).map((w) => w.toLowerCase()).join(" ")}`.trim() };
+  }
+  // Thread members. `member`/`members` are never ordinary prose openers, so any
+  // arguments make them a command (a bad target gets a usage reply rather than
+  // reaching the agent). `add`/`remove` ARE prose ("@Condotto add a test for x"),
+  // so they are commands only when EVERY following word is a user mention.
+  const keysOf = (ws: string[]) => ws.map((w) => resolveUserMention(w, botUserId) ?? "?").join(" ");
+  const allMentions = (ws: string[]) => ws.length > 0 && ws.every((w) => SLACK_USER_MENTION.test(w));
+  if (first === "member" || first === "members") {
+    if (words.length === 1) return { name: "members", args: "list" };
+    if ((second === "add" || second === "remove") && words.length >= 3) {
+      return { name: "members", args: `${second} ${keysOf(words.slice(2))}` };
+    }
+    return { name: "members", args: `add ${keysOf(words.slice(1))}` };
+  }
+  if ((first === "add" || first === "remove") && allMentions(words.slice(1))) {
+    return { name: "members", args: `${first} ${keysOf(words.slice(1))}` };
   }
   // What the harness will dispatch in this thread.
   if (first === "skills" && words.length === 1) return { name: "skills", args: "" };
@@ -429,6 +448,7 @@ export class SlackAdapter implements SurfaceAdapter {
             (this.opts.runtimeGrants === false
               ? ""
               : "Roles: `@Condotto grant @user architect [everywhere]`, `@Condotto revoke @user`.\n") +
+            "Who else a thread hears: `@Condotto member @user`, `@Condotto remove @user`, `@Condotto members`.\n" +
             "To assign an existing thread: `@Condotto assign <repo>` in that thread.",
         });
       }
@@ -602,6 +622,15 @@ export class SlackAdapter implements SurfaceAdapter {
       ts: ref.messageId,
       text: renderMrkdwn(msg.text),
       ...NO_UNFURL,
+    });
+  }
+
+  async postEphemeral(conv: ConversationRef, to: Principal, msg: OutboundMessage): Promise<void> {
+    await this.app.client.chat.postEphemeral({
+      channel: conv.channelId,
+      user: to.externalId,
+      thread_ts: threadTsOf(conv),
+      text: renderMrkdwn(msg.text),
     });
   }
 

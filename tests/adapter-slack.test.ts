@@ -88,6 +88,36 @@ describe("slashEphemeralText — /condotto console routing", () => {
   });
 });
 
+describe("parseMentionCommand — thread members", () => {
+  test("member @user adds; several at once; the friendly spellings all work", () => {
+    expect(parse("member <@U0DAVE>")).toEqual({ name: "members", args: "add slack:U0DAVE" });
+    expect(parse("member <@U0DAVE|dave> <@U0ABBY>")).toEqual({ name: "members", args: "add slack:U0DAVE slack:U0ABBY" });
+    expect(parse("add <@U0DAVE>")).toEqual({ name: "members", args: "add slack:U0DAVE" });
+    expect(parse("member add <@U0DAVE>")).toEqual({ name: "members", args: "add slack:U0DAVE" });
+    expect(parse("Member <@U0DAVE>")).toEqual({ name: "members", args: "add slack:U0DAVE" });
+  });
+
+  test("remove and list", () => {
+    expect(parse("remove <@U0DAVE>")).toEqual({ name: "members", args: "remove slack:U0DAVE" });
+    expect(parse("member remove <@U0DAVE>")).toEqual({ name: "members", args: "remove slack:U0DAVE" });
+    expect(parse("members")).toEqual({ name: "members", args: "list" });
+    expect(parse("member")).toEqual({ name: "members", args: "list" });
+  });
+
+  test("a plain-text name is a command with an unresolved target, never conversation", () => {
+    // so the architect gets a usage reply instead of the agent getting the line
+    expect(parse("member @dave")).toEqual({ name: "members", args: "add ?" });
+    expect(parse(`member <@${BOT}>`)).toEqual({ name: "members", args: "add ?" });
+  });
+
+  test("add/remove in prose stay conversation", () => {
+    expect(parse("add a test for the parser")).toBeNull();
+    expect(parse("remove the dead code")).toBeNull();
+    expect(parse("add <@U0DAVE> as a reviewer")).toBeNull();
+    expect(parse("add <@U0DAVE>'s fix")).toBeNull();
+  });
+});
+
 describe("parseMentionCommand — existing forms still parse (regression)", () => {
   test("controls are unchanged", () => {
     expect(parse("model opus")).toEqual({ name: "model", args: "opus" });

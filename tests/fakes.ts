@@ -13,6 +13,7 @@ import type {
   OutboundFile,
   OutboundMessage,
   PostedRef,
+  Principal,
   RemoteControlResult,
   RemoteControlSink,
   SessionHandle,
@@ -72,6 +73,13 @@ export class FakeSurface implements SurfaceAdapter {
 
   async requestChoice(conv: ConversationRef, prompt: ChoicePrompt): Promise<void> {
     this.choiceRequests.push({ conv, prompt });
+  }
+
+  /** Messages shown to one person only, in order. */
+  ephemerals: { conv: ConversationRef; to: string; text: string }[] = [];
+
+  async postEphemeral(conv: ConversationRef, to: Principal, msg: OutboundMessage): Promise<void> {
+    this.ephemerals.push({ conv, to: `${to.surface}:${to.externalId}`, text: msg.text });
   }
 
   /** The most recent guided-choice prompt (for tests to answer). */

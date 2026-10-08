@@ -451,6 +451,24 @@ function migrateV13(db: Database): void {
   db.run(`ALTER TABLE repos ADD COLUMN instructions TEXT`);
 }
 
+/**
+ * Migration **v14**: `session_members`, the people an architect has let speak in
+ * one thread (`@Condotto member @user`). Hearing someone is per thread and never
+ * inherited: anyone not an architect, not a configured member, and not listed here
+ * is invisible to the agent.
+ */
+function migrateV14(db: Database): void {
+  db.run(`
+    CREATE TABLE session_members (
+      session_id TEXT NOT NULL REFERENCES sessions(id),
+      principal TEXT NOT NULL,
+      added_by TEXT NOT NULL,
+      added_at TEXT NOT NULL,
+      PRIMARY KEY (session_id, principal)
+    )
+  `);
+}
+
 /** Add `column` to `table` only if absent (idempotent ALTER — SQLite has no
  *  `ADD COLUMN IF NOT EXISTS`). Used by the baseline migration to evolve tables
  *  a pre-runner DB already created. */
@@ -501,6 +519,7 @@ export class Store {
       migrateV11, // v11: drop the surfaces/channels tables and two unused repo columns.
       migrateV12, // v12: sessions.remote_control for the per-thread claude.ai bridge.
       migrateV13, // v13: repos.instructions, the per-repo operator prompt addendum.
+      migrateV14, // v14: session_members, who an architect let speak in a thread.
       // v14+: append new migrations here. They only ever run on a store already
       // at the prior version, so they can be plain forward DDL — no IF NOT EXISTS
       // gymnastics.
@@ -941,6 +960,7 @@ export class Store {
   deleteSession(id: string): void {
     this.db.transaction(() => {
       this.db.query(`DELETE FROM turns WHERE session_id = $id`).run({ id });
+      this.db.query(`DELETE FROM session_members WHERE session_id = $id`).run({ id });
       this.db.query(`DELETE FROM sessions WHERE id = $id`).run({ id });
     })();
   }
@@ -1077,10 +1097,11 @@ export class Store {
 
   /**
    * The effective role of a principal in a channel. A channel-scoped mapping
-   * wins over a '*' mapping; absent any mapping, everyone is a `member`
-   * (they can converse; only architects hold command authority.
+   * wins over a '*' mapping. Absent any mapping there is NO role: such a person
+   * is not heard at all unless an architect adds them to a thread
+   * (`isHeard`).
    */
-  roleOf(principal: string, channelId: string): Role {
+  roleOf(principal: string, channelId: string): Role | null {
     const rows = this.db
       .query<{ scope: string; role: Role }, { p: string; c: string }>(
         `SELECT scope, role FROM roles WHERE principal = $p AND scope IN ($c, '*')`,
@@ -1089,11 +1110,63 @@ export class Store {
     const scoped = rows.find((r) => r.scope === channelId);
     if (scoped) return scoped.role;
     const global = rows.find((r) => r.scope === "*");
-    return global ? global.role : "member";
+    return global ? global.role : null;
   }
 
   isArchitect(principal: string, channelId: string): boolean {
     return this.roleOf(principal, channelId) === "architect";
+  }
+
+  /**
+   * Whether a principal's messages in this session may reach the agent at all:
+   * an architect, a member by config or grant, or someone an architect added to
+   * this thread. Everyone else is dropped before anything is framed or stored.
+   */
+  isHeard(principal: string, channelId: string, sessionId: string): boolean {
+    return this.roleOf(principal, channelId) !== null || this.isSessionMember(sessionId, principal);
+  }
+
+  // -- thread members --------------------------------------------------------
+
+  /** Add a thread member. Returns false when they were already one. */
+  addSessionMember(sessionId: string, principal: string, addedBy: string): boolean {
+    return (
+      this.db
+        .query(
+          `INSERT INTO session_members (session_id, principal, added_by, added_at)
+           VALUES ($s, $p, $by, $at) ON CONFLICT DO NOTHING`,
+        )
+        .run({ s: sessionId, p: principal, by: addedBy, at: new Date().toISOString() }).changes > 0
+    );
+  }
+
+  /** Remove a thread member. Returns false when they were not one. */
+  removeSessionMember(sessionId: string, principal: string): boolean {
+    return (
+      this.db
+        .query(`DELETE FROM session_members WHERE session_id = $s AND principal = $p`)
+        .run({ s: sessionId, p: principal }).changes > 0
+    );
+  }
+
+  isSessionMember(sessionId: string, principal: string): boolean {
+    return (
+      this.db
+        .query<{ one: number }, { s: string; p: string }>(
+          `SELECT 1 AS one FROM session_members WHERE session_id = $s AND principal = $p`,
+        )
+        .get({ s: sessionId, p: principal }) !== null
+    );
+  }
+
+  /** A thread's members, in the order they were added. */
+  sessionMembers(sessionId: string): string[] {
+    return this.db
+      .query<{ principal: string }, { s: string }>(
+        `SELECT principal FROM session_members WHERE session_id = $s ORDER BY added_at, principal`,
+      )
+      .all({ s: sessionId })
+      .map((r) => r.principal);
   }
 
   /**

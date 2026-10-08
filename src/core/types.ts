@@ -45,7 +45,8 @@ export const MENTION_TOKEN_RE = /@\[\[([a-z0-9_]+:[^\][\s]{1,64})\]\]/gi;
  * Command authority, and there are only two levels because there is only one
  * decision: an `architect` sets the agent working; a `member` talks in the thread
  * and their messages are held for the next architect turn. Anyone not explicitly
- * mapped is a member.
+ * mapped has no role and is not heard at all, unless an architect makes them a
+ * member of one thread (`@Condotto member @user`).
  */
 export type Role = "architect" | "member";
 
@@ -137,6 +138,9 @@ export type CommandName =
   // crosses the port; it renders back out via `mentionToken`.
   | "grant"
   | "revoke"
+  // who else this ONE thread hears (architect-only). Args are "add <key|?>…",
+  // "remove <key|?>…" or "list"; the adapter resolves each mention to a key.
+  | "members"
   // read-only planning for this thread ("on"|"off", architect-only, in-thread
   // only — no config knob and no repo default, because it is a per-TASK mode).
   // While on, only genuine reads run and the agent presents a plan into the
@@ -237,6 +241,11 @@ export interface SurfaceAdapter {
   update(ref: PostedRef, msg: OutboundMessage): Promise<void>;
   /** Present a guided choice. Only called when capabilities.buttons. */
   requestChoice(conv: ConversationRef, prompt: ChoicePrompt): Promise<void>;
+  /**
+   * Show a message to ONE person in the conversation, where the surface can
+   * (Slack: an ephemeral message). Surfaces without it simply stay silent.
+   */
+  postEphemeral?(conv: ConversationRef, to: Principal, msg: OutboundMessage): Promise<void>;
 }
 
 // ---------------------------------------------------------------------------
