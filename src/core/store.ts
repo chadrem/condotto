@@ -520,7 +520,7 @@ export class Store {
       migrateV12, // v12: sessions.remote_control for the per-thread claude.ai bridge.
       migrateV13, // v13: repos.instructions, the per-repo operator prompt addendum.
       migrateV14, // v14: session_members, who an architect let speak in a thread.
-      // v14+: append new migrations here. They only ever run on a store already
+      // v15+: append new migrations here. They only ever run on a store already
       // at the prior version, so they can be plain forward DDL — no IF NOT EXISTS
       // gymnastics.
     ];
@@ -1167,6 +1167,21 @@ export class Store {
       )
       .all({ s: sessionId })
       .map((r) => r.principal);
+  }
+
+  /**
+   * Everyone whose effective role in this channel is `member` (config, grant, or
+   * a legacy observer row v10 folded in). They are heard in every thread here, so
+   * `members` must name them alongside the thread's own members.
+   */
+  roleMembers(channelId: string): string[] {
+    return this.db
+      .query<{ principal: string }, { c: string }>(
+        `SELECT DISTINCT principal FROM roles WHERE scope IN ($c, '*') ORDER BY principal`,
+      )
+      .all({ c: channelId })
+      .map((r) => r.principal)
+      .filter((p) => this.roleOf(p, channelId) === "member");
   }
 
   /**

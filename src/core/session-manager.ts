@@ -1068,8 +1068,9 @@ export class SessionManager {
         this.settingsBlock(session, repo) +
         `\n\n` +
         `Reply in this thread to talk. An architect's message sets me working — edits ` +
-        `and commands just run, inside this worktree. Anyone else's message is carried ` +
-        `into the next architect turn.\n\n` +
+        `and commands just run, inside this worktree. I also hear thread members ` +
+        `(\`@Condotto member @user\`): theirs is carried into the next architect turn. ` +
+        `Nobody else is heard.\n\n` +
         this.commandHelp(),
     });
   }
@@ -2399,7 +2400,7 @@ export class SessionManager {
 
   /**
    * `@Condotto revoke @user [everywhere]`. Removes a runtime `grant` role;
-   * the user falls back to `member` (or whatever config says). Only `source='grant'`
+   * the user keeps any config role, and is otherwise not heard. Only `source='grant'`
    * rows are removed — a config architect can't be revoked at runtime (change config
    * instead). Architect-only; channel-level, no session needed.
    */
@@ -2426,7 +2427,20 @@ export class SessionManager {
     const where = scope === "*" ? "across all channels" : "in this channel";
     if (removed > 0) {
       this.store.audit({ actor: principalKey(author), event: "role_revoked", detail: { target, scope, by: principalKey(author) } });
-      await surface.post(conv, { text: `Revoked ${mentionToken(target)}'s granted role ${where} — back to member unless config says otherwise.` });
+      // Whatever they said that no turn has carried yet goes too, in every live
+      // thread where they are no longer heard — otherwise a revoke still lets
+      // their last words reach the agent on the next architect turn.
+      for (const sessionId of this.live.keys()) {
+        const s = this.store.getSession(sessionId);
+        if (s && (scope === "*" || s.channel_id === scope) && !this.store.isHeard(target, s.channel_id, s.id)) {
+          this.dropHeld(s.id, target);
+        }
+      }
+      const now = this.store.roleOf(target, conv.channelId);
+      const after = now
+        ? `they still hold \`${now}\` here, from config or a wider grant`
+        : "they're no longer heard here, except in threads an architect added them to";
+      await surface.post(conv, { text: `Revoked ${mentionToken(target)}'s granted role ${where} — ${after}.` });
       return;
     }
     // Nothing removed at `scope`. Diagnose precisely (don't misdirect to config when
@@ -2473,15 +2487,26 @@ export class SessionManager {
       return;
     }
 
+    // Someone holding the `member` role here is heard in every thread of the
+    // channel, whatever this thread's list says. Name them, or `members` and
+    // `remove` would tell an architect someone is silent when they are not.
+    const byRole = (target: string) => this.store.roleOf(target, conv.channelId) === "member";
+    const roleNote = (target: string) =>
+      `${mentionToken(target)} is heard in every thread here through a channel role — ` +
+      "`@Condotto revoke` a grant, or change config.";
+
     if (verb === "list") {
       const members = this.store.sessionMembers(session.id);
-      await surface.post(conv, {
-        text:
-          members.length === 0
-            ? "Only architects are heard in this thread. Add someone with `@Condotto member @user`."
-            : `Besides the architects, I listen to ${members.map(mentionToken).join(", ")} in this thread. ` +
-              "They're heard, not obeyed: only an architect's message sets me working.",
-      });
+      const channel = this.store.roleMembers(conv.channelId);
+      const lines: string[] = [];
+      if (members.length === 0 && channel.length === 0) {
+        lines.push("Only architects are heard in this thread. Add someone with `@Condotto member @user`.");
+      } else {
+        if (members.length > 0) lines.push(`Besides the architects, I listen to ${members.map(mentionToken).join(", ")} in this thread.`);
+        if (channel.length > 0) lines.push(`Through a channel role I also listen to ${channel.map(mentionToken).join(", ")} (\`revoke\` or config to change).`);
+        lines.push("They're heard, not obeyed: only an architect's message sets me working.");
+      }
+      await surface.post(conv, { text: lines.join("\n") });
       return;
     }
 
@@ -2500,18 +2525,25 @@ export class SessionManager {
       if (verb === "add") {
         if (this.store.isArchitect(target, conv.channelId)) {
           lines.push(`${mentionToken(target)} is an architect — already heard.`);
+        } else if (byRole(target)) {
+          lines.push(`${roleNote(target)} Already heard.`);
         } else if (this.store.addSessionMember(session.id, target, actor)) {
           this.store.audit({ sessionId: session.id, actor, event: "member_added", detail: { target } });
           lines.push(`Added ${mentionToken(target)} — I'll see their messages in this thread from now on (not earlier ones), and only an architect's message sets me working.`);
         } else {
           lines.push(`${mentionToken(target)} is already a member of this thread.`);
         }
-      } else if (this.store.removeSessionMember(session.id, target)) {
-        this.store.audit({ sessionId: session.id, actor, event: "member_removed", detail: { target } });
-        this.dropHeld(session.id, target);
-        lines.push(`Removed ${mentionToken(target)} — I won't see their messages in this thread any more.`);
       } else {
-        lines.push(`${mentionToken(target)} isn't a member of this thread.`);
+        const removed = this.store.removeSessionMember(session.id, target);
+        if (removed) this.store.audit({ sessionId: session.id, actor, event: "member_removed", detail: { target } });
+        if (byRole(target)) {
+          lines.push(`${removed ? `Removed ${mentionToken(target)} from this thread, but ` : ""}${roleNote(target)}`);
+        } else if (removed) {
+          this.dropHeld(session.id, target);
+          lines.push(`Removed ${mentionToken(target)} — I won't see their messages in this thread any more.`);
+        } else {
+          lines.push(`${mentionToken(target)} isn't a member of this thread.`);
+        }
       }
     }
     await surface.post(conv, { text: lines.join("\n") });
@@ -2555,10 +2587,10 @@ export class SessionManager {
     // A remote-control message counts as heard while the architect who turned the
     // bridge on keeps it on (its messages are still only held, like a member's).
     const actor = principalKey(event.author);
-    const heard =
+    const isHeard = () =>
       this.store.isHeard(actor, event.conv.channelId, session.id) ||
-      (actor === principalKey(REMOTE_PRINCIPAL) && !!session.remote_control);
-    if (!heard) {
+      (actor === principalKey(REMOTE_PRINCIPAL) && !!this.store.getSession(session.id)?.remote_control);
+    if (!isHeard()) {
       this.store.audit({ sessionId: session.id, actor, event: "message_ignored" });
       if (event.mentioned) {
         await this.surfaceFor(event.conv)
@@ -2599,6 +2631,12 @@ export class SessionManager {
     // reaches the agent whole — it just does not spend a turn (and an unanswered
     // interjection) on every line of a human conversation.
     if (!this.store.isArchitect(actor, event.conv.channelId)) {
+      // Asked again: fetching files awaits, and a `remove` or `revoke` that
+      // landed meanwhile has already swept the held queue this would join.
+      if (!isHeard()) {
+        this.store.audit({ sessionId: session.id, actor, event: "message_ignored" });
+        return;
+      }
       const pending = (entry.pendingContext ??= []);
       pending.push({ principal: actor, framed });
       if (pending.length > MAX_PENDING_CONTEXT) pending.splice(0, pending.length - MAX_PENDING_CONTEXT);

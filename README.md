@@ -12,8 +12,9 @@ watches it get built. Your support lead chases the bug they reported. Your
 designer checks the fix before it lands. Nobody files a ticket and waits.
 
 You still run the show. Only an architect's message starts the agent working.
-Everyone else talks in the thread, and everything they say reaches the agent on
-the next turn. It stays one conversation, not a queue.
+Add the people you want in the room to a thread, and everything they say there
+reaches the agent on the next turn. Nobody else is heard. It stays one
+conversation, not a queue.
 
 **Who this is for.** A CTO at a startup with a monorepo or a handful of small
 repos, who wants to develop in the open with a team that is not all engineers.

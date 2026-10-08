@@ -249,6 +249,54 @@ describe("thread members", () => {
     await members(w, c, "add fake:U_ARCH");
     expect(w.surface.posts.at(-1)!.text).toMatch(/already heard/i);
   });
+
+  test("someone heard through a channel role is listed, and add/remove say so instead of pretending", async () => {
+    const w = makeWorld();
+    w.store.setRole("fake:U_OUT", "member", "C1");
+    const c = await session(w, "tm13.000001");
+    await members(w, c, "list");
+    expect(w.surface.posts.at(-1)!.text).not.toMatch(/only architects are heard/i);
+    expect(w.surface.posts.at(-1)!.text).toContain("U_OUT");
+    await members(w, c, "add fake:U_OUT");
+    expect(w.surface.posts.at(-1)!.text).toMatch(/channel role/i);
+    await members(w, c, "remove fake:U_OUT");
+    expect(w.surface.posts.at(-1)!.text).toMatch(/channel role/i);
+    expect(w.surface.posts.at(-1)!.text).not.toMatch(/won't see their messages/i);
+    // ...and it is true: they are still heard.
+    await say(w, c, outsider, "role-member line");
+    await say(w, c, architect, "go");
+    expect(w.harness.allTurns.at(-1)!.text).toContain("role-member line");
+  });
+
+  test("revoking a granted member forgets what they said that no turn carried yet", async () => {
+    const w = makeWorld();
+    w.store.setRole("fake:U_OUT", "member", "C1", "grant", "fake:U_ARCH");
+    const c = await session(w, "tm14.000001");
+    await say(w, c, outsider, "held before revoke");
+    await w.manager.handleEvent({ kind: "command", conv: c, author: architect, name: "revoke", args: "fake:U_OUT" });
+    expect(w.surface.posts.at(-1)!.text).toMatch(/no longer heard/i);
+    await say(w, c, architect, "go");
+    expect(w.harness.allTurns.at(-1)!.text).not.toContain("held before revoke");
+  });
+
+  test("a member removed while their file is still downloading is not carried", async () => {
+    const w = makeWorld();
+    const c = await session(w, "tm15.000001");
+    await members(w, c, "add fake:U_OUT");
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    w.surface.fetchAttachment = async () => {
+      await gate;
+      return new TextEncoder().encode("payload");
+    };
+    const pending = say(w, c, outsider, "slow upload", { attachments: [{ kind: "file", name: "big.bin", ref: "ref-slow" }] });
+    await Bun.sleep(0);
+    await members(w, c, "remove fake:U_OUT");
+    release();
+    await pending;
+    await say(w, c, architect, "go");
+    expect(w.harness.allTurns.at(-1)!.text).not.toContain("slow upload");
+  });
 });
 
 describe("assign", () => {
