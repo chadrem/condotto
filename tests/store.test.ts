@@ -436,7 +436,7 @@ describe("store schema migrations", () => {
   // The current schema version == the number of migrations in the runner. Bump
   // this constant in lockstep whenever a migration is appended — the tests below
   // pin the runner's behavior to it.
-  const CURRENT_SCHEMA_VERSION = 12;
+  const CURRENT_SCHEMA_VERSION = 13;
 
   const migPath = (name: string): string => join(mkdtempSync(join(tmpdir(), "condotto-mig-")), name);
   const userVersion = (path: string): number => {
@@ -473,6 +473,7 @@ describe("store schema migrations", () => {
     raw.run("ALTER TABLE repos ADD COLUMN safe_bash_allowlist TEXT NOT NULL DEFAULT '[]'");
     raw.run("ALTER TABLE repos ADD COLUMN policy_overrides TEXT NOT NULL DEFAULT '{}'");
     raw.run("ALTER TABLE sessions DROP COLUMN remote_control");
+    raw.run("ALTER TABLE repos DROP COLUMN instructions"); // v13
     raw.run("PRAGMA user_version = 9");
     raw.close();
     const store = new Store(path);
@@ -508,11 +509,12 @@ describe("store schema migrations", () => {
     // Rewind to v11 as a real pre-v12 store: the column gone, the stamp back.
     const raw = new Database(path);
     raw.run("ALTER TABLE sessions DROP COLUMN remote_control");
+    raw.run("ALTER TABLE repos DROP COLUMN instructions"); // v13 re-runs too
     raw.run("PRAGMA user_version = 11");
     raw.close();
 
     store = new Store(path);
-    expect(userVersion(path)).toBe(12);
+    expect(userVersion(path)).toBe(CURRENT_SCHEMA_VERSION);
     // A session nobody asked to publish must not come back published.
     expect(store.getSession("s12")!.remote_control).toBeNull();
     store.close();
@@ -567,6 +569,7 @@ describe("store schema migrations", () => {
     raw.run("ALTER TABLE repos DROP COLUMN default_workflows"); // v5
     raw.run("ALTER TABLE sessions DROP COLUMN plan_mode"); // v6
     raw.run("ALTER TABLE sessions DROP COLUMN remote_control"); // v12
+    raw.run("ALTER TABLE repos DROP COLUMN instructions"); // v13
     // v7 dropped these; a v0 store had them, and the baseline's `CREATE TABLE IF
     // NOT EXISTS` cannot re-add a column to a table that already exists.
     raw.run("ALTER TABLE repos ADD COLUMN land_cmd TEXT"); // v1-era, dropped at v7
@@ -585,6 +588,32 @@ describe("store schema migrations", () => {
     expect(userVersion(path)).toBe(CURRENT_SCHEMA_VERSION);
     expect(store.getSession("sL")?.conversation_id).toBe("1.9");
     expect(store.isArchitect("slack:U_KEEP", "C9")).toBe(true);
+    store.close();
+  });
+
+  test("v13 adds repos.instructions; upsertRepo round-trips it and clears it when unset", () => {
+    const path = migPath("v13.sqlite");
+    const store = new Store(path);
+    store.upsertRepo({ name: "r", path: "/tmp/r", defaultBranch: "main", instructions: "Use pnpm." });
+    expect(store.getRepo("r")!.instructions).toBe("Use pnpm.");
+    // Config is re-applied every boot, so removing the key must remove the text.
+    store.upsertRepo({ name: "r", path: "/tmp/r", defaultBranch: "main" });
+    expect(store.getRepo("r")!.instructions).toBeNull();
+    store.close();
+  });
+
+  test("purgeGrantRoles removes only runtime grants and reports them", () => {
+    const store = new Store(migPath("purge.sqlite"));
+    store.setRole("slack:U_CFG", "architect", "*");
+    store.setRole("slack:U_G1", "architect", "C1", "grant", "slack:U_CFG");
+    store.setRole("slack:U_G2", "member", "*", "grant", "slack:U_CFG");
+    expect(store.purgeGrantRoles()).toEqual([
+      { principal: "slack:U_G1", scope: "C1", role: "architect" },
+      { principal: "slack:U_G2", scope: "*", role: "member" },
+    ]);
+    expect(store.isArchitect("slack:U_G1", "C1")).toBe(false);
+    expect(store.isArchitect("slack:U_CFG", "C1")).toBe(true);
+    expect(store.purgeGrantRoles()).toEqual([]);
     store.close();
   });
 

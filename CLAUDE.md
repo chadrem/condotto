@@ -82,6 +82,20 @@ What follows is the whole model.
   while plan mode is on. Pinned by tests that an ungranted remote message never
   becomes a turn and that `stop` closes the bridge before dropping the harness.
 
+- **Sandbox mode** (`[sandbox]`, opt-in). The daemon is root-in-container with
+  only SETUID/SETGID/KILL, and the agent is its own uid, so file permissions — not
+  only `policy.ts` — keep it off the store, the config and the shared repos. Three
+  rules hold it up. Everything that runs as the agent goes through the ONE setpriv
+  wrapper in `core/agent-exec.ts` (CLI spawn, tree IO, clone). Session trees are
+  agent-owned clones (`SandboxCloneStrategy`), never `git worktree add`, which would
+  need the agent to write the shared repo's `.git` and so plant config or hooks the
+  daemon runs. And **in sandbox mode the daemon never touches an agent tree with its
+  own privileges**: every read, write, list, remove or realpath under a session tree
+  goes through the `TreeIO` port (`core/tree-io.ts`), never a bare `fs` call — a new
+  one that bypasses it is the confused-deputy bug this mode exists to close. Memory
+  and remote control are refused in this mode; `runtime_grants = false` pins roles to
+  config.
+
 **Outside the boundary by design:** a repo's checked-in hooks, a skill's inline
 `` !`cmd` ``, and skill arguments all expand BEFORE the model and before our hook,
 so `policy.ts` never sees them. Accepted — they are your repo and your typing —

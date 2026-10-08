@@ -1,7 +1,8 @@
 import { homedir } from "node:os";
-import { resolve } from "node:path";
+import { isAbsolute, resolve } from "node:path";
 import { existsSync, readFileSync } from "node:fs";
 import type { RepoConfig, Role } from "./types";
+import type { SandboxIdentity } from "./agent-exec";
 
 // Condotto's single source of truth is one TOML file, `condotto.toml`,
 // consolidating what used to be scattered across `.env`, `condotto.repos.json`,
@@ -61,6 +62,18 @@ export interface CondottoConfig {
   defaultWorkflows: boolean;
   /** Daemon-wide default for durable agent memory, used when a repo sets none. */
   defaultMemory: boolean;
+  /**
+   * Who the agent runs as, or null for the default install where the agent and
+   * the daemon are the same Unix user. See `[sandbox]` in condotto.example.toml
+   * and `agent-exec.ts`.
+   */
+  sandbox: SandboxIdentity | null;
+  /**
+   * Whether `@Condotto grant`/`revoke` work. False pins every role to
+   * `condotto.toml`: the commands are refused and leftover grant rows are purged
+   * at boot.
+   */
+  runtimeGrants: boolean;
 }
 
 /** Surface (Slack) credentials — owned by the composition root, never the core. */
@@ -276,6 +289,7 @@ const REPO_KEYS = [
   "subagents",
   "workflows",
   "memory",
+  "instructions",
 ] as const;
 
 function parseRepoEntry(entry: unknown, where: string): RepoConfig {
@@ -307,7 +321,35 @@ function parseRepoEntry(entry: unknown, where: string): RepoConfig {
     // later thread's system prompt, so `memory = "no"` must be an error, not a
     // silent posture.
     memory: optBool(e.memory, `${where}.memory`),
+    instructions: optString(e.instructions, `${where}.instructions`),
   };
+}
+
+const SANDBOX_KEYS = ["agent_uid", "agent_gid", "agent_home"] as const;
+
+/**
+ * `[sandbox]`: all three keys or none. A partial table is an error rather than a
+ * half-sandbox, because "the agent runs as some uid but with the daemon's HOME" is
+ * exactly the kind of posture nobody would choose on purpose.
+ */
+function parseSandbox(toml: Record<string, unknown>): SandboxIdentity | null {
+  if (toml.sandbox === undefined) return null;
+  const t = asTable(toml.sandbox, "[sandbox]");
+  warnUnknownKeys(t, SANDBOX_KEYS, "[sandbox]");
+  const present = SANDBOX_KEYS.filter((k) => t[k] !== undefined);
+  if (present.length === 0) return null;
+  if (present.length !== SANDBOX_KEYS.length) {
+    const missing = SANDBOX_KEYS.filter((k) => t[k] === undefined);
+    throw new Error(`[sandbox] needs all of agent_uid, agent_gid and agent_home, or none — missing ${missing.join(", ")}`);
+  }
+  // uid/gid 0 would be "drop privileges to root", which is no drop at all.
+  const agentUid = optPosInt(t.agent_uid, "[sandbox].agent_uid")!;
+  const agentGid = optPosInt(t.agent_gid, "[sandbox].agent_gid")!;
+  const home = optString(t.agent_home, "[sandbox].agent_home");
+  if (home === undefined || !isAbsolute(home)) {
+    throw new Error(`[sandbox].agent_home must be an absolute path`);
+  }
+  return { agentUid, agentGid, agentHome: resolve(home) };
 }
 
 /**
@@ -415,7 +457,17 @@ function parseRoles(toml: Record<string, unknown>, env: Record<string, string | 
 // ---------------------------------------------------------------------------
 // Public API
 
-const TOP_LEVEL_KEYS = ["slack", "auth", "architects", "roles", "repos", "paths", "defaults"] as const;
+const TOP_LEVEL_KEYS = [
+  "slack",
+  "auth",
+  "architects",
+  "roles",
+  "repos",
+  "paths",
+  "defaults",
+  "sandbox",
+  "runtime_grants",
+] as const;
 const AUTH_KEYS = ["mode", "api_key"] as const;
 const PATHS_KEYS = ["db", "worktrees_root", "memory_root"] as const;
 const DEFAULTS_KEYS = [
@@ -484,6 +536,30 @@ export function loadConfig(
     DEFAULT_MEMORY,
   );
 
+  // Each repo's tri-state memory flag is resolved against the daemon default
+  // HERE, so `RepoConfig.memory` is a plain boolean by the time it reaches the
+  // store and nothing downstream has to re-derive it.
+  const repos = parseRepos(toml, configPath).map((r) => ({ ...r, memory: r.memory ?? defaultMemory }));
+
+  const sandbox = parseSandbox(toml);
+  // Memory and the sandbox cannot coexist. Memory is shared by every thread in a
+  // channel and lands in each one's system prompt, so in a sandbox — where threads
+  // are the boundary we are holding — it is a ready-made cross-thread injection
+  // channel, and the directory would have to be writable by the agent's uid. Refuse
+  // rather than silently switch one of them off.
+  if (sandbox) {
+    const withMemory = repos.filter((r) => r.memory).map((r) => r.name);
+    if (withMemory.length > 0) {
+      throw new Error(
+        `[sandbox] is set, but agent memory is on for ${withMemory.join(", ")}. Memory is shared across ` +
+          `threads, which a sandboxed install must not allow. Set [defaults].memory = false (and remove any ` +
+          `per-repo memory = true).`,
+      );
+    }
+  }
+
+  const runtimeGrants = optBool(toml.runtime_grants, "runtime_grants") ?? true;
+
   return {
     dbPath: expandHome(envStr(env.CONDOTTO_DB_PATH) ?? optString(paths.db, "[paths].db") ?? "condotto.sqlite"),
     worktreesRoot: expandHome(
@@ -492,10 +568,7 @@ export function loadConfig(
     memoryRoot: expandHome(
       envStr(env.CONDOTTO_MEMORY_ROOT) ?? optString(paths.memory_root, "[paths].memory_root") ?? "~/.condotto/memory",
     ),
-    // Each repo's tri-state memory flag is resolved against the daemon default
-    // HERE, so `RepoConfig.memory` is a plain boolean by the time it reaches the
-    // store and nothing downstream has to re-derive it.
-    repos: parseRepos(toml, configPath).map((r) => ({ ...r, memory: r.memory ?? defaultMemory })),
+    repos,
     roles: parseRoles(toml, env),
     defaultCostCapUsd:
       envPosNumber(env.CONDOTTO_COST_CAP_USD, "CONDOTTO_COST_CAP_USD") ??
@@ -512,6 +585,8 @@ export function loadConfig(
     defaultSubagents,
     defaultWorkflows,
     defaultMemory,
+    sandbox,
+    runtimeGrants,
   };
 }
 

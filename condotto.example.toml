@@ -28,6 +28,11 @@ architects = [
   # "slack:U0123ABC",
 ]
 
+# Whether architects can delegate roles at runtime with `@Condotto grant` /
+# `@Condotto revoke`. Set false to pin every role to this file: the commands are
+# refused, and any grant made earlier is deleted (and audited) at the next boot.
+# runtime_grants = true
+
 # ---------------------------------------------------------------------------
 # Slack app credentials (required to run the daemon).
 # Create the app per the README ("Create the Slack app"). Env overrides: SLACK_BOT_TOKEN / SLACK_APP_TOKEN.
@@ -127,6 +132,18 @@ max_concurrent_turns = 6    # cap on harness turns running at once across all
                             #   sessions. Env override: CONDOTTO_MAX_CONCURRENT_TURNS
 
 # ---------------------------------------------------------------------------
+# Sandbox mode (optional). Runs the agent as its own Unix user, so its file
+# permissions — not Condotto's checks alone — keep it away from this file, the
+# SQLite store and other threads' state. The daemon must run as root inside a
+# container holding only CAP_SETUID, CAP_SETGID and CAP_KILL; see the README,
+# "Running sandboxed". All three keys or none. Requires memory = false above, and
+# turns remote control off.
+# [sandbox]
+# agent_uid = 1001                # the agent's uid (not 0)
+# agent_gid = 1001                # the agent's gid (not 0)
+# agent_home = "/home/agent"      # absolute; must be writable by agent_uid
+
+# ---------------------------------------------------------------------------
 # Repos Condotto can be pointed at. Assign one with `/condotto assign <name>`.
 #
 # REQUIRED: declare at least one. There is no default repo — Condotto only ever
@@ -163,6 +180,10 @@ max_concurrent_turns = 6    # cap on harness turns running at once across all
 # cost_cap_usd = 25               # per-thread cost ceiling for this repo. Omit to
 #                                 #   inherit [defaults].cost_cap_usd, which is
 #                                 #   itself unset (no ceiling) by default.
+# instructions = """
+# Use pnpm, never npm. Run `pnpm test` before you say a change works.
+# """                             # appended to every session's system prompt for
+#                                 #   this repo, labelled as operator instructions.
 # default_model = "sonnet"        # per-repo default model token (overrides [defaults]).
 # default_effort = "high"         # per-repo default effort (overrides [defaults]).
 

@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { join } from "node:path";
 import { SlackAdapter, parseMentionCommand, resolveUserMention, slashEphemeralText } from "../src/adapters/slack/adapter";
 import type { OperatorConsole, SurfaceAuthority } from "../src/adapters/slack/adapter";
 import { DisplayNameCache } from "../src/adapters/slack/users";
@@ -424,5 +425,60 @@ describe("parseMentionCommand — skills", () => {
     expect(parse("what does src/core/policy.ts do?")).toBeNull();
     // And an existing verb is not shadowed by a slash-shaped argument.
     expect(parse("stop")).toEqual({ name: "stop", args: "" });
+  });
+});
+
+describe("SlackAdapter — no unfurls", () => {
+  // An unfurl makes Slack's servers fetch an agent-chosen URL: exfiltration to any
+  // host with no network access needed on our side. Every message we post or edit
+  // must turn both kinds off.
+  function wired() {
+    const calls: { method: string; args: Record<string, any> }[] = [];
+    const record = (method: string) => async (args: Record<string, any>) => {
+      calls.push({ method, args });
+      return { ts: "1700000009.000100" };
+    };
+    const { adapter } = testAdapter();
+    (adapter as any).app = {
+      client: { chat: { postMessage: record("chat.postMessage"), update: record("chat.update") } },
+    };
+    return { adapter, calls, record };
+  }
+  const conv = { surfaceId: "slack", channelId: "C1", conversationId: "C1:1700000000.000100" };
+
+  test("post, update and requestChoice all set unfurl_links and unfurl_media to false", async () => {
+    const { adapter, calls } = wired();
+    const ref = await adapter.post(conv, { text: "see https://evil.example/?d=secret" });
+    await adapter.update(ref, { text: "edited https://evil.example/?d=secret" });
+    await adapter.requestChoice(conv, { choiceId: "assign_repo", text: "Which repo?", options: [{ label: "a", value: "a" }] });
+    expect(calls.map((c) => c.method)).toEqual(["chat.postMessage", "chat.update", "chat.postMessage"]);
+    for (const c of calls) expect(c.args).toMatchObject({ unfurl_links: false, unfurl_media: false });
+  });
+
+  test("resolving a choice message (chat.update from the action handler) sets them too", async () => {
+    const { adapter, calls, record } = wired();
+    await (adapter as any).handleChoiceAction({
+      body: {
+        user: { id: "U0ABBY" },
+        channel: { id: "C1" },
+        message: { ts: "1700000001.000100", thread_ts: "1700000000.000100", blocks: [] },
+        actions: [{ value: "a", block_id: "condotto_choice:assign_repo:0", text: { text: "a" } }],
+      },
+      client: { chat: { update: record("chat.update") } },
+      respond: async () => {},
+    });
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.args).toMatchObject({ unfurl_links: false, unfurl_media: false });
+  });
+
+  test("every chat.postMessage / chat.update call site in the adapter spreads NO_UNFURL", async () => {
+    // The anchor message posted by `/condotto assign` lives inside a Bolt handler
+    // that needs a live app to reach, so pin the source instead: one NO_UNFURL per
+    // call site, so a new call without it fails here.
+    const src = await Bun.file(join(import.meta.dir, "..", "src", "adapters", "slack", "adapter.ts")).text();
+    const sites = (src.match(/chat\s*\.(?:postMessage|update)\(/g) ?? []).length;
+    const pinned = (src.match(/\.\.\.NO_UNFURL/g) ?? []).length;
+    expect(sites).toBe(5);
+    expect(pinned).toBe(sites);
   });
 });

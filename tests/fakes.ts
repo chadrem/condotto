@@ -65,7 +65,7 @@ export class FakeSurface implements SurfaceAdapter {
       conv,
       name: file.name,
       ...(file.comment ? { comment: file.comment } : {}),
-      bytes: await Bun.file(file.path).text(),
+      bytes: new TextDecoder().decode(file.bytes),
     });
   }
 

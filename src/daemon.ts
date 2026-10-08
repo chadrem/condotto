@@ -2,7 +2,9 @@ import { existsSync } from "node:fs";
 import { basename, join } from "node:path";
 import { loadConfig, loadSlackConfig, loadAuthConfig, subscriptionScaleWarning } from "./core/config";
 import { Store } from "./core/store";
-import { WorktreeManager } from "./core/worktrees";
+import { SandboxCloneStrategy, WorktreeManager } from "./core/worktrees";
+import { agentRunner, agentRunnerSync, proveCanDropPrivileges } from "./core/agent-exec";
+import { AgentTreeIO, DirectTreeIO, type TreeIO } from "./core/tree-io";
 import { MemoryManager } from "./core/memory";
 import { SessionManager } from "./core/session-manager";
 import { principalKey } from "./core/types";
@@ -104,6 +106,19 @@ async function main(): Promise<void> {
     }
   }
 
+  // Sandbox mode: prove the privilege drop works before anything else happens, so a
+  // container started without the right capabilities fails here, with the fix in the
+  // message, instead of at the first assign.
+  if (config.sandbox) {
+    try {
+      await proveCanDropPrivileges(config.sandbox);
+    } catch (err) {
+      console.error(`Configuration error: ${err instanceof Error ? err.message : err}`);
+      process.exit(1);
+    }
+    log(`[daemon] sandbox: agent runs as uid ${config.sandbox.agentUid} / gid ${config.sandbox.agentGid}, HOME ${config.sandbox.agentHome}`);
+  }
+
   const store = new Store(config.dbPath);
   for (const repo of config.repos) store.upsertRepo(repo);
   // Config is the source of truth for which repos exist (as it is for roles
@@ -136,7 +151,17 @@ async function main(): Promise<void> {
   const orphans = store.parkOrphanedActiveSessions();
   if (orphans > 0) log(`[daemon] parked ${orphans} session(s) orphaned mid-turn by a previous crash`);
 
-  const worktrees = new WorktreeManager(config.worktreesRoot);
+  // One TreeIO for the whole daemon: in sandbox mode every access inside an agent
+  // tree — worktree strategy, attachments, outbox, skills — runs as the agent.
+  const treeIO: TreeIO = config.sandbox
+    ? new AgentTreeIO(agentRunner(config.sandbox), agentRunnerSync(config.sandbox))
+    : new DirectTreeIO();
+  const worktrees = config.sandbox
+    ? new WorktreeManager(config.worktreesRoot, {
+        strategy: new SandboxCloneStrategy(agentRunner(config.sandbox), treeIO),
+        io: treeIO,
+      })
+    : new WorktreeManager(config.worktreesRoot);
   const memory = new MemoryManager(config.memoryRoot);
   // Which credential the agent authenticates with — the type only, never the
   // value. An API key is rotatable and spend-cappable in Console; a personal
@@ -150,7 +175,12 @@ async function main(): Promise<void> {
   const scaleWarning = subscriptionScaleWarning(config, auth.mode);
   if (scaleWarning) log(`WARNING ${scaleWarning}`);
 
-  const harness = new ClaudeCodeAdapter(undefined, undefined, auth);
+  const harness = new ClaudeCodeAdapter(
+    undefined,
+    undefined,
+    auth,
+    config.sandbox ? { identity: config.sandbox, io: treeIO } : undefined,
+  );
   const manager = new SessionManager(store, harness, worktrees, log, {
     memory,
     defaultCostCapUsd: config.defaultCostCapUsd,
@@ -159,7 +189,20 @@ async function main(): Promise<void> {
     defaultEffort: config.defaultEffort,
     defaultSubagents: config.defaultSubagents,
     defaultWorkflows: config.defaultWorkflows,
+    treeIO,
+    runtimeGrants: config.runtimeGrants,
+    ...(config.sandbox
+      ? {
+          remoteControlRefusal:
+            "Remote control is off on this install: it runs sandboxed, and publishing a thread to " +
+            "claude.ai would let it be driven from outside the box.",
+        }
+      : {}),
   });
+  if (!config.runtimeGrants) {
+    const purged = manager.purgeRuntimeGrants();
+    log(`[daemon] runtime_grants = false: roles come from condotto.toml only` + (purged ? `; purged ${purged} runtime grant(s)` : ""));
+  }
   // Warn loudly if the configured default model/effort isn't one the harness
   // accepts — better a boot-time warning than a silent per-turn fallback.
   if (!harness.capabilities.supportedModels.includes(config.defaultModel)) {
@@ -205,6 +248,8 @@ async function main(): Promise<void> {
       channelStopGuidance: (channelId) => manager.channelStopGuidance(channelId),
     },
     log,
+    undefined,
+    { runtimeGrants: config.runtimeGrants },
   );
   manager.registerSurface(slack);
   await slack.start((event) => {

@@ -99,6 +99,14 @@ export function slashEphemeralText(
 
 const SURFACE_ID = "slack";
 
+/**
+ * Spread into EVERY `chat.postMessage` and `chat.update`. An unfurl makes Slack's
+ * servers fetch the URL, and the agent chooses what URLs appear in a reply — so with
+ * unfurling on, a prompt-injected agent with no network of its own could still send
+ * data to any host by putting it in a link's query string. Pinned by a test.
+ */
+export const NO_UNFURL = { unfurl_links: false, unfurl_media: false } as const;
+
 type Emit = (e: InboundEvent) => void;
 
 function encodeConversationId(channel: string, threadTs: string): string {
@@ -266,6 +274,8 @@ export class SlackAdapter implements SurfaceAdapter {
     private log: (msg: string) => void = console.log,
     /** Test seam: inject a name cache so `handleMessage` runs without a live client. */
     names?: DisplayNameCache,
+    /** `runtimeGrants: false` keeps grant/revoke out of the usage text (they are refused). */
+    private opts: { runtimeGrants?: boolean } = {},
   ) {
     this.names = names ?? null;
     // Kept for file downloads: `url_private` is not public, and Bolt's client
@@ -378,6 +388,7 @@ export class SlackAdapter implements SurfaceAdapter {
           const anchor = await this.app.client.chat.postMessage({
             channel: channelId,
             text: `🎫 New Condotto session (started by <@${author.externalId}>) — talk to me in this thread.`,
+            ...NO_UNFURL,
           });
           anchorTs = String(anchor.ts);
         } catch (err: any) {
@@ -415,8 +426,9 @@ export class SlackAdapter implements SurfaceAdapter {
             "`@Condotto subagents on|off`, `@Condotto workflows on|off`.\n" +
             "Plan before building: `@Condotto plan on|off` — I propose a plan and change nothing until you turn it off.\n" +
             "Run one of my skills: `@Condotto /<skill> [args]` — `@Condotto skills` lists them.\n" +
-            "Roles: " +
-            "`@Condotto grant @user architect [everywhere]`, `@Condotto revoke @user`.\n" +
+            (this.opts.runtimeGrants === false
+              ? ""
+              : "Roles: `@Condotto grant @user architect [everywhere]`, `@Condotto revoke @user`.\n") +
             "To assign an existing thread: `@Condotto assign <repo>` in that thread.",
         });
       }
@@ -533,6 +545,7 @@ export class SlackAdapter implements SurfaceAdapter {
       channel: conv.channelId,
       thread_ts: threadTsOf(conv),
       text: renderMrkdwn(msg.text),
+      ...NO_UNFURL,
     });
     return { conv, messageId: String(res.ts) };
   }
@@ -570,12 +583,9 @@ export class SlackAdapter implements SurfaceAdapter {
   }
 
   async postFile(conv: ConversationRef, file: OutboundFile): Promise<void> {
-    // `uploadV2` wants the bytes; handing it a path makes it read the file itself
-    // with no size ceiling, and the core has already bounded this one.
-    const bytes = await Bun.file(file.path).arrayBuffer();
     const thread = threadTsOf(conv);
     const common = {
-      file: Buffer.from(bytes),
+      file: Buffer.from(file.bytes),
       filename: file.name,
       ...(file.comment ? { initial_comment: renderMrkdwn(file.comment) } : {}),
     };
@@ -591,6 +601,7 @@ export class SlackAdapter implements SurfaceAdapter {
       channel: ref.conv.channelId,
       ts: ref.messageId,
       text: renderMrkdwn(msg.text),
+      ...NO_UNFURL,
     });
   }
 
@@ -601,6 +612,7 @@ export class SlackAdapter implements SurfaceAdapter {
       thread_ts: threadTsOf(conv),
       text, // notification fallback; the blocks carry the interactive content
       blocks: blocks as any[],
+      ...NO_UNFURL,
     });
   }
 
@@ -642,7 +654,13 @@ export class SlackAdapter implements SurfaceAdapter {
     const resolved = resolveChoiceMessage(body.message?.blocks, label, decider.externalId);
     if (body.message?.ts) {
       await client.chat
-        .update({ channel: channelId, ts: String(body.message.ts), text: resolved.text, blocks: resolved.blocks as any[] })
+        .update({
+          channel: channelId,
+          ts: String(body.message.ts),
+          text: resolved.text,
+          blocks: resolved.blocks as any[],
+          ...NO_UNFURL,
+        })
         .catch((err) => this.log(`[slack] could not update choice message: ${err}`));
     }
 

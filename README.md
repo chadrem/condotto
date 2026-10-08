@@ -38,6 +38,7 @@ is your machine, your repo, your team.
 - [Skills](#skills)
 - [Memory](#memory)
 - [Remote control](#remote-control)
+- [Running sandboxed](#running-sandboxed)
 - [Operations](#operations)
 - [Development](#development)
 - [License](#license)
@@ -206,6 +207,7 @@ At a glance:
 ```toml
 # Who can drive the agent. Without at least one, nobody can.
 architects = ["slack:U0123ABC"]
+# runtime_grants = false   # roles only from this file; @Condotto grant is refused
 
 [slack]
 bot_token = "xoxb-…"   # env: SLACK_BOT_TOKEN
@@ -233,6 +235,7 @@ name = "webapp"
 path = "~/Projects/webapp"    # absolute path to the git repo
 default_branch = "main"
 # memory = false             # durable notes are on; this is how you opt out
+# instructions = "…"         # appended to the agent's system prompt for this repo
 # cost_cap_usd / default_model / default_effort / subagents / workflows override [defaults]
 ```
 
@@ -536,6 +539,53 @@ run, which is the same thing that happens to anyone else without the role.
 
 Files are the one gap: send them in the thread, not from the app. Plan mode and remote
 control are mutually exclusive — turn plan mode off first.
+
+---
+
+## Running sandboxed
+
+By default the agent runs as the same Unix user as the daemon, so the boundary is
+Condotto's own checks. Add a `[sandbox]` table and the agent gets its own user
+instead, and its file permissions become the boundary: it cannot read or change
+`condotto.toml`, the SQLite store, or the shared repos, whatever text it is fed.
+
+```toml
+[sandbox]
+agent_uid = 1001
+agent_gid = 1001
+agent_home = "/home/agent"
+```
+
+What changes:
+
+- The `claude` runtime, and so every command the agent runs, starts as
+  `agent_uid`/`agent_gid` with no supplementary groups and no capabilities.
+- Each session gets a private clone of the repo, made and owned by the agent,
+  instead of a `git worktree` in your repo. Your repo is only ever read.
+- Everything the daemon does inside a session's tree — dropping attachments in,
+  picking files up from the outbox, checking a sub-project path — runs as the agent
+  too, so a symlink the agent plants cannot borrow the daemon's privileges.
+- Remote control is refused. Agent memory must be off; the daemon will not start
+  otherwise.
+
+What it needs:
+
+- Linux, in a container, with the daemon running as root but holding only the
+  capabilities to switch user and signal the agent:
+  `docker run --cap-drop ALL --cap-add SETUID --cap-add SETGID --cap-add KILL --security-opt no-new-privileges …`.
+  The image needs util-linux's `setpriv`, GNU coreutils (8.28 or later), GNU
+  findutils and git. At boot the
+  daemon proves it can drop to the agent user and refuses to start, naming these
+  flags, if it can't.
+- `agent_home` writable by the agent user. The runtime keeps its config and session
+  transcripts there.
+- `[paths].worktrees_root` existing and writable by the agent user.
+- Each `[[repos]].path` readable by the agent user but **not** writable by it.
+- `[defaults].memory = false`.
+
+Pair it with `runtime_grants = false` if roles should come only from
+`condotto.toml`. All sessions share the one agent user, so this separates the agent
+from the daemon, not one thread from another.
 
 ---
 

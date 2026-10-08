@@ -536,3 +536,74 @@ describe("no credential value is ever logged or persisted", () => {
     expect(warning).not.toMatch(/sk-ant|oauth-|xoxb-/);
   });
 });
+
+describe("loadConfig [sandbox]", () => {
+  const SANDBOX = `[sandbox]\nagent_uid = 1001\nagent_gid = 1001\nagent_home = "/home/agent"\n`;
+  const NO_MEMORY = `[defaults]\nmemory = false\n`;
+
+  test("absent means null — the default install is unchanged", () => {
+    expect(loadConfig({}, cfgFile("")).sandbox).toBeNull();
+  });
+
+  test("all three keys produce the agent identity", () => {
+    expect(loadConfig({}, cfgFile(`${NO_MEMORY}${SANDBOX}`)).sandbox).toEqual({
+      agentUid: 1001,
+      agentGid: 1001,
+      agentHome: "/home/agent",
+    });
+  });
+
+  test("a partial table is an error naming what is missing, never a half-sandbox", () => {
+    const path = cfgFile(`${NO_MEMORY}[sandbox]\nagent_uid = 1001\n`);
+    expect(() => loadConfig({}, path)).toThrow(/all of agent_uid, agent_gid and agent_home.*missing agent_gid, agent_home/);
+  });
+
+  test("uid/gid 0 (root) and a relative home are refused", () => {
+    const sb = (uid: number, gid: number, home: string) =>
+      cfgFile(`${NO_MEMORY}[sandbox]\nagent_uid = ${uid}\nagent_gid = ${gid}\nagent_home = "${home}"\n`);
+    expect(() => loadConfig({}, sb(0, 1001, "/h"))).toThrow(/agent_uid must be a positive integer/);
+    expect(() => loadConfig({}, sb(1001, 0, "/h"))).toThrow(/agent_gid must be a positive integer/);
+    expect(() => loadConfig({}, sb(1001, 1001, "h"))).toThrow(/agent_home must be an absolute path/);
+  });
+
+  test("memory on anywhere refuses boot, and the message names the fix", () => {
+    // Memory defaults ON, so a sandbox without `[defaults].memory = false` fails.
+    expect(() => loadConfig({}, cfgFile(SANDBOX))).toThrow(/set \[defaults\]\.memory = false/i);
+    // A single repo opting back in is caught too.
+    const perRepo = tomlFile(`${NO_MEMORY}${SANDBOX}[[repos]]\nname = "r"\npath = "/r"\nmemory = true\n`);
+    expect(() => loadConfig({}, perRepo)).toThrow(/memory is on for r\./);
+    // So is the env override.
+    expect(() => loadConfig({ CONDOTTO_MEMORY: "on" }, cfgFile(`${NO_MEMORY}${SANDBOX}`))).toThrow(/agent memory is on/);
+  });
+});
+
+describe("loadConfig runtime_grants", () => {
+  test("defaults to true", () => {
+    expect(loadConfig({}, cfgFile("")).runtimeGrants).toBe(true);
+  });
+
+  test("false is read from the top level", () => {
+    expect(loadConfig({}, cfgFile(`runtime_grants = false\n`)).runtimeGrants).toBe(false);
+  });
+
+  test("a non-boolean fails fast", () => {
+    expect(() => loadConfig({}, cfgFile(`runtime_grants = "no"\n`))).toThrow(/runtime_grants must be a boolean/);
+  });
+});
+
+describe("loadConfig [[repos]].instructions", () => {
+  test("read when set, trimmed; absent when unset", () => {
+    const path = tomlFile(
+      `[[repos]]\nname = "a"\npath = "/a"\ninstructions = """\nRun pnpm, never npm.\n"""\n\n` +
+        `[[repos]]\nname = "b"\npath = "/b"\n`,
+    );
+    const [a, b] = loadConfig({}, path).repos;
+    expect(a!.instructions).toBe("Run pnpm, never npm.");
+    expect(b!.instructions).toBeUndefined();
+  });
+
+  test("a non-string is rejected", () => {
+    const path = tomlFile(`[[repos]]\nname = "a"\npath = "/a"\ninstructions = 3\n`);
+    expect(() => loadConfig({}, path)).toThrow(/instructions must be a string/);
+  });
+});

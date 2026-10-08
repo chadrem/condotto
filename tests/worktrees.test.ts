@@ -286,10 +286,10 @@ describe("listTopLevelDirs", () => {
     mkdirSync(join(info.path, "services"), { recursive: true });
     mkdirSync(join(info.path, "apps"), { recursive: true });
     writeFileSync(join(info.path, "justafile.txt"), "x");
-    expect(listTopLevelDirs(info.path)).toEqual(["apps", "services"]);
+    expect(await listTopLevelDirs(info.path)).toEqual(["apps", "services"]);
   });
 
-  test("a missing path yields an empty list rather than throwing", () => {
-    expect(listTopLevelDirs(join(root, "nope"))).toEqual([]);
+  test("a missing path yields an empty list rather than throwing", async () => {
+    expect(await listTopLevelDirs(join(root, "nope"))).toEqual([]);
   });
 });

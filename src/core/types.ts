@@ -83,8 +83,12 @@ export interface Attachment {
 
 /** A file Condotto is sending back to the thread. */
 export interface OutboundFile {
-  /** Absolute path on disk. Always inside the session's worktree. */
-  path: string;
+  /**
+   * The file's contents. Bytes rather than a path, so a surface never opens a file
+   * itself: the core reads the agent's outbox through its `TreeIO`, which is the
+   * only thing that knows whose privileges such a read must run with.
+   */
+  bytes: Uint8Array;
   /** Filename to show in the thread. */
   name: string;
   /** Optional line of text posted with it. */
@@ -608,4 +612,10 @@ export interface RepoConfig {
    * the daemon default before this ever reaches the store.
    */
   memory?: boolean;
+  /**
+   * Operator-written guidance appended to the system prompt of every session in
+   * this repo. From `condotto.toml`, so it carries the operator's authority — unlike
+   * anything that arrives through the thread.
+   */
+  instructions?: string;
 }

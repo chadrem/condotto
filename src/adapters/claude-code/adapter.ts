@@ -1,8 +1,11 @@
-import { query } from "@anthropic-ai/claude-agent-sdk";
+import { query, type SpawnOptions, type SpawnedProcess } from "@anthropic-ai/claude-agent-sdk";
 import { extractFromBunfs } from "@anthropic-ai/claude-agent-sdk/extract";
-import { existsSync, readFileSync, readdirSync } from "node:fs";
+import { spawn as nodeSpawn, type ChildProcess } from "node:child_process";
+import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
+import { setprivArgv, type SandboxIdentity } from "../../core/agent-exec";
+import { DirectTreeIO, type TreeIO } from "../../core/tree-io";
 import type {
   GateFn,
   HarnessAdapter,
@@ -385,7 +388,13 @@ export function enumerateSkills(opts: {
   /** The operator's home directory — the dir CONTAINING `.claude/`, not `~/.claude` itself. */
   operatorHome?: string;
   log?: (msg: string) => void;
+  /**
+   * How the skill files are read. Both sources are agent-writable in sandbox mode
+   * (the worktree, and the agent's own HOME), so there they are read as the agent.
+   */
+  io?: TreeIO;
 }): { skills: HarnessSkill[]; refused: Map<string, string> } {
+  const io = opts.io ?? new DirectTreeIO();
   const found = new Map<string, HarnessSkill[]>();
   const refused = new Map<string, string>();
 
@@ -397,23 +406,15 @@ export function enumerateSkills(opts: {
   for (const { base, source } of sources) {
     for (const { rel, kind } of SKILL_DIRS) {
       const dir = join(base, rel);
-      let entries: string[];
-      try {
-        entries = readdirSync(dir);
-      } catch {
-        continue; // no such directory is the normal case, not an error
-      }
+      const entries = io.listEntriesSync(dir);
+      if (entries === null) continue; // no such directory is the normal case, not an error
       for (const entry of entries) {
         // A skill is `<name>/SKILL.md`; a legacy command is `<name>.md`.
         const path = kind === "skill" ? join(dir, entry, "SKILL.md") : join(dir, entry);
         const nameFromPath = kind === "skill" ? entry : entry.replace(/\.md$/i, "");
         if (kind === "command" && !/\.md$/i.test(entry)) continue;
-        let text: string;
-        try {
-          text = readFileSync(path, "utf8");
-        } catch {
-          continue;
-        }
+        const text = io.readTextSync(path);
+        if (text === null) continue;
         const { front, body } = splitFrontmatter(text);
         const name = (front.name || nameFromPath).trim();
         const key = name.toLowerCase();
@@ -558,6 +559,87 @@ export function scrubDaemonEnv(base: NodeJS.ProcessEnv, auth?: HarnessAuth): Rec
   return out;
 }
 
+/**
+ * Sandbox mode: the argv, cwd and env the CLI is spawned with. PURE, so the exact
+ * privilege drop is testable without being root.
+ *
+ * The CLI runs as the agent uid through the core's one setpriv wrapper, so the
+ * agent's shell and every tool it runs inherit no capability and no root-owned
+ * file. HOME moves to the agent's home because the CLI keeps its config and
+ * session transcripts under `~/.claude`, which must be writable by the agent and is
+ * then also all the agent can reach of "home". The env is otherwise exactly what the
+ * SDK built from `options.env` — already scrubbed by `scrubDaemonEnv`.
+ *
+ * The working directory is entered AFTER the drop, by `env --chdir`, and the daemon
+ * spawns from `/`. The cwd is inside the agent's tree, so a `chdir` done by the
+ * root daemon would follow whatever link the agent left there with root's
+ * privileges; done by `env` as the agent, it can only land where the agent could
+ * already go. `env` execs the CLI in place, so the pid is still the CLI's.
+ */
+export function sandboxSpawnSpec(
+  id: SandboxIdentity,
+  options: Pick<SpawnOptions, "command" | "args" | "cwd" | "env">,
+): { argv: string[]; cwd: string; env: Record<string, string> } {
+  const env: Record<string, string> = {};
+  for (const [k, v] of Object.entries(options.env)) if (v !== undefined) env[k] = v;
+  env.HOME = id.agentHome;
+  const enter = options.cwd ? ["env", `--chdir=${options.cwd}`, "--"] : [];
+  return { argv: setprivArgv(id, [...enter, options.command, ...options.args]), cwd: "/", env };
+}
+
+/** What the adapter needs to run a sandboxed session. */
+export interface AdapterSandbox {
+  identity: SandboxIdentity;
+  /** Reads agent-writable files (skills) as the agent. */
+  io: TreeIO;
+}
+
+/** Last bytes of the CLI's stderr kept for a failure log; the SDK keeps a similar tail. */
+const STDERR_TAIL_BYTES = 4096;
+
+/**
+ * The SDK's `spawnClaudeCodeProcess` for sandbox mode. A Node `ChildProcess`
+ * satisfies `SpawnedProcess` as-is.
+ *
+ * `signal` is the SDK's FORWARDED signal, which aborts only after its stdin-EOF +
+ * grace window — so handing it to `spawn` is what the SDK's own local spawn does,
+ * and the force-kill can never pre-empt the CLI's graceful shutdown. setpriv execs
+ * the CLI in place, so the pid that signal kills is the CLI itself; the daemon's
+ * CAP_KILL is what lets it signal a process of another uid.
+ *
+ * stderr is drained like the SDK's default (an undrained pipe would wedge the CLI
+ * once it fills) and only surfaces when the process fails, because a failed
+ * setpriv is otherwise an exit code with no explanation.
+ */
+export function sandboxSpawner(
+  id: SandboxIdentity,
+  spawnFn: typeof nodeSpawn = nodeSpawn,
+  log: (msg: string) => void = (m) => console.warn(m),
+): (options: SpawnOptions) => SpawnedProcess {
+  return (options) => {
+    const spec = sandboxSpawnSpec(id, options);
+    const child: ChildProcess = spawnFn(spec.argv[0]!, spec.argv.slice(1), {
+      cwd: spec.cwd,
+      env: spec.env,
+      stdio: ["pipe", "pipe", "pipe"],
+      signal: options.signal,
+      windowsHide: true,
+    });
+    let tail = "";
+    child.stderr?.setEncoding("utf8");
+    child.stderr?.on("data", (chunk: string) => {
+      tail = (tail + chunk).slice(-STDERR_TAIL_BYTES);
+    });
+    child.stderr?.on("error", () => {});
+    child.once("exit", (code) => {
+      if (code !== 0 && code !== null && tail.trim()) {
+        log(`[claude-code] sandboxed CLI exited ${code}: ${tail.trim()}`);
+      }
+    });
+    return child as unknown as SpawnedProcess;
+  };
+}
+
 /** rider (b): the reason a turn's query was interrupted, for the notice. */
 type AbortReason = "timeout" | "cancel" | "budget";
 function abortNotice(reason: AbortReason, sawWorkflow: boolean, costUsd: number | undefined): string {
@@ -683,6 +765,8 @@ class ClaudeCodeSession implements HarnessSession {
      * session outlives THIS object — see `RemoteBridges`.
      */
     private bridges?: RemoteBridges,
+    /** Set in sandbox mode: who the CLI runs as, and how its tree is read. */
+    private sandbox?: AdapterSandbox,
   ) {}
 
   /**
@@ -716,9 +800,12 @@ class ClaudeCodeSession implements HarnessSession {
     if (this.skillCache) return this.skillCache;
     // Both sources are enumerated here, tagged by `source`: the repo's own
     // `.claude/skills` and the operator's `~/.claude/skills`. Both are reachable.
+    // In sandbox mode the CLI's HOME is the agent's, so that is where "operator"
+    // skills actually load from — and, being agent-writable, it is read as the agent.
     const { skills, refused } = enumerateSkills({
       repoRoot: this.root ?? this.cwd,
-      operatorHome: homedir(),
+      operatorHome: this.sandbox ? this.sandbox.identity.agentHome : homedir(),
+      ...(this.sandbox ? { io: this.sandbox.io } : {}),
     });
     for (const [name, why] of refused) {
       console.warn(`[claude-code] not offering skill "${name}": ${why}`);
@@ -862,6 +949,9 @@ class ClaudeCodeSession implements HarnessSession {
         // Point the SDK at the native `claude` CLI when running as a compiled
         // binary; omitted under `bun run`, where the SDK finds it itself.
         ...(claudeCliPath() ? { pathToClaudeCodeExecutable: claudeCliPath()! } : {}),
+        // Sandbox mode: the CLI — and so the agent's every tool — runs as the agent
+        // uid with no capabilities. Omitted otherwise, keeping the SDK's own spawn.
+        ...(this.sandbox ? { spawnClaudeCodeProcess: sandboxSpawner(this.sandbox.identity) } : {}),
         systemPrompt: { type: "preset", preset: "claude_code", append: this.system },
         // Which built-ins EXIST for this session (see BASE_TOOLS) — orthogonal to
         // allowedTools, which only says which of them skip the callback.
@@ -1231,6 +1321,11 @@ class ClaudeCodeSession implements HarnessSession {
     if (!this.bridges) {
       return { ok: false, reason: "This harness was built without remote control." };
     }
+    // Defense in depth behind the core's own refusal: a sandboxed install never
+    // publishes a session, whatever the core asks.
+    if (enabled && this.sandbox) {
+      return { ok: false, reason: "Remote control is off on a sandboxed install." };
+    }
     if (!enabled) {
       await this.bridges.disable(this.remoteKey);
       return { ok: true, url: "", handle: "" };
@@ -1321,6 +1416,12 @@ export class ClaudeCodeAdapter implements HarnessAdapter {
      * authoritative. See scrubDaemonEnv.
      */
     private auth?: HarnessAuth,
+    /**
+     * Sandbox mode, from the composition root: the CLI is spawned as the agent uid
+     * and agent-writable skill files are read through `io` (an `AgentTreeIO`).
+     * Undefined = today's behaviour, the CLI runs as the daemon's own user.
+     */
+    private sandbox?: AdapterSandbox,
   ) {}
   readonly capabilities: HarnessCapabilities = {
     mechanicalGating: true, // defer-based gating (verified), wired live
@@ -1376,6 +1477,7 @@ export class ClaudeCodeAdapter implements HarnessAdapter {
       opts.root,
       this.auth,
       this.bridges,
+      this.sandbox,
     );
   }
 
@@ -1389,6 +1491,7 @@ export class ClaudeCodeAdapter implements HarnessAdapter {
       root,
       this.auth,
       this.bridges,
+      this.sandbox,
     );
   }
 

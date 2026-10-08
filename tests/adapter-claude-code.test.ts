@@ -1,14 +1,18 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { EventEmitter } from "node:events";
 import { mkdirSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import {
   ClaudeCodeAdapter,
   enumerateSkills,
+  sandboxSpawnSpec,
+  sandboxSpawner,
   scrubDaemonEnv,
   type QueryFn,
 } from "../src/adapters/claude-code/adapter";
 import type { GateFn, TurnEvent } from "../src/core/types";
+import { DirectTreeIO, type TreeIO } from "../src/core/tree-io";
 
 // Drive the REAL claude-code adapter loop with a scripted SDK message stream (via
 // the injectable query seam), so the result-buffering and canUseTool wiring —
@@ -859,5 +863,120 @@ describe("claude-code adapter: skill enumeration is an allowlist", () => {
   test("a missing directory is the normal case, not an error", () => {
     expect(enumerateSkills({ repoRoot: join(tmp, "nope") }).skills).toEqual([]);
     expect(enumerateSkills({}).skills).toEqual([]);
+  });
+});
+
+describe("claude-code adapter: sandbox mode", () => {
+  const ID = { agentUid: 1001, agentGid: 1002, agentHome: "/home/agent" };
+  /** A TreeIO stub that records the sync reads skill enumeration makes. */
+  const recordingIO = (files: Record<string, string> = {}, dirs: Record<string, string[]> = {}) => {
+    const reads: string[] = [];
+    const io = {
+      ...new DirectTreeIO(),
+      listEntriesSync: (dir: string) => {
+        reads.push(`ls ${dir}`);
+        return dirs[dir] ?? null;
+      },
+      readTextSync: (path: string) => {
+        reads.push(`cat ${path}`);
+        return files[path] ?? null;
+      },
+    } as unknown as TreeIO;
+    return { io, reads };
+  };
+
+  test("sandboxSpawnSpec wraps the SDK's command in setpriv and moves HOME to the agent's", () => {
+    const spec = sandboxSpawnSpec(ID, {
+      command: "/opt/condotto/claude",
+      args: ["--output-format", "stream-json"],
+      cwd: "/wt/s1",
+      env: { PATH: "/usr/bin", HOME: "/root", ANTHROPIC_API_KEY: "sk-x", DROPPED: undefined },
+    });
+    expect(spec.argv).toEqual([
+      "setpriv", "--reuid=1001", "--regid=1002", "--clear-groups", "--inh-caps=-all", "--ambient-caps=-all", "--",
+      "env", "--chdir=/wt/s1", "--",
+      "/opt/condotto/claude", "--output-format", "stream-json",
+    ]);
+    // The daemon never chdirs into the agent's tree itself: `env` does, as the agent.
+    expect(spec.cwd).toBe("/");
+    // The env is the SDK's (already scrubbed by scrubDaemonEnv) with HOME replaced.
+    expect(spec.env).toEqual({ PATH: "/usr/bin", HOME: "/home/agent", ANTHROPIC_API_KEY: "sk-x" });
+  });
+
+  test("sandboxSpawner spawns that argv with piped stdio and forwards the SDK's signal", () => {
+    const calls: { cmd: string; args: readonly string[]; opts: any }[] = [];
+    const fakeChild = Object.assign(new EventEmitter(), {
+      stdin: {}, stdout: {}, stderr: Object.assign(new EventEmitter(), { setEncoding() {} }),
+      killed: false, exitCode: null,
+    });
+    const spawnFn = ((cmd: string, args: readonly string[], opts: any) => {
+      calls.push({ cmd, args, opts });
+      return fakeChild;
+    }) as any;
+    const logs: string[] = [];
+    const signal = new AbortController().signal;
+    const proc = sandboxSpawner(ID, spawnFn, (m) => logs.push(m))({
+      command: "claude", args: ["-p"], cwd: "/wt/s1", env: { PATH: "/bin" }, signal,
+    });
+    expect(proc).toBe(fakeChild as any);
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.cmd).toBe("setpriv");
+    expect(calls[0]!.args.slice(-3)).toEqual(["--", "claude", "-p"]);
+    expect(calls[0]!.opts.stdio).toEqual(["pipe", "pipe", "pipe"]);
+    expect(calls[0]!.opts.signal).toBe(signal);
+    expect(calls[0]!.opts.env.HOME).toBe("/home/agent");
+    // stderr is drained, and stays quiet when the process exits cleanly.
+    fakeChild.stderr.emit("data", "chatter\n");
+    fakeChild.emit("exit", 0, null);
+    expect(logs).toEqual([]);
+  });
+
+  test("a failing sandboxed CLI logs its stderr tail", () => {
+    const child = Object.assign(new EventEmitter(), { stderr: Object.assign(new EventEmitter(), { setEncoding() {} }) });
+    const logs: string[] = [];
+    sandboxSpawner(ID, (() => child) as any, (m) => logs.push(m))({ command: "c", args: [], env: {}, signal: new AbortController().signal });
+    child.stderr.emit("data", "setpriv: setresuid failed: Operation not permitted");
+    child.emit("exit", 1, null);
+    expect(logs[0]).toMatch(/exited 1: setpriv: setresuid failed/);
+  });
+
+  test("the query gets spawnClaudeCodeProcess only in sandbox mode", async () => {
+    const seen: any[] = [];
+    const q = fakeQuery(async function* (opts) {
+      seen.push(opts);
+      yield { type: "result", subtype: "success", result: "ok" };
+    });
+    await collect(new ClaudeCodeAdapter(q), allowGate);
+    await collect(new ClaudeCodeAdapter(q, undefined, undefined, { identity: ID, io: recordingIO().io }), allowGate);
+    expect(seen[0]!.spawnClaudeCodeProcess).toBeUndefined();
+    expect(typeof seen[1]!.spawnClaudeCodeProcess).toBe("function");
+  });
+
+  test("skills are enumerated through the sandbox TreeIO, from the worktree and the AGENT's home", async () => {
+    const { io, reads } = recordingIO(
+      { "/wt/s1/.claude/skills/deploy/SKILL.md": "---\nname: deploy\n---\nbody" },
+      { "/wt/s1/.claude/skills": ["deploy"] },
+    );
+    const session = await new ClaudeCodeAdapter(undefined, undefined, undefined, { identity: ID, io }).create({
+      cwd: "/wt/s1",
+      system: "s",
+    });
+    expect(session.listSkills()!.map((s) => s.name)).toEqual(["deploy"]);
+    expect(reads).toContain("ls /wt/s1/.claude/skills");
+    expect(reads).toContain("cat /wt/s1/.claude/skills/deploy/SKILL.md");
+    expect(reads).toContain("ls /home/agent/.claude/skills");
+    expect(reads.some((r) => r.includes(homedir()))).toBe(false);
+  });
+
+  test("remote control is refused by the adapter itself, but turning it off still works", async () => {
+    const session = await new ClaudeCodeAdapter(undefined, undefined, undefined, { identity: ID, io: recordingIO().io }).create({
+      cwd: "/wt/s1",
+      system: "s",
+    });
+    const sink = { onMessage: () => {}, onClosed: () => {} } as any;
+    const on = await session.setRemoteControl!(true, { name: "t", sink });
+    expect(on.ok).toBe(false);
+    if (!on.ok) expect(on.reason).toMatch(/sandboxed/);
+    expect((await session.setRemoteControl!(false, { name: "t", sink })).ok).toBe(true);
   });
 });

@@ -100,6 +100,8 @@ export interface RepoRow {
    */
   default_subagents: number | null;
   default_workflows: number | null;
+  /** Operator-written system-prompt addendum for this repo; null = none. */
+  instructions: string | null;
 }
 
 interface RawRepoRow extends RepoRow {}
@@ -440,6 +442,15 @@ function migrateV12(db: Database): void {
   db.run(`ALTER TABLE sessions ADD COLUMN remote_control TEXT`);
 }
 
+/**
+ * Migration **v13**: `repos.instructions`, the operator's per-repo system-prompt
+ * addendum. Re-written from config on every boot like the rest of the row, so
+ * existing repos upgrade to NULL until the next `upsertRepo` — which is this boot.
+ */
+function migrateV13(db: Database): void {
+  db.run(`ALTER TABLE repos ADD COLUMN instructions TEXT`);
+}
+
 /** Add `column` to `table` only if absent (idempotent ALTER — SQLite has no
  *  `ADD COLUMN IF NOT EXISTS`). Used by the baseline migration to evolve tables
  *  a pre-runner DB already created. */
@@ -489,7 +500,8 @@ export class Store {
       migrateV10, // v10: fold the observer role into member.
       migrateV11, // v11: drop the surfaces/channels tables and two unused repo columns.
       migrateV12, // v12: sessions.remote_control for the per-thread claude.ai bridge.
-      // v13+: append new migrations here. They only ever run on a store already
+      migrateV13, // v13: repos.instructions, the per-repo operator prompt addendum.
+      // v14+: append new migrations here. They only ever run on a store already
       // at the prior version, so they can be plain forward DDL — no IF NOT EXISTS
       // gymnastics.
     ];
@@ -533,21 +545,23 @@ export class Store {
     subagents?: boolean;
     workflows?: boolean;
     memory?: boolean;
+    instructions?: string;
   }): void {
     this.db
       .query(
         `INSERT INTO repos
            (id, name, path, default_branch, cost_cap_usd,
             default_model, default_effort, memory,
-            default_subagents, default_workflows)
+            default_subagents, default_workflows, instructions)
          VALUES ($id, $name, $path, $branch, $cap,
                  $model, $effort, $memory,
-                 $subagents, $workflows)
+                 $subagents, $workflows, $instructions)
          ON CONFLICT(name) DO UPDATE SET
            path = $path, default_branch = $branch,
            cost_cap_usd = $cap,
            default_model = $model, default_effort = $effort, memory = $memory,
-           default_subagents = $subagents, default_workflows = $workflows`,
+           default_subagents = $subagents, default_workflows = $workflows,
+           instructions = $instructions`,
       )
       .run({
         id: repo.name,
@@ -560,6 +574,7 @@ export class Store {
         memory: repo.memory ? 1 : 0,
         subagents: repo.subagents === undefined ? null : repo.subagents ? 1 : 0,
         workflows: repo.workflows === undefined ? null : repo.workflows ? 1 : 0,
+        instructions: repo.instructions ?? null,
       });
   }
 
@@ -599,7 +614,7 @@ export class Store {
       .query<RawRepoRow, { name: string }>(
         `SELECT id, name, path, default_branch, cost_cap_usd,
                 default_model, default_effort, memory,
-                default_subagents, default_workflows
+                default_subagents, default_workflows, instructions
          FROM repos WHERE name = $name`,
       )
       .get({ name });
@@ -615,6 +630,7 @@ export class Store {
       memory: row.memory,
       default_subagents: row.default_subagents,
       default_workflows: row.default_workflows,
+      instructions: row.instructions,
     };
   }
 
@@ -1040,6 +1056,23 @@ export class Store {
    */
   clearConfigRoles(): void {
     this.db.run(`DELETE FROM roles WHERE source = 'config'`);
+  }
+
+  /**
+   * Delete every runtime-granted role row and return what was removed, for the
+   * audit. Used at boot when `runtime_grants = false`, so a grant made before the
+   * switch was flipped cannot keep authority the config no longer allows.
+   */
+  purgeGrantRoles(): { principal: string; scope: string; role: Role }[] {
+    return this.db.transaction(() => {
+      const rows = this.db
+        .query<{ principal: string; scope: string; role: Role }, []>(
+          `SELECT principal, scope, role FROM roles WHERE source = 'grant' ORDER BY principal, scope`,
+        )
+        .all();
+      this.db.run(`DELETE FROM roles WHERE source = 'grant'`);
+      return rows;
+    })();
   }
 
   /**

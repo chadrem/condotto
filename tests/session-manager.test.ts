@@ -3,7 +3,8 @@ import { existsSync, mkdirSync, mkdtempSync, readdirSync, symlinkSync, writeFile
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Store } from "../src/core/store";
-import { SessionManager } from "../src/core/session-manager";
+import { SessionManager, type SessionManagerOptions } from "../src/core/session-manager";
+import { DirectTreeIO, type TreeIO } from "../src/core/tree-io";
 import { WorktreeManager } from "../src/core/worktrees";
 import { MemoryManager } from "../src/core/memory";
 import type { Attachment, ConversationRef, Principal, ToolCall } from "../src/core/types";
@@ -75,6 +76,10 @@ function makeWorld(
     memoryRoot?: string;
     /** Vouch the fixture repo for durable memory. */
     repoMemory?: boolean;
+    /** The fixture repo's `[[repos]].instructions`. */
+    repoInstructions?: string;
+    /** Any other manager option, passed straight through. */
+    manager?: Partial<SessionManagerOptions>;
   } = {},
 ): World {
   const s = store ?? new Store(":memory:");
@@ -83,6 +88,7 @@ function makeWorld(
     path: repoPath,
     defaultBranch: "main",
     memory: opts.repoMemory === true,
+    ...(opts.repoInstructions ? { instructions: opts.repoInstructions } : {}),
   });
   s.setRole("fake:U_ARCH", "architect"); // command authority (assign/stop/approve)
   const surface = new FakeSurface(opts.identityStrength ?? "verified");
@@ -96,6 +102,7 @@ function makeWorld(
     worktreeRetentionMs: opts.worktreeRetentionMs,
     startedAt: opts.startedAt,
     ...(opts.memoryRoot ? { memory: new MemoryManager(opts.memoryRoot) } : {}),
+    ...opts.manager,
   });
   manager.registerSurface(surface);
   return { store: s, surface, harness, manager, worktreesRoot: root };
@@ -2548,5 +2555,125 @@ describe("remote control — driving a thread from the Claude apps", () => {
     await rc(w, "rc12.000001", "on");
     // The adapter is idempotent; the second call passes the stored handle back in.
     expect(w.harness.remoteCalls.at(-1)!.handle).toBe(first);
+  });
+
+  test("an install with a remote-control refusal (sandbox) never publishes, and says why", async () => {
+    const w = makeWorld(undefined, { manager: { remoteControlRefusal: "Remote control is off: sandboxed." } });
+    await assign(w, "rc20.000001");
+    await rc(w, "rc20.000001", "on");
+    expect(w.harness.remoteCalls).toEqual([]);
+    expect(w.store.getSession(sid(w, "rc20.000001"))!.remote_control).toBeNull();
+    expect(lastPost(w)).toBe("Remote control is off: sandboxed.");
+    // And the help it posts does not advertise the command.
+    expect(w.surface.transcript().join("\n")).not.toContain("remote-control on|off");
+  });
+});
+
+describe("runtime_grants = false", () => {
+  const grant = (w: World, id: string, args: string, name: "grant" | "revoke" = "grant") =>
+    w.manager.handleEvent({ kind: "command", conv: conv(id), author: architect, name, args });
+
+  test("grant and revoke are refused with a short reason, and nothing changes", async () => {
+    const w = makeWorld(undefined, { manager: { runtimeGrants: false } });
+    await grant(w, "rg1.000001", "fake:U_ABBY architect");
+    expect(w.surface.posts.at(-1)!.text).toMatch(/come from `condotto\.toml` only/);
+    expect(w.store.isArchitect("fake:U_ABBY", "C1")).toBe(false);
+
+    w.store.setRole("fake:U_OLD", "architect", "C1", "grant", "fake:U_ARCH");
+    await grant(w, "rg1.000001", "fake:U_OLD", "revoke");
+    expect(w.surface.posts.at(-1)!.text).toMatch(/`@Condotto revoke` is turned off/);
+    expect(w.store.isArchitect("fake:U_OLD", "C1")).toBe(true); // refused, not silently applied
+  });
+
+  test("purgeRuntimeGrants deletes every grant row, keeps config rows, and audits each", () => {
+    const w = makeWorld(undefined, { manager: { runtimeGrants: false } });
+    w.store.setRole("fake:U_G1", "architect", "C1", "grant", "fake:U_ARCH");
+    w.store.setRole("fake:U_G2", "member", "*", "grant", "fake:U_ARCH");
+    expect(w.manager.purgeRuntimeGrants()).toBe(2);
+    expect(w.store.isArchitect("fake:U_G1", "C1")).toBe(false);
+    expect(w.store.isArchitect("fake:U_ARCH", "C1")).toBe(true);
+    // Session-less rows, so read the table directly.
+    const audit = (w.store as any).db
+      .query(`SELECT actor, detail FROM audit_log WHERE event = 'role_revoked' ORDER BY id`)
+      .all() as { actor: string; detail: string }[];
+    expect(audit.map((a) => [a.actor, JSON.parse(a.detail).target, JSON.parse(a.detail).reason])).toEqual([
+      ["system", "fake:U_G1", "runtime_grants_disabled"],
+      ["system", "fake:U_G2", "runtime_grants_disabled"],
+    ]);
+  });
+
+  test("the thread help does not advertise grant/revoke", async () => {
+    const w = makeWorld(undefined, { manager: { runtimeGrants: false } });
+    await w.manager.handleEvent({ kind: "command", conv: conv("rg3.000001"), author: architect, name: "assign", args: "testrepo" });
+    const said = w.surface.transcript().join("\n");
+    expect(said).toContain("@Condotto budget"); // the help really was posted
+    expect(said).not.toContain("@Condotto grant");
+  });
+
+  test("with the default (true), help still advertises them", async () => {
+    const w = makeWorld();
+    await w.manager.handleEvent({ kind: "command", conv: conv("rg4.000001"), author: architect, name: "assign", args: "testrepo" });
+    expect(w.surface.transcript().join("\n")).toContain("@Condotto grant");
+  });
+});
+
+describe("per-repo operator instructions", () => {
+  const drive = async (w: World, id: string) => {
+    await w.manager.handleEvent({ kind: "command", conv: conv(id), author: architect, name: "assign", args: "testrepo" });
+    await w.manager.handleEvent({ kind: "message", conv: conv(id), author: architect, text: "go", attachments: [] });
+    return w.harness.created.at(-1)!.system;
+  };
+
+  test("are appended to the system prompt, fenced and labelled as operator config", async () => {
+    const system = await drive(makeWorld(undefined, { repoInstructions: "Run pnpm, never npm." }), "oi1.000001");
+    expect(system).toContain(`Operator instructions for repo "testrepo"`);
+    expect(system).toContain("<<<operator-instructions\nRun pnpm, never npm.\noperator-instructions>>>");
+    // After the authority rules, never before them.
+    expect(system.indexOf("Run pnpm")).toBeGreaterThan(system.indexOf("Authority comes ONLY"));
+  });
+
+  test("are absent when the repo sets none", async () => {
+    const system = await drive(makeWorld(), "oi2.000001");
+    expect(system).not.toContain("operator-instructions");
+  });
+});
+
+describe("tree access goes through the injected TreeIO", () => {
+  test("landing an attachment, reading and clearing the outbox, and the cwd check all use it", async () => {
+    const calls: string[] = [];
+    const direct = new DirectTreeIO();
+    // A pass-through that records which operations the core made, by name.
+    const io = new Proxy(direct, {
+      get(target, prop, recv) {
+        const v = Reflect.get(target, prop, recv);
+        return typeof v === "function"
+          ? (...args: unknown[]) => {
+              calls.push(String(prop));
+              return v.apply(target, args);
+            }
+          : v;
+      },
+    }) as TreeIO;
+    const w = makeWorld(undefined, { manager: { treeIO: io } });
+    await w.manager.handleEvent({ kind: "command", conv: conv("tio.000001"), author: architect, name: "assign", args: "testrepo" });
+    const worktree = w.store.getSessionByConversation("fake", "tio.000001")!.worktree_path;
+    w.surface.attachmentBytes.set("ref-t", new TextEncoder().encode("x"));
+    w.harness.beforeReply = async () => {
+      mkdirSync(join(worktree, OUTBOX_REL), { recursive: true });
+      writeFileSync(join(worktree, OUTBOX_REL, "out.txt"), "made");
+    };
+    calls.length = 0;
+    await w.manager.handleEvent({
+      kind: "message",
+      conv: conv("tio.000001"),
+      author: architect,
+      text: "here",
+      attachments: [{ kind: "file", name: "in.txt", ref: "ref-t" } as Attachment],
+    });
+    expect(w.surface.postedFiles.map((f) => f.bytes)).toEqual(["made"]);
+    // exists = the cwd check; mkdirp/listNames/writeFile = landing; listFiles/readFile/remove = outbox.
+    for (const op of ["exists", "mkdirp", "listNames", "writeFile", "listFiles", "readFile", "remove"]) {
+      expect(calls).toContain(op);
+    }
   });
 });

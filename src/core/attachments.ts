@@ -1,5 +1,5 @@
-import { mkdir, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { basename, extname, join } from "node:path";
+import { DirectTreeIO, type TreeIO } from "./tree-io";
 
 // Files moving in and out of a thread.
 //
@@ -13,6 +13,11 @@ import { basename, extname, join } from "node:path";
 //
 // `.condotto/` is already in the repo's `info/exclude` (see `worktrees.ts`), so
 // neither directory can ride a `git add -A` into a commit.
+//
+// Every access below goes through a `TreeIO`, never a bare fs call: both
+// directories are the agent's to shape, and in sandbox mode the daemon touching
+// them with its own privileges is how a planted symlink would become an upload of
+// the daemon's own state. See `tree-io.ts`.
 
 /** Inbound files land here, relative to the worktree root. */
 export const ATTACHMENTS_REL = join(".condotto", "attachments");
@@ -67,6 +72,7 @@ export interface LandedAttachment {
 export async function landAttachments(
   worktree: string,
   files: { name?: string; bytes: Uint8Array | null }[],
+  io: TreeIO = new DirectTreeIO(),
 ): Promise<{ landed: LandedAttachment[]; failed: string[] }> {
   const landed: LandedAttachment[] = [];
   const failed: string[] = [];
@@ -74,12 +80,14 @@ export async function landAttachments(
 
   const dir = join(worktree, ATTACHMENTS_REL);
   try {
-    await mkdir(dir, { recursive: true });
-  } catch (err) {
+    await io.mkdirp(dir);
+  } catch {
     return { landed, failed: files.map((f, i) => safeAttachmentName(f.name, i)) };
   }
 
-  const taken = new Set<string>(await readdir(dir).catch(() => []));
+  // Every entry claims its name, symlinks included, so a landing never writes
+  // through a link the agent left here.
+  const taken = new Set<string>((await io.listNames(dir)) ?? []);
   for (const [i, file] of files.entries()) {
     const wanted = safeAttachmentName(file.name, i);
     if (file.bytes === null) {
@@ -89,7 +97,7 @@ export async function landAttachments(
     const name = uniqueName(wanted, taken);
     taken.add(name);
     try {
-      await writeFile(join(dir, name), file.bytes);
+      await io.writeFile(join(dir, name), file.bytes);
       landed.push({ name, relPath: join(ATTACHMENTS_REL, name) });
     } catch {
       failed.push(name);
@@ -126,24 +134,21 @@ export interface OutboxFile {
  * from outside the tree into the thread — the one exfiltration route this feature
  * could otherwise open.
  */
-export async function readOutbox(worktree: string): Promise<OutboxFile[]> {
+export async function readOutbox(worktree: string, io: TreeIO = new DirectTreeIO()): Promise<OutboxFile[]> {
   const dir = join(worktree, OUTBOX_REL);
-  const entries = await readdir(dir, { withFileTypes: true }).catch(() => null);
+  const entries = await io.listFiles(dir); // regular, non-symlink files only
   if (entries === null) return [];
-  const out: OutboxFile[] = [];
-  for (const e of entries) {
-    if (!e.isFile()) continue; // withFileTypes uses lstat semantics: a symlink is not a file
-    const absPath = join(dir, e.name);
-    const st = await stat(absPath).catch(() => null);
-    // A zero-byte upload is not a thing Slack accepts, so skipping it avoids a
-    // guaranteed error post. Everything with content goes, however big.
-    if (!st?.isFile() || st.size === 0) continue;
-    out.push({ name: e.name, absPath, sizeBytes: st.size });
-  }
-  return out.sort((a, b) => a.name.localeCompare(b.name));
+  return (
+    entries
+      // A zero-byte upload is not a thing Slack accepts, so skipping it avoids a
+      // guaranteed error post. Everything with content goes, however big.
+      .filter((e) => e.sizeBytes > 0)
+      .map((e) => ({ name: e.name, absPath: join(dir, e.name), sizeBytes: e.sizeBytes }))
+      .sort((a, b) => a.name.localeCompare(b.name))
+  );
 }
 
 /** Empty the outbox. Called after posting, so the next turn starts clean. */
-export async function clearOutbox(worktree: string): Promise<void> {
-  await rm(join(worktree, OUTBOX_REL), { recursive: true, force: true }).catch(() => {});
+export async function clearOutbox(worktree: string, io: TreeIO = new DirectTreeIO()): Promise<void> {
+  await io.remove(join(worktree, OUTBOX_REL));
 }

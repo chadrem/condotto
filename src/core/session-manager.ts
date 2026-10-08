@@ -11,8 +11,8 @@ import type {
   Role,
   SurfaceAdapter,
 } from "./types";
-import { existsSync } from "node:fs";
 import { join } from "node:path";
+import { DirectTreeIO, type TreeIO } from "./tree-io";
 import { mentionToken, principalKey } from "./types";
 import type { Store, SessionRow, RepoRow } from "./store";
 import { ConflictError } from "./store";
@@ -107,6 +107,8 @@ function condottoSystemPrompt(opts: {
   memoryDir?: string | null;
   /** Read-only planning: the agent proposes a plan instead of doing the work. */
   planMode?: boolean;
+  /** The operator's `[[repos]].instructions` for this repo, or null/absent for none. */
+  instructions?: string | null;
 }): string {
   // Guidance when the architect has enabled subagents.
   const delegation = opts.subagents
@@ -251,6 +253,19 @@ function condottoSystemPrompt(opts: {
     ``,
     `Style: you are replying into a chat thread. Be terse and conversational —`,
     `short paragraphs, minimal formatting, no headers unless genuinely useful.`,
+    // Last, and fenced off by name, so it reads as what it is: the operator's
+    // config for this repo, not a thread message. It cannot be forged from a thread —
+    // it is only ever read from condotto.toml — so it needs no nonce, but it also
+    // never displaces the authority rules above, which come first.
+    ...(opts.instructions
+      ? [
+          ``,
+          `Operator instructions for repo "${opts.repoName}" (from the Condotto config, not from anyone in the thread):`,
+          `<<<operator-instructions`,
+          opts.instructions,
+          `operator-instructions>>>`,
+        ]
+      : []),
   ].join("\n");
 }
 
@@ -288,15 +303,19 @@ function describeTarget(repoName: string, workdir: string | null): string {
  * when a session starts or reactivates so the commands are discoverable in the
  * thread itself, not only in the docs. Kept terse — it is a chat message.
  */
-function threadCommandHelp(): string {
+function threadCommandHelp(opts: { runtimeGrants: boolean; remoteControl: boolean }): string {
   return [
     `Architect commands — mention me in this thread:`,
     `• \`@Condotto model <opus|sonnet|fable>\` / \`@Condotto effort <low…max>\` — tune the implementer`,
     `• \`@Condotto subagents on|off\` · \`@Condotto workflows on|off\` — multi-agent power (both on by default)`,
-    `• \`@Condotto grant @user architect [everywhere]\` · \`@Condotto revoke @user\` — delegate authority (this channel, or everywhere)`,
+    ...(opts.runtimeGrants
+      ? [`• \`@Condotto grant @user architect [everywhere]\` · \`@Condotto revoke @user\` — delegate authority (this channel, or everywhere)`]
+      : []),
     `• \`@Condotto budget <usd>\` — cap this thread's spend (\`off\` to remove it) · \`@Condotto cancel\` — stop the running turn (e.g. a runaway workflow)`,
     `• \`@Condotto plan on|off\` — research first: I propose a plan and change nothing until you turn it off`,
-    `• \`@Condotto remote-control on|off\` — drive this thread from claude.ai/code or the Claude mobile app`,
+    ...(opts.remoteControl
+      ? [`• \`@Condotto remote-control on|off\` — drive this thread from claude.ai/code or the Claude mobile app`]
+      : []),
     `• \`@Condotto clear\` — forget the conversation and start fresh (the worktree, your uncommitted work, and these settings all stay)`,
     `• \`@Condotto /<skill> [args]\` — run one of my skills · \`@Condotto skills\` — list what's available`,
     `• \`@Condotto status\` — list sessions · \`@Condotto stop\` — end this session (keeps the worktree; \`stop clean\` discards it)`,
@@ -395,6 +414,20 @@ export interface SessionManagerOptions {
    * proxy for daemon uptime. Injectable so tests get a deterministic uptime.
    */
   startedAt?: number;
+  /**
+   * Every daemon access inside a session tree goes through this. Default: the
+   * daemon's own fs calls. Sandbox mode passes `AgentTreeIO`, so the daemon never
+   * touches an agent tree with its own privileges.
+   */
+  treeIO?: TreeIO;
+  /** False refuses `@Condotto grant`/`revoke`: roles come only from condotto.toml. Default true. */
+  runtimeGrants?: boolean;
+  /**
+   * Why `@Condotto remote-control on` is refused on this install, or undefined when
+   * it is allowed. Set in sandbox mode: publishing a thread to claude.ai is an
+   * authority path from outside the box, which a sandbox exists to rule out.
+   */
+  remoteControlRefusal?: string;
 }
 
 /**
@@ -460,6 +493,9 @@ export class SessionManager {
   private readonly startedAt: number;
   /** Owns per-(repo, channel) memory directories; undefined = memory unavailable. */
   private readonly memory?: MemoryManager;
+  private readonly treeIO: TreeIO;
+  private readonly runtimeGrants: boolean;
+  private readonly remoteControlRefusal?: string;
 
   constructor(
     private store: Store,
@@ -484,6 +520,34 @@ export class SessionManager {
     this.turnSlots = new Semaphore(Math.max(1, opts.maxConcurrentTurns ?? DEFAULT_MAX_CONCURRENT_TURNS));
     this.memory = opts.memory;
     this.startedAt = opts.startedAt ?? Date.now();
+    this.treeIO = opts.treeIO ?? new DirectTreeIO();
+    this.runtimeGrants = opts.runtimeGrants ?? true;
+    this.remoteControlRefusal = opts.remoteControlRefusal;
+  }
+
+  /** The in-thread command list, minus whatever this install refuses. */
+  private commandHelp(): string {
+    return threadCommandHelp({
+      runtimeGrants: this.runtimeGrants,
+      remoteControl: this.harness.capabilities.remoteControl && this.remoteControlRefusal === undefined,
+    });
+  }
+
+  /**
+   * Boot, with `runtime_grants = false`: delete every runtime-granted role so a
+   * grant made before the switch was flipped stops conferring authority, and audit
+   * each one. Returns how many were removed.
+   */
+  purgeRuntimeGrants(): number {
+    const removed = this.store.purgeGrantRoles();
+    for (const r of removed) {
+      this.store.audit({
+        actor: "system",
+        event: "role_revoked",
+        detail: { target: r.principal, scope: r.scope, role: r.role, reason: "runtime_grants_disabled" },
+      });
+    }
+    return removed.length;
   }
 
   // -- harness capability helpers ------------------------------------
@@ -865,7 +929,7 @@ export class SessionManager {
               : `I don't have the prior conversation, so re-state what you need.\n`) +
             this.settingsBlock(existing, this.store.getRepo(existing.repo_id)) +
             `\n\n` +
-            threadCommandHelp(),
+            this.commandHelp(),
         });
       });
       await entry.chain;
@@ -914,11 +978,11 @@ export class SessionManager {
     // path a real escape. No session row exists yet, so there is nothing to unwind
     // beyond the worktree itself.
     if (workdir) {
-      const verified = await verifyWorkdir(worktree.path, workdir);
+      const verified = await verifyWorkdir(worktree.path, workdir, this.treeIO);
       if (!verified.ok) {
         // Read the tree BEFORE tearing it down — these names are the whole value
         // of the message, and the teardown would leave nothing to list.
-        const dirs = listTopLevelDirs(worktree.path);
+        const dirs = await listTopLevelDirs(worktree.path, this.treeIO);
         await this.abandonWorktree(repo, sessionId, worktree.branch, "bad_subdir", author);
         await surface.post(conv, {
           text:
@@ -1002,7 +1066,7 @@ export class SessionManager {
         `Reply in this thread to talk. An architect's message sets me working — edits ` +
         `and commands just run, inside this worktree. Anyone else's message is carried ` +
         `into the next architect turn.\n\n` +
-        threadCommandHelp(),
+        this.commandHelp(),
     });
   }
 
@@ -1048,7 +1112,7 @@ export class SessionManager {
           `branch \`${session.branch}\`.\n` +
           this.settingsBlock(session, this.store.getRepo(session.repo_id)) +
           `\n\n` +
-          threadCommandHelp(),
+          this.commandHelp(),
       });
       return;
     }
@@ -1854,6 +1918,12 @@ export class SessionManager {
       });
       return;
     }
+    // Only turning it ON is refused here: `off` must always work, so a thread
+    // published before the install was locked down can still be unpublished.
+    if (on && this.remoteControlRefusal !== undefined) {
+      await surface.post(conv, { text: this.remoteControlRefusal });
+      return;
+    }
     // Plan mode and remote control are mutually exclusive, and this is a security rule
     // rather than an ergonomic one: a remote client can ask to change permission mode.
     // The read-only guarantee itself does not depend on that — `PolicyContext.planMode`
@@ -2251,7 +2321,25 @@ export class SessionManager {
    * (or the sentinel `?` if it couldn't), so no surface id shape reaches here.
    * Architect-only; operates at the channel level, so it needs no active session.
    */
+  /**
+   * With `runtime_grants = false`, roles come only from condotto.toml. Checked
+   * before anything else, for everyone: the answer is the same whoever asks.
+   */
+  private async refuseIfGrantsDisabled(conv: ConversationRef, author: Principal, action: "grant" | "revoke"): Promise<boolean> {
+    if (this.runtimeGrants) return false;
+    this.store.audit({
+      actor: principalKey(author),
+      event: "authz_denied",
+      detail: { action, channel: conv.channelId, reason: "runtime_grants_disabled" },
+    });
+    await this.surfaceFor(conv).post(conv, {
+      text: `Roles on this install come from \`condotto.toml\` only — \`@Condotto ${action}\` is turned off.`,
+    });
+    return true;
+  }
+
   private async grantRole(conv: ConversationRef, author: Principal, args: string): Promise<void> {
+    if (await this.refuseIfGrantsDisabled(conv, author, "grant")) return;
     const surface = this.surfaceFor(conv);
     if (!this.store.isArchitect(principalKey(author), conv.channelId)) {
       this.store.audit({ actor: principalKey(author), event: "authz_denied", detail: { action: "grant", channel: conv.channelId } });
@@ -2312,6 +2400,7 @@ export class SessionManager {
    * instead). Architect-only; channel-level, no session needed.
    */
   private async revokeRole(conv: ConversationRef, author: Principal, args: string): Promise<void> {
+    if (await this.refuseIfGrantsDisabled(conv, author, "revoke")) return;
     const surface = this.surfaceFor(conv);
     if (!this.store.isArchitect(principalKey(author), conv.channelId)) {
       this.store.audit({ actor: principalKey(author), event: "authz_denied", detail: { action: "revoke", channel: conv.channelId } });
@@ -2423,7 +2512,9 @@ export class SessionManager {
           .post(event.conv, {
             text:
               "Noted — I've kept that, and I'll have it in front of me next time an architect sends me something. " +
-              "Only architects run me in this thread; ask one to `@Condotto grant` you if you should be driving.",
+              (this.runtimeGrants
+                ? "Only architects run me in this thread; ask one to `@Condotto grant` you if you should be driving."
+                : "Only architects run me in this thread."),
           })
           .catch(() => {});
       }
@@ -2687,7 +2778,7 @@ export class SessionManager {
       // stopped session (#6), and the finally releases the slot.
       if (!this.store.tryActivate(sessionId)) return;
       // A missing cwd would fail at harness spawn with an opaque error; report it.
-      const cwdProblem = this.cwdProblem(session);
+      const cwdProblem = await this.cwdProblem(session);
       if (cwdProblem) {
         await surface.post(conv, { text: `⚠️ ${cwdProblem}` }).catch(() => {});
         return;
@@ -2800,7 +2891,7 @@ export class SessionManager {
     const fetched = await Promise.all(
       files.map(async (a) => ({ name: a.name, bytes: await surface.fetchAttachment(a).catch(() => null) })),
     );
-    const { landed, failed } = await landAttachments(session.worktree_path, fetched);
+    const { landed, failed } = await landAttachments(session.worktree_path, fetched, this.treeIO);
 
     if (landed.length > 0) {
       this.store.audit({
@@ -2843,11 +2934,16 @@ export class SessionManager {
     if (!session) return;
     const surface = this.surfaceFor(conv);
     if (!surface.capabilities.attachments) return;
-    const files = await readOutbox(session.worktree_path);
+    const files = await readOutbox(session.worktree_path, this.treeIO);
     if (files.length === 0) return;
     for (const f of files) {
       try {
-        await surface.postFile(conv, { path: f.absPath, name: f.name });
+        // Read through the port too: the listing proved a regular file, but the
+        // agent can swap it for a link before this read, and only `treeIO` knows
+        // whose privileges that read must run with.
+        const bytes = await this.treeIO.readFile(f.absPath);
+        if (bytes === null) throw new Error("the file could not be read");
+        await surface.postFile(conv, { bytes, name: f.name });
         this.store.audit({
           sessionId,
           actor: "agent",
@@ -2859,7 +2955,7 @@ export class SessionManager {
         await surface.post(conv, { text: `⚠️ I made \`${f.name}\` but couldn't upload it to the thread.` }).catch(() => {});
       }
     }
-    await clearOutbox(session.worktree_path);
+    await clearOutbox(session.worktree_path, this.treeIO);
   }
 
 
@@ -2869,9 +2965,9 @@ export class SessionManager {
    * session runs in — after which every turn dies at harness spawn with an opaque
    * error. Check first and say so plainly.
    */
-  private cwdProblem(session: SessionRow): string | null {
+  private async cwdProblem(session: SessionRow): Promise<string | null> {
     const cwd = sessionCwd(session.worktree_path, session.workdir);
-    if (existsSync(cwd)) return null;
+    if (await this.treeIO.exists(cwd)) return null;
     return session.workdir
       ? `My working directory \`${session.workdir}\` no longer exists in this worktree — ` +
           `something deleted it. Start a new thread to work elsewhere in \`${session.repo_id}\`.`
@@ -2910,6 +3006,7 @@ export class SessionManager {
       workflows: this.effectiveWorkflows(session),
       memoryDir: memoryDir ?? null,
       planMode: session.plan_mode === 1,
+      instructions: repo?.instructions ?? null,
     });
     // The agent starts in its sub-project; the worktree ROOT stays the boundary
     // and is passed separately so the harness keeps the whole tree reachable.
