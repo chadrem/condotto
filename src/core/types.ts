@@ -586,7 +586,7 @@ export interface RepoConfig {
    * Per-repo default model/effort tokens. Seeded onto each new
    * session (the architect can then change them per thread); opaque tokens
    * validated by the harness adapter. `undefined` = fall back to the daemon-wide
-   * default (Opus 5.5 + high).
+   * default (Opus 5.5 + medium).
    */
   defaultModel?: string;
   defaultEffort?: string;

@@ -47,7 +47,7 @@ export interface CondottoConfig {
   /**
    * Daemon-wide default model/effort tokens, used when a repo sets
    * none. Opaque tokens the harness adapter validates. The default is Opus 5.5 +
-   * high; an architect raises a thread to xhigh or max when the work needs it.
+   * medium; an architect raises a thread to high, xhigh or max when the work needs it.
    */
   defaultModel: string;
   defaultEffort: string;
@@ -116,12 +116,12 @@ export const DEFAULT_COST_CAP_USD = null;
 /** Default cap on concurrently-executing harness turns (protects the box). */
 export const DEFAULT_MAX_CONCURRENT_TURNS = 6;
 /**
- * Default implementer model/effort. Opus 5.5 + high: xhigh costs meaningfully
- * more, so a thread steps up to it by choice. Opaque tokens — the
+ * Default implementer model/effort. Opus 5.5 + medium: higher effort costs
+ * meaningfully more, so a thread steps up to it by choice. Opaque tokens — the
  * harness adapter maps/validates them.
  */
 export const DEFAULT_MODEL = "opus";
-export const DEFAULT_EFFORT = "high";
+export const DEFAULT_EFFORT = "medium";
 /**
  * Default harness posture for a NEW session: subagents and workflows both on.
  *

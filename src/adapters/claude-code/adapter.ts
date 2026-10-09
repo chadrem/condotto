@@ -960,7 +960,7 @@ class ClaudeCodeSession implements HarnessSession {
         disallowedTools,
         permissionMode,
         // Exact SDK model id + reasoning effort. Omitted = SDK
-        // defaults; the core always supplies them (default Opus 5.5 + high).
+        // defaults; the core always supplies them (default Opus 5.5 + medium).
         ...(model ? { model } : {}),
         ...(effort ? { effort: effort as "low" | "medium" | "high" | "xhigh" | "max" } : {}),
         // Intra-turn runaway brake. The SDK stops the turn if it

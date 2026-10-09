@@ -71,7 +71,7 @@ describe("condotto.example.toml is a working template", () => {
     expect(cfg.repos[0]!.memory).toBe(true);
     // And the documented daemon defaults are what the file actually produces.
     expect(cfg.defaultModel).toBe("opus");
-    expect(cfg.defaultEffort).toBe("high");
+    expect(cfg.defaultEffort).toBe("medium");
     expect(cfg.defaultCostCapUsd).toBeNull();
     expect(cfg.defaultSubagents).toBe(true);
     expect(cfg.defaultWorkflows).toBe(true);
@@ -280,10 +280,10 @@ describe("loadConfig defaults + env overrides", () => {
   });
 
 
-  test("default model/effort defaults to Opus + high, settable in-file, env overrides", () => {
+  test("default model/effort defaults to Opus + medium, settable in-file, env overrides", () => {
     const def = loadConfig({}, cfgFile(""));
     expect(def.defaultModel).toBe("opus");
-    expect(def.defaultEffort).toBe("high");
+    expect(def.defaultEffort).toBe("medium");
 
     const fromFile = loadConfig({}, cfgFile(`[defaults]\nmodel = "sonnet"\neffort = "max"\n`));
     expect(fromFile.defaultModel).toBe("sonnet");

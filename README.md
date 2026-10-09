@@ -224,7 +224,7 @@ memory_root = "~/.condotto/memory"           # durable agent memory
 
 [defaults]                 # used when a repo sets none
 model = "opus"             # opus (Opus 5.5) | sonnet | fable
-effort = "high"            # low | medium | high | xhigh | max
+effort = "medium"          # low | medium | high | xhigh | max
 subagents = true           # parallel exploration
 workflows = true           # multi-agent workflows
 memory = true              # durable notes per (repo, channel)
@@ -275,7 +275,7 @@ A clean boot looks like:
 
 ```
 … [daemon] seeded 1 role mapping(s), 1 architect(s)
-… [daemon] cost cap none (default), max 6 concurrent turns, default model opus @ high effort, subagents ON / workflows ON / memory ON
+… [daemon] cost cap none (default), max 6 concurrent turns, default model opus @ medium effort, subagents ON / workflows ON / memory ON
 … [daemon] ready — db=…/condotto.sqlite, sessions on record: 0
 ```
 
@@ -330,7 +330,7 @@ In a channel the bot has been invited to:
 | `@Condotto remote-control on\|off` | architect | **off** | Drive this thread from claude.ai/code or the Claude mobile app. See [Remote control](#remote-control). |
 | `@Condotto budget <usd\|off>` | architect | **none** | Set this thread's cost ceiling. `off` removes it. From `cost_cap_usd`. |
 | `@Condotto model <opus\|sonnet\|fable>` | architect | **`opus`** | Set the model. From `[defaults].model`. |
-| `@Condotto effort <low\|medium\|high\|xhigh\|max>` | architect | **`high`** | Set reasoning effort. From `[defaults].effort`. Prefer setting it early; changing it mid-thread drops the prompt cache. |
+| `@Condotto effort <low\|medium\|high\|xhigh\|max>` | architect | **`medium`** | Set reasoning effort. From `[defaults].effort`. Prefer setting it early; changing it mid-thread drops the prompt cache. |
 | `@Condotto subagents on\|off` | architect | **on** | Parallel exploration. From `[defaults].subagents`. |
 | `@Condotto workflows on\|off` | architect | **on** | Multi-agent workflows. From `[defaults].workflows`. Turning it on turns subagents on too. |
 | `@Condotto /<skill> [args]` | architect | — | Run one of your skills. Mention Condotto first: Slack eats a message that starts with `/`. |
@@ -342,7 +342,7 @@ In a channel the bot has been invited to:
 | `@Condotto members` | architect | — | Who, besides architects, this thread hears, including anyone heard through a channel role. Also `@Condotto member list`. |
 
 Every default above comes from `condotto.toml` and can be changed there, per repo,
-or per thread with the command. A thread starts with `opus` at `high` effort
+or per thread with the command. A thread starts with `opus` at `medium` effort
 with subagents, workflows and memory all on, and no spend ceiling — see
 [Cost](#cost).
 
