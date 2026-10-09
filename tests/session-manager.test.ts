@@ -647,6 +647,8 @@ describe("conversing", () => {
     expect(w.surface.updates.at(-1)?.text).toContain("echo(fake-session-1)");
     // Gate allowed the in-worktree read and denied the /etc/hosts escape.
     expect(w.surface.updates.at(-1)?.text).toContain("gate=allow,deny");
+    // Every reply ends with its cost; only a turn that ran a workflow says so.
+    expect(w.surface.updates.at(-1)?.text).toEndWith("\n\n_$0.01 this turn_");
     // Handle was persisted for park & resume.
     expect(row!.harness_session_handle).toMatchObject({ sessionId: "fake-session-1" });
   });

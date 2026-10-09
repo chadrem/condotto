@@ -39,6 +39,7 @@ describe("claude-code adapter: multi-result buffering", () => {
   test("delivers the LAST success result of a workflow turn (final synthesis, not 'launched')", async () => {
     const q = fakeQuery(async function* () {
       yield { type: "system", subtype: "init", session_id: "s1" };
+      yield { type: "assistant", message: { content: [{ type: "tool_use", name: "Workflow", input: {} }] } };
       yield { type: "result", subtype: "success", result: "Workflow launched; waiting…", total_cost_usd: 0.01 };
       yield { type: "system", subtype: "task_progress", description: "Read: readme" };
       yield { type: "result", subtype: "success", result: "FINAL synthesis", total_cost_usd: 0.05 };
@@ -48,9 +49,22 @@ describe("claude-code adapter: multi-result buffering", () => {
     expect(replies.length).toBe(1); // exactly one reply, not one-per-result
     expect(replies[0]!.text).toBe("FINAL synthesis");
     expect(replies[0]!.costUsd).toBe(0.05); // final cumulative cost, no double-count
-    expect(replies[0]!.workflow).toBe(true); // a task_* message was seen this turn
+    expect(replies[0]!.workflow).toBe(true); // the Workflow tool ran this turn
     // The live status was streamed as progress.
     expect(events.some((e) => e.kind === "progress" && (e as any).text === "Working in the background")).toBe(true);
+  });
+
+  test("a background subagent without the Workflow tool is not tagged as a workflow", async () => {
+    const q = fakeQuery(async function* () {
+      yield { type: "system", subtype: "init", session_id: "s3" };
+      yield { type: "assistant", message: { content: [{ type: "tool_use", name: "Task", input: {} }] } };
+      yield { type: "system", subtype: "task_started", task_id: "a1" };
+      yield { type: "system", subtype: "task_progress", description: "Explore" };
+      yield { type: "result", subtype: "success", result: "done", total_cost_usd: 0.03 };
+    });
+    const events = await collect(new ClaudeCodeAdapter(q), allowGate);
+    const reply = events.find((e): e is Extract<TurnEvent, { kind: "reply" }> => e.kind === "reply");
+    expect(reply!.workflow).toBe(false);
   });
 
   test("a normal single-result turn still delivers its reply, untagged as workflow", async () => {

@@ -3481,14 +3481,13 @@ export class SessionManager {
                 resultSubtype: "success",
               });
               this.store.audit({ sessionId, actor: "agent", event: "message_out", detail: { costUsd: ev.costUsd, ...(ev.workflow ? { workflow: true } : {}) } });
-              // A workflow turn's reply is the synthesized summary;
-              // append a terse footer with the spend so "what ran + cost" is visible.
-              const footer =
-                ev.workflow && ev.costUsd !== undefined
-                  ? `\n\n_⚙︎ multi-agent workflow · $${ev.costUsd.toFixed(2)} this turn_`
-                  : ev.workflow
-                    ? `\n\n_⚙︎ multi-agent workflow_`
-                    : "";
+              // A terse footer with the turn's spend, naming a workflow only when
+              // one actually ran.
+              const footerParts = [
+                ...(ev.workflow ? ["⚙︎ multi-agent workflow"] : []),
+                ...(ev.costUsd !== undefined ? [`$${ev.costUsd.toFixed(2)} this turn`] : []),
+              ];
+              const footer = footerParts.length ? `\n\n_${footerParts.join(" · ")}_` : "";
               await deliverFinal(ev.text + footer);
             }
             break;

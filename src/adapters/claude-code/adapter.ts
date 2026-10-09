@@ -1054,9 +1054,13 @@ class ClaudeCodeSession implements HarnessSession {
     // success and deliver only it at turn end, so the human sees the real answer,
     // not "launched; waiting". A terminal deferred/error supersedes and clears it.
     let pendingReply: { text: string; costUsd?: number } | null = null;
-    // Track the background workflow so we can stream a live status
-    // line and tag the final reply for the summary footer.
-    let sawWorkflow = false;
+    // Two different facts. `sawBackground`: something detached is running (a
+    // workflow, but also a plain subagent or a background command), which is what
+    // the budget brake must interrupt. `ranWorkflow`: the model actually used the
+    // Workflow tool, which is the only thing the reply footer and notices call a
+    // workflow.
+    let sawBackground = false;
+    let ranWorkflow = false;
     let lastWorkflowDesc = "";
     // rider (b): when a turn is interrupted — inactivity timeout, an architect
     // `@Condotto cancel`, or a budget breach that hit a RUNNING workflow — we stop the
@@ -1174,7 +1178,8 @@ class ClaudeCodeSession implements HarnessSession {
         // when the description changes (task_progress repeats per agent as tokens
         // accumulate). Each such message also resets the inactivity watchdog above.
         if (m.type === "system" && typeof m.subtype === "string" && (m.subtype.startsWith("task") || m.subtype === "background_tasks_changed")) {
-          sawWorkflow = true;
+          sawBackground = true;
+          if (m.workflow_name) ranWorkflow = true;
           const desc = describeWorkflowEvent(m);
           if (desc && desc !== lastWorkflowDesc) {
             lastWorkflowDesc = desc;
@@ -1186,6 +1191,7 @@ class ClaudeCodeSession implements HarnessSession {
           const blocks: any[] = m.message?.content ?? [];
           for (const block of blocks) {
             if (block?.type === "tool_use") {
+              if (block.name === WORKFLOW_TOOL) ranWorkflow = true;
               yield { kind: "progress", text: describeToolUse(block.name, block.input) };
             }
           }
@@ -1214,7 +1220,7 @@ class ClaudeCodeSession implements HarnessSession {
               costUsd: cost,
             };
           } else if (m.subtype === "error_max_budget_usd" || m.terminal_reason === "budget_exhausted") {
-            if (sawWorkflow) {
+            if (sawBackground) {
               // The budget brake fired DURING a workflow. The SDK signal alone does
               // NOT stop the detached background task — it keeps spending past the cap
               // Interrupt to actually halt it (auto-cancel on breach), then
@@ -1247,10 +1253,10 @@ class ClaudeCodeSession implements HarnessSession {
       // it would lose the reply AND under-count the turn's spend against the runaway cap.
       const abort: AbortReason | null = abortReason ?? (this.cancelRequested && !pendingReply ? "cancel" : null);
       if (abort) {
-        yield { kind: "error", message: abortNotice(abort, sawWorkflow, drainedCost), costUsd: drainedCost };
+        yield { kind: "error", message: abortNotice(abort, ranWorkflow, drainedCost), costUsd: drainedCost };
       } else if (pendingReply) {
         // Deliver the final buffered reply (the last success result of the turn).
-        yield { kind: "reply", text: pendingReply.text, costUsd: pendingReply.costUsd, workflow: sawWorkflow };
+        yield { kind: "reply", text: pendingReply.text, costUsd: pendingReply.costUsd, workflow: ranWorkflow };
       }
     } catch (err) {
       // A persisted session id the runtime no longer knows (pruned storage,
