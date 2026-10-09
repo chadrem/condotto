@@ -642,3 +642,119 @@ describe("SlackAdapter — no unfurls", () => {
     expect(pinned).toBe(sites);
   });
 });
+
+describe("SlackAdapter — working indicator", () => {
+  const conv = { surfaceId: "slack", channelId: "C1", conversationId: "C1:1700000000.000100" };
+  const slackError = (code: string) => Object.assign(new Error(code), { data: { ok: false, error: code } });
+
+  /** An adapter whose client records calls; `fail` decides which methods throw what. */
+  function wired(fail: { status?: string; reactions?: string } = {}) {
+    const calls: { method: string; args: Record<string, any> }[] = [];
+    const logs: string[] = [];
+    const adapter = new SlackAdapter(TOKENS, AUTHORITY, OPERATOR, (m) => logs.push(m));
+    (adapter as any).app = {
+      client: {
+        apiCall: async (method: string, args: Record<string, any>) => {
+          calls.push({ method, args });
+          if (fail.status) throw slackError(fail.status);
+          return { ok: true };
+        },
+        reactions: {
+          add: async (args: Record<string, any>) => {
+            calls.push({ method: "reactions.add", args });
+            if (fail.reactions) throw slackError(fail.reactions);
+            return { ok: true };
+          },
+          remove: async (args: Record<string, any>) => {
+            calls.push({ method: "reactions.remove", args });
+            return { ok: true };
+          },
+        },
+      },
+    };
+    return { adapter, calls, logs };
+  }
+
+  test("uses Slack's native thread status with rotating loading messages, and clears it when done", async () => {
+    const { adapter, calls } = wired();
+    const working = await adapter.showWorking(conv, { replyTo: "1700000001.000100" });
+    expect(working).not.toBeNull();
+    expect(calls[0]).toMatchObject({
+      method: "assistant.threads.setStatus",
+      args: { channel_id: "C1", thread_ts: "1700000000.000100" },
+    });
+    expect(calls[0]!.args.loading_messages.length).toBeGreaterThan(1);
+    await working!.done("ok");
+    expect(calls.at(-1)).toMatchObject({ method: "assistant.threads.setStatus", args: { status: "" } });
+    expect(calls.some((c) => c.method.startsWith("reactions."))).toBe(false); // native worked: no reaction
+  });
+
+  test("where Slack refuses the native status, it falls back to 👀 then ✅, and gives up on the channel after a second refusal", async () => {
+    const { adapter, calls, logs } = wired({ status: "channel_type_not_supported" });
+    const working = await adapter.showWorking(conv, { replyTo: "1700000001.000100" });
+    expect(calls.map((c) => c.method)).toEqual(["assistant.threads.setStatus", "reactions.add"]);
+    expect(calls[1]!.args).toMatchObject({ timestamp: "1700000001.000100", name: "eyes" });
+    await working!.done("ok");
+    expect(calls.slice(2).map((c) => `${c.method}:${c.args.name}`)).toEqual(["reactions.remove:eyes", "reactions.add:white_check_mark"]);
+    expect(logs.filter((l) => l.includes("native")).length).toBe(0); // one refusal could be about one thread
+
+    // A second refusal in the channel gives up on it, logged once...
+    calls.length = 0;
+    await adapter.showWorking(conv, { replyTo: "1700000002.000100" });
+    expect(calls.map((c) => c.method)).toEqual(["assistant.threads.setStatus", "reactions.add"]);
+    expect(logs.filter((l) => l.includes("native")).length).toBe(1);
+    // ...and later turns there go straight to the reaction.
+    calls.length = 0;
+    await adapter.showWorking(conv, { replyTo: "1700000003.000100" });
+    expect(calls.map((c) => c.method)).toEqual(["reactions.add"]);
+  });
+
+  test("a refusal about the app itself turns the native status off in every channel, logged once", async () => {
+    const { adapter, calls, logs } = wired({ status: "missing_scope" });
+    await adapter.showWorking(conv, { replyTo: "1700000001.000100" });
+    calls.length = 0;
+    const other = { surfaceId: "slack", channelId: "C2", conversationId: "C2:1700000000.000200" };
+    await adapter.showWorking(other, { replyTo: "1700000004.000100" });
+    expect(calls.map((c) => c.method)).toEqual(["reactions.add"]);
+    expect(logs.filter((l) => l.includes("native")).length).toBe(1);
+  });
+
+  test("a failed turn just removes the 👀, with no ✅", async () => {
+    const { adapter, calls } = wired({ status: "not_allowed" });
+    const working = await adapter.showWorking(conv, { replyTo: "1700000001.000100" });
+    calls.length = 0;
+    await working!.done("failed");
+    expect(calls.map((c) => `${c.method}:${c.args.name}`)).toEqual(["reactions.remove:eyes"]);
+  });
+
+  test("a transient error is not taken as 'unsupported'", async () => {
+    const { adapter, calls } = wired({ status: "ratelimited" });
+    await adapter.showWorking(conv, { replyTo: "1700000001.000100" });
+    calls.length = 0;
+    await adapter.showWorking(conv, { replyTo: "1700000002.000100" });
+    expect(calls[0]!.method).toBe("assistant.threads.setStatus"); // asked again
+  });
+
+  test("with neither the native status nor reactions:write, there is no indicator, and it stops trying", async () => {
+    const { adapter, calls, logs } = wired({ status: "missing_scope", reactions: "missing_scope" });
+    expect(await adapter.showWorking(conv, { replyTo: "1700000001.000100" })).toBeNull();
+    expect(logs.some((l) => l.includes("reactions:write"))).toBe(true);
+    calls.length = 0;
+    expect(await adapter.showWorking(conv, { replyTo: "1700000002.000100" })).toBeNull();
+    expect(calls).toEqual([]);
+  });
+
+  test("the status glyph is the configured emoji, else ⏳", () => {
+    expect(new SlackAdapter(TOKENS, AUTHORITY, OPERATOR, () => {}).workingGlyph).toBe("⏳");
+    expect(
+      new SlackAdapter(TOKENS, AUTHORITY, OPERATOR, () => {}, undefined, { workingEmoji: "condotto-thinking" }).workingGlyph,
+    ).toBe(":condotto-thinking:");
+  });
+
+  test("an inbound message carries its ts as messageId, for the reaction to point at", async () => {
+    const { emitted, deliver, settle } = testAdapter();
+    deliver(messageEvent({ ts: "1700000005.000500" }));
+    await settle();
+    expect((emitted[0] as any).messageId).toBe("1700000005.000500");
+  });
+});

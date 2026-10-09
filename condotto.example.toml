@@ -39,6 +39,9 @@ architects = [
 [slack]
 bot_token = "xoxb-your-bot-token"   # Bot User OAuth Token (starts xoxb-)
 app_token = "xapp-your-app-token"   # App-Level Token for Socket Mode (starts xapp-)
+# working_emoji = "loading"         # emoji at the start of the "working" status
+                                    #   line, without colons. Upload an animated
+                                    #   custom emoji for a moving one. Default ⏳.
 
 # How the agent authenticates to Anthropic. Pick by how many people drive sessions.
 #

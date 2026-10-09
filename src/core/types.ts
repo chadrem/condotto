@@ -164,6 +164,9 @@ export type InboundEvent =
       /** True when the author @-mentioned Condotto. Lets the core offer guidance
        *  (vs. staying silent) when someone pings an unassigned thread. */
       mentioned?: boolean;
+      /** The surface's id for this message, so a working indicator can point at
+       *  it (Slack: a reaction on it). Opaque to the core. */
+      messageId?: string;
     }
   | {
       kind: "command";
@@ -246,6 +249,26 @@ export interface SurfaceAdapter {
    * (Slack: an ephemeral message). Surfaces without it simply stay silent.
    */
   postEphemeral?(conv: ConversationRef, to: Principal, msg: OutboundMessage): Promise<void>;
+  /**
+   * Show that Condotto is working in this conversation, in whatever way the
+   * surface does best (Slack: its native animated "thinking" status, or a reaction
+   * on the message being answered where that isn't available). `replyTo` is the
+   * inbound `messageId`, when there is one. Best-effort and never throws: null
+   * means the surface has no indicator to offer, and the core's status message is
+   * then the only sign of life.
+   */
+  showWorking?(conv: ConversationRef, opts: { replyTo?: string }): Promise<WorkingIndicator | null>;
+  /**
+   * A short decorative prefix for the core's in-progress status line (Slack: an
+   * emoji, which can be a custom animated one). Opaque to the core.
+   */
+  readonly workingGlyph?: string;
+}
+
+/** A live working indicator from `SurfaceAdapter.showWorking`. */
+export interface WorkingIndicator {
+  /** The turn ended. Clears the indicator, or marks the outcome. Never throws. */
+  done(outcome: "ok" | "failed"): Promise<void>;
 }
 
 // ---------------------------------------------------------------------------
@@ -306,7 +329,13 @@ export type TurnEvent =
    * The adapter's opaque handle changed (e.g. the underlying session id became
    * known). The core persists it immediately and never inspects it.
    */
-  | { kind: "handle_updated"; handle: SessionHandle };
+  | { kind: "handle_updated"; handle: SessionHandle }
+  /**
+   * The harness could not resume the session's prior conversation and started a
+   * fresh one. The core tells the thread in its own words: people need to know the
+   * agent no longer remembers what was said.
+   */
+  | { kind: "context_lost" };
 
 /** Opaque JSON owned by the harness adapter. The core persists, never reads. */
 export type SessionHandle = unknown;

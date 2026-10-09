@@ -11,6 +11,7 @@ import type {
   Principal,
   SurfaceAdapter,
   SurfaceCapabilities,
+  WorkingIndicator,
 } from "../../core/types";
 import { principalKey } from "../../core/types";
 import {
@@ -116,6 +117,50 @@ type Emit = (e: InboundEvent) => void;
 
 function encodeConversationId(channel: string, threadTs: string): string {
   return `${channel}:${threadTs}`;
+}
+
+// ---------------------------------------------------------------------------
+// Working indicator
+//
+// Slack's native AI-app status (`assistant.threads.setStatus`) shows an animated
+// "Condotto is working on it…" in the thread and rotates through the loading
+// messages below. Fixed text, never model output. The docs' own example uses it
+// from an @-mention in a channel thread but never says so outright, and it may
+// need the app's Agents feature or a paid plan, so support is detected at run time:
+// a refusal about the app turns it off everywhere, others turn it off for a
+// channel after repeated refusals there. Without it, a 👀 reaction on the message
+// being answered (`reactions:write`) stands in, and nothing if that is refused
+// too. Each is logged once.
+
+const WORKING_STATUS = "is working on it…";
+const LOADING_MESSAGES = [
+  "Thinking it through…",
+  "Reading the code…",
+  "Consulting the rubber duck…",
+  "Untangling the spaghetti…",
+  "Asking the compiler nicely…",
+  "Reticulating splines…",
+  "Counting semicolons…",
+  "Brewing more coffee…",
+  "Herding the cats…",
+  "Polishing it up…",
+];
+/** Slack drops a status after two minutes without a message; refresh before that. */
+const STATUS_REFRESH_MS = 90_000;
+/** Errors worth retrying next turn rather than concluding the feature is missing. */
+const TRANSIENT_SLACK_ERRORS = new Set(["ratelimited", "request_timeout", "service_unavailable", "internal_error", "fatal_error"]);
+/** Refusals about the app itself (scope, token, method), true in every channel. */
+const APP_WIDE_STATUS_REFUSALS = new Set(["missing_scope", "not_allowed_token_type", "unknown_method", "method_deprecated", "invalid_auth"]);
+/**
+ * Any other refusal might be about one thread (a deleted root, say), so a channel
+ * is only given up on after this many in a row.
+ */
+const CHANNEL_STATUS_REFUSALS_TO_GIVE_UP = 2;
+
+/** The Slack error code on a Web API failure, or null for a network-level one. */
+function slackErrorCode(err: unknown): string | null {
+  const code = (err as { data?: { error?: unknown } })?.data?.error;
+  return typeof code === "string" ? code : null;
 }
 
 /** The thread root ts for an encoded conversation id ("" -> no thread). */
@@ -296,6 +341,15 @@ export class SlackAdapter implements SurfaceAdapter {
    */
   private nameTail = new Map<string, Promise<void>>();
   private botToken: string;
+  /** False once Slack refused the native thread status for the whole app. */
+  private nativeStatusAllowed = true;
+  /** Channels where it was refused repeatedly, and the refusals so far per channel. */
+  private nativeStatusOffIn = new Set<string>();
+  private nativeStatusRefusals = new Map<string, number>();
+  /** False once `reactions:write` has been refused. */
+  private reactionsAllowed = true;
+  /** See `SurfaceAdapter.workingGlyph`: `:<working_emoji>:` when configured, else ⏳. */
+  readonly workingGlyph: string;
 
   constructor(
     tokens: { botToken: string; appToken: string },
@@ -307,9 +361,10 @@ export class SlackAdapter implements SurfaceAdapter {
     /** `runtimeGrants: false` keeps grant/revoke out of the usage text (they are refused).
      *  `repoNames` lets top-level replies name the configured repos, since the
      *  in-thread picker is out of reach from there. */
-    private opts: { runtimeGrants?: boolean; repoNames?: string[] } = {},
+    private opts: { runtimeGrants?: boolean; repoNames?: string[]; workingEmoji?: string } = {},
   ) {
     this.names = names ?? null;
+    this.workingGlyph = opts.workingEmoji ? `:${opts.workingEmoji}:` : "⏳";
     // Kept for file downloads: `url_private` is not public, and Bolt's client
     // does not expose the token, so the raw fetch needs its own copy.
     this.botToken = tokens.botToken;
@@ -595,7 +650,16 @@ export class SlackAdapter implements SurfaceAdapter {
       .then(() => this.names?.get(userId))
       .catch(() => undefined)
       .then((authorDisplayName) => {
-        this.emit({ kind: "message", conv, author, text, mentioned, attachments, authorDisplayName });
+        this.emit({
+          kind: "message",
+          conv,
+          author,
+          text,
+          mentioned,
+          attachments,
+          authorDisplayName,
+          messageId: String(event.ts),
+        });
       })
       .then(() => {
         // Only the LAST message in a conversation clears the tail; an earlier one
@@ -670,6 +734,92 @@ export class SlackAdapter implements SurfaceAdapter {
       text: renderMrkdwn(msg.text),
       ...NO_UNFURL,
     });
+  }
+
+  async showWorking(conv: ConversationRef, opts: { replyTo?: string }): Promise<WorkingIndicator | null> {
+    const thread = threadTsOf(conv);
+    if (!thread) return null;
+    const nativeOn = this.nativeStatusAllowed && !this.nativeStatusOffIn.has(conv.channelId);
+    if (nativeOn && (await this.setThreadStatus(conv.channelId, thread, true))) {
+      // Refreshed until done: Slack clears a status after two minutes without a
+      // message, and a mid-turn post (a plan) clears it too. `done` waits for a
+      // refresh already in flight, or it could land after the clear and leave the
+      // status showing past the reply.
+      let inFlight: Promise<unknown> = Promise.resolve();
+      const refresh = setInterval(() => {
+        inFlight = this.setThreadStatus(conv.channelId, thread, true);
+      }, STATUS_REFRESH_MS);
+      refresh.unref?.();
+      return {
+        done: async () => {
+          clearInterval(refresh);
+          await inFlight;
+          await this.setThreadStatus(conv.channelId, thread, false);
+        },
+      };
+    }
+    if (!opts.replyTo || !this.reactionsAllowed) return null;
+    const timestamp = opts.replyTo;
+    if (!(await this.react("add", conv.channelId, timestamp, "eyes"))) return null;
+    return {
+      done: async (outcome) => {
+        await this.react("remove", conv.channelId, timestamp, "eyes");
+        if (outcome === "ok") await this.react("add", conv.channelId, timestamp, "white_check_mark");
+      },
+    };
+  }
+
+  /**
+   * Set (or, with `on` false, clear) the native thread status. Returns whether
+   * Slack accepted it. The first refusal in a channel that isn't transient marks
+   * the feature unavailable there and is logged once. Never throws.
+   */
+  private async setThreadStatus(channelId: string, threadTs: string, on: boolean): Promise<boolean> {
+    try {
+      await this.app.client.apiCall("assistant.threads.setStatus", {
+        channel_id: channelId,
+        thread_ts: threadTs,
+        status: on ? WORKING_STATUS : "",
+        ...(on ? { loading_messages: LOADING_MESSAGES } : {}),
+      });
+      this.nativeStatusRefusals.delete(channelId);
+      return true;
+    } catch (err) {
+      const code = slackErrorCode(err);
+      if (!on || code === null || TRANSIENT_SLACK_ERRORS.has(code)) return false;
+      const hint = "Enabling the app's Agents feature (and the assistant:write scope) may turn it on.";
+      if (APP_WIDE_STATUS_REFUSALS.has(code)) {
+        if (this.nativeStatusAllowed) {
+          this.nativeStatusAllowed = false;
+          this.log(`[slack] native "working" status unavailable (${code}); using a reaction instead. ${hint}`);
+        }
+        return false;
+      }
+      const refusals = (this.nativeStatusRefusals.get(channelId) ?? 0) + 1;
+      this.nativeStatusRefusals.set(channelId, refusals);
+      if (refusals >= CHANNEL_STATUS_REFUSALS_TO_GIVE_UP && !this.nativeStatusOffIn.has(channelId)) {
+        this.nativeStatusOffIn.add(channelId);
+        this.log(`[slack] native "working" status unavailable in ${channelId} (${code}); using a reaction instead. ${hint}`);
+      }
+      return false;
+    }
+  }
+
+  /** Add or remove one reaction. Returns whether it worked. Never throws. */
+  private async react(action: "add" | "remove", channel: string, timestamp: string, name: string): Promise<boolean> {
+    try {
+      if (action === "add") await this.app.client.reactions.add({ channel, timestamp, name });
+      else await this.app.client.reactions.remove({ channel, timestamp, name });
+      return true;
+    } catch (err) {
+      const code = slackErrorCode(err);
+      if (code === "missing_scope" || code === "not_allowed_token_type") {
+        this.reactionsAllowed = false;
+        this.log(`[slack] can't add reactions (${code}); add the reactions:write scope and reinstall for a 👀 while working.`);
+      }
+      // already_reacted / no_reaction are fine: the end state is what we wanted.
+      return code === "already_reacted" || code === "no_reaction";
+    }
   }
 
   async postEphemeral(conv: ConversationRef, to: Principal, msg: OutboundMessage): Promise<void> {

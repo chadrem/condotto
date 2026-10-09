@@ -19,6 +19,7 @@ import type {
   SessionHandle,
   SurfaceAdapter,
   SurfaceCapabilities,
+  WorkingIndicator,
   ToolCall,
   TurnEvent,
   TurnInput,
@@ -82,6 +83,26 @@ export class FakeSurface implements SurfaceAdapter {
     this.ephemerals.push({ conv, to: `${to.surface}:${to.externalId}`, text: msg.text });
   }
 
+  /** Every working indicator requested, and how each ended ("ok"/"failed", absent while live). */
+  working: { conv: ConversationRef; replyTo?: string; outcome?: "ok" | "failed" }[] = [];
+  /** Set false to model a surface with no working indicator. */
+  offersWorking = true;
+  readonly workingGlyph = "⏳";
+
+  async showWorking(conv: ConversationRef, opts: { replyTo?: string }): Promise<WorkingIndicator | null> {
+    if (!this.offersWorking) return null;
+    const entry: { conv: ConversationRef; replyTo?: string; outcome?: "ok" | "failed" } = {
+      conv,
+      ...(opts.replyTo ? { replyTo: opts.replyTo } : {}),
+    };
+    this.working.push(entry);
+    return {
+      done: async (outcome) => {
+        entry.outcome = outcome;
+      },
+    };
+  }
+
   /** The most recent guided-choice prompt (for tests to answer). */
   lastChoice(): ChoicePrompt | undefined {
     return this.choiceRequests.at(-1)?.prompt;
@@ -143,6 +164,10 @@ class FakeHarnessSession implements HarnessSession {
       ...(input.skill ? { skill: input.skill } : {}),
     });
     if (this.parent.beforeReply) await this.parent.beforeReply();
+    if (this.parent.nextContextLost) {
+      this.parent.nextContextLost = false;
+      yield { kind: "context_lost" };
+    }
     // Simulate a turn that ends in an error carrying a cost (e.g. the SDK's
     // error_max_budget_usd), for cost-accounting tests.
     if (this.parent.nextError) {
@@ -286,6 +311,8 @@ export class FakeHarness implements HarnessAdapter {
   beforeReply: (() => Promise<void>) | null = null;
   /** Number of extra progress events the default turn emits (status-throttle tests). */
   progressBurst = 0;
+  /** If set, the next turn reports that it lost its prior conversation. */
+  nextContextLost = false;
   /** If set, the next turn ends in an error carrying this cost (budget tests). */
   nextError: { message: string; costUsd?: number } | null = null;
   /** How many times a live session's interrupt() was called (cancel tests). */

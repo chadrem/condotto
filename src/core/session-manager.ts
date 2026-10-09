@@ -10,6 +10,7 @@ import type {
   RemoteControlSink,
   Role,
   SurfaceAdapter,
+  WorkingIndicator,
 } from "./types";
 import { join } from "node:path";
 import { DirectTreeIO, type TreeIO } from "./tree-io";
@@ -2757,7 +2758,7 @@ export class SessionManager {
           conv,
           framedText: "",
           skill: { name: skill.name, ...(checked.args ? { args: checked.args } : {}) },
-          placeholder: `…running \`${invocation}\``,
+          firstStep: `Running \`${invocation}\``,
           inbound: { principal: actor, text: invocation },
         }),
       )
@@ -3137,7 +3138,8 @@ export class SessionManager {
             ...held.filter((h) => this.hears(h.principal, event.conv.channelId, session.id)).map((h) => h.framed),
             framed,
           ].join("\n\n"),
-          placeholder: "…thinking",
+          firstStep: "Thinking",
+          ...(event.messageId ? { replyTo: event.messageId } : {}),
           inbound: { principal: principalKey(event.author), text: event.text },
         }),
       )
@@ -3161,10 +3163,13 @@ export class SessionManager {
      * runtime spells one.
      */
     skill?: { name: string; args?: string };
-    placeholder: string;
+    /** The status line's first step, before the agent reports any: "Thinking". */
+    firstStep: string;
+    /** The surface's id for the message being answered, for its working indicator. */
+    replyTo?: string;
     inbound?: { principal: string; text: string };
   }): Promise<void> {
-    const { sessionId, conv, framedText, skill, placeholder, inbound } = params;
+    const { sessionId, conv, framedText, skill, firstStep, replyTo, inbound } = params;
     // Re-read the row: an earlier queued turn (or a stop) may have changed it.
     const session = this.store.getSession(sessionId);
     if (!session || session.status === "stopped") return;
@@ -3296,35 +3301,64 @@ export class SessionManager {
     };
 
     // One status message per turn, edited in place (A4: don't flood; the update
-    // API is rate-limited). Delivery failures must never be confused with
-    // harness failures, and a delivered reply is never overwritten.
+    // API is rate-limited). It shows ONE line: what the agent is doing right now, in
+    // plain words, and how long the turn has run, e.g. "⏳ Running a command:
+    // “Run the tests” · 42s". Delivery failures must never be confused with harness
+    // failures, and a delivered reply is never overwritten.
+    const glyph = surface.workingGlyph ?? "⚙︎";
+    // The clock starts when the turn really starts (it may first wait for a slot).
+    let turnStarted: number | null = null;
+    let currentStep = firstStep;
+    const statusText = (): string => {
+      const elapsed = turnStarted === null ? 0 : Date.now() - turnStarted;
+      // No clock in the first few seconds: "· 0s" reads as noise.
+      return `${glyph} ${currentStep}${elapsed < 5000 ? "" : ` · ${durationLabel(elapsed, "compact")}`}`;
+    };
+    // Posted before the slot wait, as the acknowledgement that the message landed.
     const statusRef = surface.capabilities.editMessages
-      ? await surface.post(conv, { text: placeholder }).catch(() => null)
+      ? await surface.post(conv, { text: statusText() }).catch(() => null)
       : null;
+    // The surface's own sign of life (Slack: its animated status), started once
+    // the turn really runs.
+    let working: WorkingIndicator | null = null;
+    let turnFailed = false;
     let lastEdit = 0;
     let replyDelivered = false;
-    // A small rolling window of recent steps, shown in the single edited status
-    // message (A4: one message, don't flood). Updates are throttled with a
-    // TRAILING flush so the newest step is never stranded when several arrive
-    // inside the throttle window, yet chat.update stays well under its rate limit.
-    const recentSteps: string[] = [];
+    // Edits are throttled with a TRAILING flush, so the newest step is never
+    // stranded when several arrive inside the window, and a slow heartbeat keeps
+    // the clock moving while a long step runs. Both stay well under chat.update's
+    // rate limit even with every turn slot busy.
     let progressTimer: ReturnType<typeof setTimeout> | undefined;
+    let clockTimer: ReturnType<typeof setInterval> | undefined;
     let progressClosed = false; // set the instant delivery starts — no more edits
     let progressInFlight: Promise<unknown> = Promise.resolve();
     const PROGRESS_INTERVAL_MS = 2500;
+    const CLOCK_TICK_MS = 15_000;
 
     const flushProgress = (): void => {
       if (!statusRef || progressClosed) return;
       lastEdit = Date.now();
-      // Track the in-flight edit so delivery can wait for it — otherwise a
-      // fire-and-forget progress edit could land AFTER the reply and clobber it.
-      progressInFlight = surface.update(statusRef, { text: recentSteps.map((s) => `⚙︎ ${s}`).join("\n") }).catch(() => {});
+      // Chained, so edits land in order, and delivery waits for every one of them
+      // rather than only the latest: an earlier edit finishing late would
+      // otherwise overwrite the reply. Each renders when it runs, so it is current.
+      progressInFlight = progressInFlight
+        .then(() => (progressClosed ? undefined : surface.update(statusRef, { text: statusText() })))
+        .catch(() => {});
     };
 
     const showProgress = (text: string): void => {
       if (!statusRef || progressClosed) return;
-      recentSteps.push(text);
-      if (recentSteps.length > 4) recentSteps.shift();
+      // The step text can carry words the agent wrote (a command's description), so
+      // it is one short line that can never form a mention token: the delimiters
+      // are removed until none are left, so a nested token can't rebuild itself.
+      let step = text;
+      for (let prev = ""; prev !== step; ) {
+        prev = step;
+        step = step.replace(/@\[\[/g, "").replace(/\]\]/g, "");
+      }
+      step = step.replace(/\s+/g, " ").trim().slice(0, 120);
+      if (!step || step === currentStep) return;
+      currentStep = step;
       const elapsed = Date.now() - lastEdit;
       if (elapsed >= PROGRESS_INTERVAL_MS) {
         if (progressTimer) {
@@ -3349,6 +3383,7 @@ export class SessionManager {
         clearTimeout(progressTimer);
         progressTimer = undefined;
       }
+      if (clockTimer) clearInterval(clockTimer);
       await progressInFlight.catch(() => {});
       try {
         if (statusRef && !replyDelivered) {
@@ -3379,13 +3414,25 @@ export class SessionManager {
       // about to run. If a stop landed since the top-of-method check OR while we
       // waited for a slot, tryActivate returns false — never run a turn on a
       // stopped session (#6), and the finally releases the slot.
-      if (!this.store.tryActivate(sessionId)) return;
+      if (!this.store.tryActivate(sessionId)) {
+        // Neither a success nor something to retry; the stop has its own notice.
+        turnFailed = true;
+        await deliverFinal("⏹️ Not started: this session was stopped.");
+        return;
+      }
       // A missing cwd would fail at harness spawn with an opaque error; report it.
       const cwdProblem = await this.cwdProblem(session);
       if (cwdProblem) {
-        await surface.post(conv, { text: `⚠️ ${cwdProblem}` }).catch(() => {});
+        turnFailed = true;
+        await deliverFinal(`⚠️ ${cwdProblem}`);
         return;
       }
+      turnStarted = Date.now();
+      if (statusRef) {
+        clockTimer = setInterval(flushProgress, CLOCK_TICK_MS);
+        clockTimer.unref?.();
+      }
+      working = surface.showWorking ? await surface.showWorking(conv, replyTo ? { replyTo } : {}).catch(() => null) : null;
       const harnessSession = await this.getOrAttachHarness(session, memoryRoot);
       // A daemon restart kills the bridge but not the row's flag, so the first turn
       // after one re-publishes. Idempotent and a map lookup when the bridge is already
@@ -3405,6 +3452,15 @@ export class SessionManager {
             break;
           case "progress":
             showProgress(ev.text);
+            break;
+          case "context_lost":
+            // Its own message, not a status step the next step would replace:
+            // the thread has to know the agent forgot what was said.
+            await surface
+              .post(conv, {
+                text: "⚠️ I couldn't pick up our earlier conversation, so I'm starting fresh. Re-state anything I should know.",
+              })
+              .catch(() => {});
             break;
           case "reply":
             producedOutput = true;
@@ -3440,6 +3496,7 @@ export class SessionManager {
               this.store.insertTurn({ sessionId, direction: "out", text: "(turn error)", costUsd: ev.costUsd, resultSubtype: "error" });
             }
             this.store.audit({ sessionId, actor: "system", event: "error", detail: { message: ev.message, costUsd: ev.costUsd } });
+            turnFailed = true;
             await deliverFinal(`⚠️ ${ev.message}`);
             break;
         }
@@ -3447,8 +3504,12 @@ export class SessionManager {
       // Persist whatever the adapter's handle is after the turn (belt-and-braces
       // in case the adapter didn't emit handle_updated).
       this.store.updateSessionHandle(sessionId, harnessSession.handle);
-      if (!producedOutput) await deliverFinal("⚠️ The session ended its turn without a reply.");
+      if (!producedOutput) {
+        turnFailed = true;
+        await deliverFinal("⚠️ The session ended its turn without a reply.");
+      }
     } catch (err) {
+      turnFailed = true;
       const liveEntry = this.live.get(sessionId);
       if (liveEntry) liveEntry.harness = null; // force a fresh resume next turn
       const text = `⚠️ Turn failed: ${err instanceof Error ? err.message : String(err)}`;
@@ -3456,9 +3517,16 @@ export class SessionManager {
       await deliverFinal(text);
     } finally {
       if (progressTimer) clearTimeout(progressTimer);
+      if (clockTimer) clearInterval(clockTimer);
       if (slotHeld) {
         this.turnSlots.release();
         slotHeld = false;
+      }
+      // Not awaited: clearing the indicator is cosmetic, and a rate-limited Slack
+      // call can be retried for minutes. It must never hold a turn slot or keep
+      // the session from parking.
+      if (working) {
+        void working.done(turnFailed ? "failed" : "ok").catch((e) => this.log(`[session ${sessionId}] working indicator: ${e}`));
       }
       // Post anything the agent left in the outbox. After the reply, so the
       // explanation arrives before the file, and outside the try above so a

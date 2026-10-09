@@ -89,6 +89,12 @@ export interface CondottoConfig {
 export interface SlackCredentials {
   botToken: string;
   appToken: string;
+  /**
+   * `[slack].working_emoji`: the emoji name (no colons) at the start of the
+   * "working" status line, e.g. a custom animated one uploaded to the workspace.
+   * Absent = ⏳. Cosmetic; it rides here because it is Slack's alone.
+   */
+  workingEmoji?: string;
 }
 
 /**
@@ -669,7 +675,7 @@ export function loadSlackConfig(
 ): SlackCredentials {
   const { toml, path } = readParsedConfig(env, configPathOverride);
   const slack = toml.slack === undefined ? {} : asTable(toml.slack, "[slack]");
-  warnUnknownKeys(slack, ["bot_token", "app_token"], "[slack]");
+  warnUnknownKeys(slack, ["bot_token", "app_token", "working_emoji"], "[slack]");
   const botToken = envStr(env.SLACK_BOT_TOKEN) ?? optString(slack.bot_token, "[slack].bot_token");
   const appToken = envStr(env.SLACK_APP_TOKEN) ?? optString(slack.app_token, "[slack].app_token");
   if (!botToken || !appToken) {
@@ -678,7 +684,12 @@ export function loadSlackConfig(
         `(or SLACK_BOT_TOKEN / SLACK_APP_TOKEN) — see the README ("Create the Slack app") for setup.`,
     );
   }
-  return { botToken, appToken };
+  // Colons tolerated (":loading:"); a value that is nothing but colons means unset.
+  const emoji = optString(slack.working_emoji, "[slack].working_emoji")?.replace(/^:+|:+$/g, "") || undefined;
+  if (emoji !== undefined && !/^[a-z0-9_+'-]{1,100}$/.test(emoji)) {
+    throw new Error(`[slack].working_emoji must be an emoji name like "loading" (lowercase letters, digits, - _ + ')`);
+  }
+  return { botToken, appToken, ...(emoji ? { workingEmoji: emoji } : {}) };
 }
 
 /**

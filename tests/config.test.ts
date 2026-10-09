@@ -403,6 +403,14 @@ role = "member"
 });
 
 describe("loadSlackConfig", () => {
+  test("[slack].working_emoji: a bare name, with colons tolerated; anything else fails fast", () => {
+    const withEmoji = (v: string) => tomlFile(`[slack]\nbot_token = "B"\napp_token = "A"\nworking_emoji = "${v}"\n`);
+    expect(loadSlackConfig({}, withEmoji("condotto-thinking")).workingEmoji).toBe("condotto-thinking");
+    expect(loadSlackConfig({}, withEmoji(":loading:")).workingEmoji).toBe("loading");
+    expect(() => loadSlackConfig({}, withEmoji("<!here>"))).toThrow(/emoji name/);
+    expect(loadSlackConfig({}, withEmoji("::")).workingEmoji).toBeUndefined(); // only colons = unset
+  });
+
   test("reads [slack] tokens from the file", () => {
     const creds = loadSlackConfig({}, tomlFile(SLACK));
     expect(creds).toEqual({ botToken: "B", appToken: "A" });

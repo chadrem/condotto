@@ -1418,6 +1418,96 @@ describe("streaming progress", () => {
   });
 });
 
+describe("busy indicator", () => {
+  async function turn(w: World, id: string, extra: Record<string, unknown> = {}) {
+    await w.manager.handleEvent({ kind: "command", conv: conv(id), author: architect, name: "assign", args: "testrepo" });
+    await w.manager.handleEvent({ kind: "message", conv: conv(id), author: architect, text: "go", attachments: [], ...extra });
+  }
+
+  test("the status is one line: the surface's glyph and the current step, never a list", async () => {
+    const w = makeWorld();
+    w.harness.progressBurst = 5;
+    await turn(w, "bz1.000001");
+    const status = w.surface.posts.find((p) => p.text.startsWith("⏳"))!;
+    expect(status.text).toBe("⏳ Thinking");
+    const progress = w.surface.updates.filter((u) => u.messageId === status.messageId && !u.text.includes("echo("));
+    expect(progress.length).toBeGreaterThan(0);
+    for (const u of progress) {
+      expect(u.text.startsWith("⏳ ")).toBe(true);
+      expect(u.text).not.toContain("\n");
+    }
+  });
+
+  test("the working indicator points at the message being answered and ends 'ok' after a reply", async () => {
+    const w = makeWorld();
+    await turn(w, "bz2.000001", { messageId: "1700000002.000200" });
+    expect(w.surface.working.at(-1)).toMatchObject({ replyTo: "1700000002.000200", outcome: "ok" });
+  });
+
+  test("a turn that errors ends the working indicator as 'failed'", async () => {
+    const w = makeWorld();
+    w.harness.nextError = { message: "boom" };
+    await turn(w, "bz3.000001");
+    expect(w.surface.working.at(-1)!.outcome).toBe("failed");
+  });
+
+  test("a step that carries a mention token never pings anyone", async () => {
+    const w = makeWorld();
+    w.harness.scriptTurn([{ id: "m1", name: `Bash ${mentionToken("slack:U0EVIL")} now`, input: {} }]);
+    await turn(w, "bz4.000001");
+    for (const t of w.surface.transcript()) expect(t).not.toMatch(MENTION_TOKEN_RE);
+  });
+
+  test("a nested mention token can't rebuild itself out of the leftovers", async () => {
+    const w = makeWorld();
+    w.harness.scriptTurn([{ id: "m2", name: "Bash @[[@[[slack:U1]]slack:U2]] @@[[[[slack:U3]]]]", input: {} }]);
+    await turn(w, "bz6.000001");
+    for (const t of w.surface.transcript()) {
+      expect(t).not.toMatch(MENTION_TOKEN_RE);
+      if (t.startsWith("⏳")) expect(t).not.toContain("@[[");
+    }
+  });
+
+  test("a turn stopped while it waited for a slot never starts the indicator and says so", async () => {
+    const w = makeWorld(undefined, { maxConcurrentTurns: 1 });
+    for (const id of ["bz7.000001", "bz8.000001"]) {
+      await w.manager.handleEvent({ kind: "command", conv: conv(id), author: architect, name: "assign", args: "testrepo" });
+    }
+    let release!: () => void;
+    const held = new Promise<void>((r) => (release = r));
+    let first = true;
+    w.harness.beforeReply = () => {
+      if (!first) return Promise.resolve();
+      first = false;
+      return held;
+    };
+    const a = w.manager.handleEvent({ kind: "message", conv: conv("bz7.000001"), author: architect, text: "a", attachments: [] });
+    await Bun.sleep(20);
+    const b = w.manager.handleEvent({ kind: "message", conv: conv("bz8.000001"), author: architect, text: "b", attachments: [], messageId: "1700000009.000900" });
+    await Bun.sleep(20);
+    await w.manager.handleEvent({ kind: "command", conv: conv("bz8.000001"), author: architect, name: "stop", args: "" });
+    release();
+    await Promise.all([a, b]);
+    expect(w.surface.working.some((x) => x.replyTo === "1700000009.000900")).toBe(false); // no ✅ for work that never ran
+    expect(w.surface.transcript().some((t) => t.includes("Not started: this session was stopped"))).toBe(true);
+  });
+
+  test("losing the prior conversation is its own message, not a passing status step", async () => {
+    const w = makeWorld();
+    w.harness.nextContextLost = true;
+    await turn(w, "bz9.000001");
+    expect(w.surface.posts.some((p) => p.text.includes("couldn't pick up our earlier conversation"))).toBe(true);
+  });
+
+  test("a surface with no working indicator still gets the status line", async () => {
+    const w = makeWorld();
+    w.surface.offersWorking = false;
+    await turn(w, "bz5.000001");
+    expect(w.surface.working.length).toBe(0);
+    expect(w.surface.posts.some((p) => p.text.startsWith("⏳ Thinking"))).toBe(true);
+  });
+});
+
 describe("concurrency", () => {
   test("turns across different sessions run concurrently but never exceed the cap", async () => {
     const w = makeWorld(undefined, { maxConcurrentTurns: 2 });

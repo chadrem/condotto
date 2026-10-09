@@ -1277,10 +1277,7 @@ class ClaudeCodeSession implements HarnessSession {
       ) {
         this._handle = { ...this._handle, sessionId: null };
         yield { kind: "handle_updated", handle: this._handle };
-        yield {
-          kind: "progress",
-          text: "previous session could not be resumed — starting fresh (prior context lost)",
-        };
+        yield { kind: "context_lost" };
         yield* this.runQuery(input, gate, false);
         return;
       }
@@ -1339,56 +1336,67 @@ class ClaudeCodeSession implements HarnessSession {
   }
 }
 
+/**
+ * The one-line status for a tool call: what the agent is doing, in plain words.
+ * Deliberately coarse: a small set of clear verbs reads better in a thread than
+ * file paths and tool names. Where Claude Code's tool input carries its own
+ * one-line description (a command, a helper), that is quoted, since it is the
+ * clearest thing available; the core keeps it to one short line and strips
+ * mentions.
+ */
 function describeToolUse(name: string, input: unknown): string {
   const i = (input ?? {}) as Record<string, unknown>;
+  const quoted = (v: unknown) => (typeof v === "string" && v.trim() ? `: “${v.trim()}”` : "");
   switch (name) {
     case "Read":
-      return `reading ${i.file_path ?? "a file"}`;
+    case "NotebookRead":
+      return "Reading code";
     case "Glob":
-      return `listing files matching ${i.pattern ?? "a pattern"}`;
     case "Grep":
-      return `searching for ${i.pattern ?? "a pattern"}`;
-    case "TodoWrite":
-      return "updating its plan";
+      return "Searching the code";
     case "Write":
-      return `preparing to write ${i.file_path ?? "a file"}`;
     case "Edit":
     case "MultiEdit":
-      return `preparing to edit ${i.file_path ?? "a file"}`;
+    case "NotebookEdit":
+      return "Editing files";
     case "Bash":
-      return `preparing to run a command`;
+      return `Running a command${quoted(i.description)}`;
     case "Agent":
     case "Task":
-      return `delegating to a subagent`;
+      return `Working with a helper${quoted(i.description)}`;
     case "Workflow": {
       // The workflow script begins with `export const meta = { name, description }`.
       const meta = parseWorkflowMeta(i.script ?? i.scriptPath);
-      return meta?.name ? `launching workflow \`${meta.name}\`` : `launching a multi-agent workflow`;
+      return `Running a workflow${quoted(meta?.name)}`;
     }
+    case "WebFetch":
+    case "WebSearch":
+      return "Looking something up";
+    case "TodoWrite":
+      return "Planning the next steps";
+    case "Skill":
+      return "Using a skill";
     default:
-      return `using ${name}`;
+      return "Working";
   }
 }
 
 /**
- * A live status line for a workflow background-task system message.
- * Returns null for events not worth surfacing. `task_progress.description` is the
- * per-agent activity (e.g. "Read: read-readme"); `background_tasks_changed` marks
- * the running set. Kept terse (Slack ergonomics) — the caller de-dups repeats.
+ * The status line while background tasks run. Returns null for events not worth
+ * surfacing. Per-agent activity (`task_progress`) is folded into one line rather
+ * than shown raw: "Read: read-readme" told nobody anything.
  */
 function describeWorkflowEvent(m: Record<string, any>): string | null {
+  // These fire for any background task, not only a workflow's agents (a
+  // background command does too), so the wording stays neutral. A workflow is
+  // already named by its own tool step.
   switch (m.subtype) {
     case "task_started":
-      return m.description ? `workflow started: ${String(m.description).slice(0, 100)}` : "workflow started";
     case "task_progress":
-      return m.description ? `workflow · ${String(m.description).slice(0, 100)}` : null;
-    case "task_updated": {
-      const status = m.patch?.status;
-      return status ? `workflow ${String(status)}` : null;
-    }
+      return "Working in the background";
     case "background_tasks_changed": {
       const n = Array.isArray(m.tasks) ? m.tasks.length : 0;
-      return n > 0 ? `workflow running (${n} background task${n === 1 ? "" : "s"})` : null;
+      return n > 0 ? `Running ${n} background task${n === 1 ? "" : "s"}` : null;
     }
     default:
       return null;

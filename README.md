@@ -172,6 +172,8 @@ Create the app at <https://api.slack.com/apps> using **From scratch**. Then:
    - `files:read`: open files people drop in a thread
    - `files:write`: send files back
    - `users:read`: so the agent calls people by name instead of by user ID
+   - `reactions:write` (optional): a 👀 on your message while Condotto works, ✅
+     when it's done, where Slack's own "working" animation isn't available
 
    That is the whole list. Condotto asks for nothing else.
 3. **Install to workspace.** This mints the bot token (`xoxb-…`), your `bot_token`.
@@ -182,6 +184,15 @@ Create the app at <https://api.slack.com/apps> using **From scratch**. Then:
 6. **Interactivity & Shortcuts** on. Socket Mode delivers button clicks.
 7. **Invite the bot**: `/invite @Condotto`. Without this, reads fail with
    `not_in_channel`.
+
+> **The "working" animation.** While Condotto works, its status line shows one plain
+> step and a clock, like `⏳ Running a command: “Run the tests” · 42s`. On top of
+> that it asks Slack for its native animated "Condotto is working on it…" status,
+> with rotating messages. Slack may only allow that once the app's **Agents**
+> feature is on (with the `assistant:write` scope), and some AI features need a
+> paid plan. Condotto finds out on its own: where Slack says no, it uses the 👀
+> reaction instead and logs why, once. For more fun, upload an animated custom
+> emoji and name it in `[slack].working_emoji` to replace the ⏳.
 
 > **Finding someone's Slack ID:** open their profile, click **⋯**, then **Copy
 > member ID**. It looks like `U0123ABC`. Condotto writes it as `slack:U0123ABC`.

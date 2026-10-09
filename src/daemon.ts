@@ -260,7 +260,11 @@ async function main(): Promise<void> {
     },
     log,
     undefined,
-    { runtimeGrants: config.runtimeGrants, repoNames: config.repos.map((r) => r.name) },
+    {
+      runtimeGrants: config.runtimeGrants,
+      repoNames: config.repos.map((r) => r.name),
+      ...(slackCreds.workingEmoji ? { workingEmoji: slackCreds.workingEmoji } : {}),
+    },
   );
   manager.registerSurface(slack);
   await slack.start((event) => {

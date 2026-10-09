@@ -50,7 +50,7 @@ describe("claude-code adapter: multi-result buffering", () => {
     expect(replies[0]!.costUsd).toBe(0.05); // final cumulative cost, no double-count
     expect(replies[0]!.workflow).toBe(true); // a task_* message was seen this turn
     // The live status was streamed as progress.
-    expect(events.some((e) => e.kind === "progress" && /workflow · Read: readme/.test((e as any).text))).toBe(true);
+    expect(events.some((e) => e.kind === "progress" && (e as any).text === "Working in the background")).toBe(true);
   });
 
   test("a normal single-result turn still delivers its reply, untagged as workflow", async () => {
@@ -326,7 +326,7 @@ describe("claude-code adapter: background cost/cancel (rider b)", () => {
     let fired = false;
     for await (const ev of session.turn({ text: "run wf", harness: { workflows: true } }, allowGate)) {
       events.push(ev);
-      if (!fired && ev.kind === "progress" && /workflow/.test((ev as any).text)) {
+      if (!fired && ev.kind === "progress" && /background/.test((ev as any).text)) {
         fired = true;
         await session.interrupt(); // architect `@Condotto cancel` mid-workflow
       }
@@ -1036,5 +1036,39 @@ describe("forget: deleting a session's transcript", () => {
     expect(existsSync(join(projects, "-some-tree", `${ID_}.jsonl`))).toBe(false);
     expect(existsSync(join(projects, "-some-tree", ID_))).toBe(false);
     expect(existsSync(join(projects, "-some-tree", "other-session.jsonl"))).toBe(true);
+  });
+});
+
+describe("progress: plain words for each step", () => {
+  async function stepsFor(blocks: Array<{ name: string; input: unknown }>): Promise<string[]> {
+    const q = fakeQuery(async function* () {
+      yield { type: "system", subtype: "init", session_id: "sp" };
+      yield { type: "assistant", message: { content: blocks.map((b) => ({ type: "tool_use", ...b })) } };
+      yield { type: "result", subtype: "success", result: "done", total_cost_usd: 0 };
+    });
+    const events = await collect(new ClaudeCodeAdapter(q), allowGate);
+    return events.filter((e) => e.kind === "progress").map((e) => (e as any).text);
+  }
+
+  test("tools map to a few clear verbs; a command or helper quotes its own description", async () => {
+    expect(
+      await stepsFor([
+        { name: "Read", input: { file_path: "src/a.ts" } },
+        { name: "Grep", input: { pattern: "x" } },
+        { name: "Edit", input: { file_path: "src/a.ts" } },
+        { name: "Bash", input: { command: "date", description: "Get the current time" } },
+        { name: "Bash", input: { command: "ls" } },
+        { name: "Task", input: { description: "Review the diff" } },
+        { name: "SomethingNew", input: {} },
+      ]),
+    ).toEqual([
+      "Reading code",
+      "Searching the code",
+      "Editing files",
+      "Running a command: “Get the current time”",
+      "Running a command",
+      "Working with a helper: “Review the diff”",
+      "Working",
+    ]);
   });
 });
