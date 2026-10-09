@@ -745,6 +745,9 @@ bun test                # the full unit suite: no config, no network, no auth
 bun run check:ports     # guards the port boundaries (bun test runs it too)
 ```
 
+GitHub Actions runs `bun run ci` on Linux for every push to `main` and every pull
+request.
+
 **Smoke tests** drive the real Claude Code adapter end to end, with a live agent and
 a real shell. They need Claude auth and they cost tokens. They need nothing else:
 each one builds its own throwaway git repo and scratch state under
