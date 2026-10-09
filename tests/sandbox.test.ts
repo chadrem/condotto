@@ -352,7 +352,7 @@ describe("SandboxCloneStrategy.unsavedWork", () => {
     // branch of the shared repo, which is exactly what `--remotes` can't see.
     await run(["git", "-C", repoPath, "checkout", "-q", "-b", "release"]);
     await commit(repoPath, "release fix");
-    await run(["git", "-C", repoPath, "tag", "-a", "v1.0", "-m", "v1.0"]);
+    await run(["git", "-C", repoPath, "-c", "user.email=t@t", "-c", "user.name=t", "tag", "-a", "v1.0", "-m", "v1.0"]);
     await run(["git", "-C", repoPath, "checkout", "-q", "main"]);
     await run(["git", "-C", repoPath, "branch", "-q", "-D", "release"]);
 
