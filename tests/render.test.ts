@@ -3,6 +3,7 @@ import {
   CHOICE_ACTION,
   choiceBlocks,
   parseChoiceBlockId,
+  renderMessage,
   renderMrkdwn,
   resolveChoiceMessage,
 } from "../src/adapters/slack/render";
@@ -41,6 +42,106 @@ describe("renderMrkdwn", () => {
   });
 });
 
+
+describe("renderMessage (tables)", () => {
+  const ADMINS = [
+    "Seven users have the full **admin** role:",
+    "",
+    "| User ID | Name | Last sign-in |",
+    "|---:|---|---|",
+    "| 6 | Abigail Holtz | 2026-08-20 |",
+    "| 148157 | **(no name set)** | 2026-09-14 |",
+    "",
+    "I left emails out.",
+  ].join("\n");
+  const cellText = (cell: any): string =>
+    cell.elements[0].elements.map((e: any) => e.text).join("");
+
+  test("a reply with no table is exactly renderMrkdwn, with no blocks", () => {
+    const md = "**hi** a | b, see [docs](https://example.com)";
+    expect(renderMessage(md)).toEqual({ text: renderMrkdwn(md) });
+  });
+
+  test("a pipe table becomes one table block between mrkdwn sections", () => {
+    const { text, blocks } = renderMessage(ADMINS) as { text: string; blocks: any[] };
+    expect(blocks.map((b) => b.type)).toEqual(["section", "table", "section"]);
+    expect(blocks[0].text.text).toBe("Seven users have the full *admin* role:");
+    expect(blocks[2].text.text).toBe("I left emails out.");
+    const table = blocks[1];
+    expect(table.rows.map((r: any[]) => r.map(cellText))).toEqual([
+      ["User ID", "Name", "Last sign-in"],
+      ["6", "Abigail Holtz", "2026-08-20"],
+      ["148157", "(no name set)", "2026-09-14"],
+    ]);
+    expect(table.column_settings).toEqual([{ align: "right" }, null, null]);
+    // The fallback never shows raw pipes or dashes.
+    expect(text).not.toContain("|---");
+    expect(text).toContain("```");
+  });
+
+  test("cells carry bold, code and links; a mention token in a cell never pings", () => {
+    const md = "| a | b |\n|---|---|\n| **x** `y` | [d](https://e.com) @[[slack:U12345]] |";
+    const { blocks } = renderMessage(md) as { blocks: any[] };
+    const [c1, c2] = blocks[0].rows[1].map((c: any) => c.elements[0].elements);
+    expect(c1).toEqual([
+      { type: "text", text: "x", style: { bold: true } },
+      { type: "text", text: " " },
+      { type: "text", text: "y", style: { code: true } },
+    ]);
+    expect(c2[0]).toEqual({ type: "link", url: "https://e.com", text: "d" });
+    expect(JSON.stringify(c2)).not.toContain("<@");
+    expect(c2.at(-1).text).toBe("slack:U12345");
+  });
+
+  test("ragged rows are padded or trimmed to the header", () => {
+    const { blocks } = renderMessage("| a | b |\n|---|---|\n| 1 |\n| 1 | 2 | 3 |") as { blocks: any[] };
+    expect(blocks[0].rows.map((r: any[]) => r.length)).toEqual([2, 2, 2]);
+  });
+
+  test("a table inside a code fence stays literal", () => {
+    const md = "```\n| a | b |\n|---|---|\n| 1 | 2 |\n```";
+    expect(renderMessage(md)).toEqual({ text: md });
+  });
+
+  test("a second table becomes an aligned code fence", () => {
+    const md = "| a | b |\n|---|---|\n| 1 | 2 |\n\nand\n\n| name | n |\n|---|--:|\n| **long name** | 7 |";
+    const { blocks } = renderMessage(md) as { blocks: any[] };
+    expect(blocks.filter((b) => b.type === "table")).toHaveLength(1);
+    expect(blocks.at(-1).text.text).toBe("and\n\n```\nname       n\n---------  -\nlong name  7\n```");
+  });
+
+  test("a table over the block limits falls back to a fence", () => {
+    const wide = `${Array(21).fill("| h ").join("")}|\n${Array(21).fill("|---").join("")}|`;
+    expect(renderMessage(wide).blocks).toBeUndefined();
+    const long = `| h |\n|---|\n${Array(100).fill("| x |").join("\n")}`;
+    expect(renderMessage(long).blocks).toBeUndefined();
+    expect(renderMessage(long).text.startsWith("```")).toBe(true);
+  });
+
+  test("renderMrkdwn fences tables too, so text-only paths never show raw pipes", () => {
+    expect(renderMrkdwn("| a | b |\n|:-:|---|\n| 123 | 22 |")).toBe("```\n a   b\n---  --\n123  22\n```");
+  });
+
+  test("long prose splits into section blocks under Slack's 3,000 limit, fences intact", () => {
+    const prose = Array(80).fill("word ".repeat(15)).join("\n");
+    const md = `\`\`\`\n${prose}\n\`\`\`\n\n| a |\n|---|\n| 1 |`;
+    const { blocks } = renderMessage(md) as { blocks: any[] };
+    const secs = blocks.filter((b) => b.type === "section").map((b) => b.text.text as string);
+    expect(secs.length).toBeGreaterThan(1);
+    for (const t of secs) {
+      expect(t.length).toBeLessThanOrEqual(3000);
+      expect((t.match(/```/g) ?? []).length % 2).toBe(0);
+    }
+  });
+
+  test("the mention cap holds across the whole message, not per piece", () => {
+    const ids = Array.from({ length: 12 }, (_, i) => `@[[slack:U${1000 + i}]]`);
+    const md = `${ids.slice(0, 6).join(" ")}\n\n| a |\n|---|\n| 1 |\n\n${ids.slice(6).join(" ")}`;
+    const { blocks } = renderMessage(md) as { blocks: any[] };
+    const pinged = new Set(JSON.stringify(blocks).match(/<@U\d+>/g));
+    expect(pinged.size).toBe(8);
+  });
+});
 
 describe("choiceBlocks (guided choice)", () => {
   test("renders one button per option carrying its value; block_id round-trips", () => {

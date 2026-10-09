@@ -18,6 +18,7 @@ import {
   CHOICE_ACTION,
   choiceBlocks,
   parseChoiceBlockId,
+  renderMessage,
   renderMrkdwn,
   resolveChoiceMessage,
 } from "./render";
@@ -112,6 +113,23 @@ const TOP_LEVEL_REFUSAL =
  * data to any host by putting it in a link's query string. Pinned by a test.
  */
 export const NO_UNFURL = { unfurl_links: false, unfurl_media: false } as const;
+
+/**
+ * Send a rendered message, and if Slack refuses its blocks, send the text alone.
+ * The text already carries every table as a monospace fence, so a refused table
+ * block costs formatting, never the reply.
+ */
+async function withTextFallback<T>(
+  msg: { text: string; blocks?: unknown[] },
+  send: (body: { text: string; blocks?: never[] }) => Promise<T>,
+): Promise<T> {
+  if (!msg.blocks) return send({ text: msg.text });
+  try {
+    return await send(msg as { text: string; blocks: never[] });
+  } catch {
+    return send({ text: msg.text });
+  }
+}
 
 type Emit = (e: InboundEvent) => void;
 
@@ -674,12 +692,14 @@ export class SlackAdapter implements SurfaceAdapter {
   // -- outbound -------------------------------------------------------------
 
   async post(conv: ConversationRef, msg: OutboundMessage): Promise<PostedRef> {
-    const res = await this.app.client.chat.postMessage({
-      channel: conv.channelId,
-      thread_ts: threadTsOf(conv),
-      text: renderMrkdwn(msg.text),
-      ...NO_UNFURL,
-    });
+    const res = await withTextFallback(renderMessage(msg.text), (body) =>
+      this.app.client.chat.postMessage({
+        channel: conv.channelId,
+        thread_ts: threadTsOf(conv),
+        ...body,
+        ...NO_UNFURL,
+      }),
+    );
     return { conv, messageId: String(res.ts) };
   }
 
@@ -730,12 +750,16 @@ export class SlackAdapter implements SurfaceAdapter {
   }
 
   async update(ref: PostedRef, msg: OutboundMessage): Promise<void> {
-    await this.app.client.chat.update({
-      channel: ref.conv.channelId,
-      ts: ref.messageId,
-      text: renderMrkdwn(msg.text),
-      ...NO_UNFURL,
-    });
+    // The edited message is a text-only status line, so a reply with no table
+    // has no old blocks to clear and can leave `blocks` out.
+    await withTextFallback(renderMessage(msg.text), (body) =>
+      this.app.client.chat.update({
+        channel: ref.conv.channelId,
+        ts: ref.messageId,
+        ...body,
+        ...NO_UNFURL,
+      }),
+    );
   }
 
   async showWorking(conv: ConversationRef, opts: { replyTo?: string }): Promise<WorkingIndicator | null> {

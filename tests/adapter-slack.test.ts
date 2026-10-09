@@ -631,6 +631,26 @@ describe("SlackAdapter — no unfurls", () => {
     expect(calls[0]!.args).toMatchObject({ unfurl_links: false, unfurl_media: false });
   });
 
+  test("a reply with a table posts a table block, and a refused block falls back to text", async () => {
+    const { adapter, calls } = wired();
+    const md = "| a | b |\n|---|---|\n| 1 | 2 |";
+    await adapter.post(conv, { text: md });
+    expect(calls[0]!.args.blocks.map((b: any) => b.type)).toEqual(["table"]);
+    expect(calls[0]!.args).toMatchObject({ unfurl_links: false, unfurl_media: false });
+
+    calls.length = 0;
+    (adapter as any).app.client.chat.update = async (args: Record<string, any>) => {
+      calls.push({ method: "chat.update", args });
+      if (args.blocks) throw Object.assign(new Error("invalid_blocks"), { data: { ok: false, error: "invalid_blocks" } });
+      return { ok: true };
+    };
+    await adapter.update({ conv, messageId: "1700000009.000100" }, { text: md });
+    expect(calls).toHaveLength(2);
+    expect(calls[1]!.args.blocks).toBeUndefined();
+    expect(calls[1]!.args.text).toContain("```");
+    expect(calls[1]!.args).toMatchObject({ unfurl_links: false, unfurl_media: false });
+  });
+
   test("every chat.postMessage / chat.update call site in the adapter spreads NO_UNFURL", async () => {
     // The anchor message posted by `/condotto assign` lives inside a Bolt handler
     // that needs a live app to reach, so pin the source instead: one NO_UNFURL per
