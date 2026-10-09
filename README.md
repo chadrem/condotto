@@ -313,7 +313,7 @@ In a channel the bot has been invited to:
 
 | Command | Who | Does |
 |---|---|---|
-| `/condotto assign <repo>[/<sub-project>]` | architect | Start a session in this channel. Omit the repo and Condotto asks which one. Defaults to the repo root. |
+| `/condotto assign <repo>[/<sub-project>]` | architect | Start a session in this channel. Omit the repo and Condotto lists the configured ones. Defaults to the repo root. |
 | `/condotto status` | architect | Daemon-wide dashboard: uptime, session counts, turns in flight, config. |
 | `/condotto stop` | anyone | Lists this channel's sessions and points you to the in-thread stop. |
 

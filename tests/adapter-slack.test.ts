@@ -339,11 +339,17 @@ describe("SlackAdapter.handleMessage — sync guards run ahead of the async hop"
 describe("SlackAdapter.handleMention — threads only", () => {
   // Condotto only works in threads. A top-level mention, command or not, gets a
   // private note and never reaches the core.
-  function wired(postEphemeral?: (args: Record<string, any>) => Promise<unknown>) {
+  function wired(
+    postEphemeral?: (args: Record<string, any>) => Promise<unknown>,
+    authority: SurfaceAuthority = AUTHORITY,
+  ) {
     const logs: string[] = [];
     const emitted: InboundEvent[] = [];
     const ephemerals: Record<string, any>[] = [];
-    const adapter = new SlackAdapter(TOKENS, AUTHORITY, OPERATOR, (m) => logs.push(m));
+    const posts: Record<string, any>[] = [];
+    const adapter = new SlackAdapter(TOKENS, authority, OPERATOR, (m) => logs.push(m), undefined, {
+      repoNames: ["webapp", "api"],
+    });
     (adapter as any).botUserId = BOT;
     (adapter as any).emit = (e: InboundEvent) => emitted.push(e);
     (adapter as any).app = {
@@ -355,13 +361,25 @@ describe("SlackAdapter.handleMention — threads only", () => {
               ephemerals.push(args);
               return {};
             }),
+          postMessage: async (args: Record<string, any>) => {
+            posts.push(args);
+            return { ts: "1700000009.000100" };
+          },
         },
       },
     };
     const mention = (over: Record<string, any>) =>
       (adapter as any).handleMention({ user: "U0ABBY", channel: "C1", ts: "1700000001.000100", ...over });
-    return { emitted, ephemerals, logs, mention };
+    const slash = async (text: string) => {
+      const replies: Record<string, any>[] = [];
+      await (adapter as any).handleSlashCommand({ text, user_id: "U0ABBY", channel_id: "C1" }, async (r: any) => {
+        replies.push(r);
+      });
+      return replies;
+    };
+    return { emitted, ephemerals, logs, posts, mention, slash };
   }
+  const NOT_ARCHITECT: SurfaceAuthority = { isArchitect: () => false };
 
   test("a top-level command mention emits nothing and tells only the sender", async () => {
     const { emitted, ephemerals, mention } = wired();
@@ -371,9 +389,20 @@ describe("SlackAdapter.handleMention — threads only", () => {
     expect(ephemerals[0]).toMatchObject({ channel: "C1", user: "U0ABBY" });
     expect(ephemerals[0]!.thread_ts).toBeUndefined();
     expect(ephemerals[0]!.text).toContain("only work in threads");
+    expect(ephemerals[0]!.text).toContain("/condotto assign");
+    expect(ephemerals[0]!.text).toContain("`webapp`, `api`");
   });
 
-  test("a top-level bare mention gets the same note instead of help", async () => {
+  test("a non-architect's note does not point at /condotto assign, which would refuse them", async () => {
+    const { ephemerals, mention } = wired(undefined, NOT_ARCHITECT);
+    await mention({ text: `<@${BOT}> assign webapp` });
+    expect(ephemerals).toHaveLength(1);
+    expect(ephemerals[0]!.text).toContain("only work in threads");
+    expect(ephemerals[0]!.text).not.toContain("/condotto assign");
+    expect(ephemerals[0]!.text).not.toContain("webapp");
+  });
+
+  test("top-level bare and conversational mentions get the same note instead of help", async () => {
     const { emitted, ephemerals, mention } = wired();
     await mention({ text: `<@${BOT}>` });
     await mention({ text: `<@${BOT}> what does this repo do?`, ts: "1700000002.000100" });
@@ -400,6 +429,28 @@ describe("SlackAdapter.handleMention — threads only", () => {
     await mention({ text: `<@${BOT}> assign webapp` });
     expect(emitted).toHaveLength(0);
     expect(logs.some((l) => l.includes("not_in_channel"))).toBe(true);
+  });
+
+  test("/condotto assign from a non-architect posts no public anchor", async () => {
+    const { emitted, posts, slash } = wired(undefined, NOT_ARCHITECT);
+    const replies = await slash("assign webapp");
+    expect(posts).toHaveLength(0);
+    expect(emitted).toHaveLength(0);
+    expect(replies).toEqual([{ response_type: "ephemeral", text: "Only architects can assign sessions." }]);
+  });
+
+  test("/condotto assign with no repo lists the configured repos", async () => {
+    const { posts, slash } = wired();
+    const replies = await slash("assign");
+    expect(posts).toHaveLength(0);
+    expect(replies[0]!.text).toContain("`webapp`, `api`");
+  });
+
+  test("/condotto assign from an architect still posts the anchor and emits assign", async () => {
+    const { emitted, posts, slash } = wired();
+    await slash("assign webapp");
+    expect(posts).toHaveLength(1);
+    expect(emitted).toEqual([expect.objectContaining({ kind: "command", name: "assign", args: "webapp" })]);
   });
 });
 

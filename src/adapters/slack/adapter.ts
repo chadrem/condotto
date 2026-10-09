@@ -102,7 +102,7 @@ const SURFACE_ID = "slack";
 
 const TOP_LEVEL_REFUSAL =
   "I only work in threads, so each piece of work gets its own conversation. " +
-  "Start a thread under any message and mention me there, or run `/condotto assign <repo>` to open a fresh one.";
+  "Start a thread under any message and mention me there.";
 
 /**
  * Spread into EVERY `chat.postMessage` and `chat.update`. An unfurl makes Slack's
@@ -304,8 +304,10 @@ export class SlackAdapter implements SurfaceAdapter {
     private log: (msg: string) => void = console.log,
     /** Test seam: inject a name cache so `handleMessage` runs without a live client. */
     names?: DisplayNameCache,
-    /** `runtimeGrants: false` keeps grant/revoke out of the usage text (they are refused). */
-    private opts: { runtimeGrants?: boolean } = {},
+    /** `runtimeGrants: false` keeps grant/revoke out of the usage text (they are refused).
+     *  `repoNames` lets top-level replies name the configured repos, since the
+     *  in-thread picker is out of reach from there. */
+    private opts: { runtimeGrants?: boolean; repoNames?: string[] } = {},
   ) {
     this.names = names ?? null;
     // Kept for file downloads: `url_private` is not public, and Bolt's client
@@ -406,9 +408,15 @@ export class SlackAdapter implements SurfaceAdapter {
           await respond({
             response_type: "ephemeral",
             text:
-              "Usage: `/condotto assign <repo>` — name the repo to work in (there is no default).\n" +
-              "To see the configured repos, mention `@Condotto assign` inside an existing thread and pick from the list.",
+              "Usage: `/condotto assign <repo>` — name the repo to work in (there is no default)." +
+              this.repoListLine(),
           });
+          return;
+        }
+        // Same reason: a non-architect's assign is refused by the core, so the
+        // anchor would announce a session that never starts. The core re-checks.
+        if (!this.authority.isArchitect(author, channelId)) {
+          await respond({ response_type: "ephemeral", text: "Only architects can assign sessions." });
           return;
         }
         // Slash commands carry no thread context — create a fresh conversation
@@ -524,10 +532,21 @@ export class SlackAdapter implements SurfaceAdapter {
     }
   }
 
-  /** Tell only the sender, so a refused mention leaves nothing in the channel. */
+  /** "\nRepos: `a`, `b`." or "" when none are known. */
+  private repoListLine(): string {
+    const names = this.opts.repoNames ?? [];
+    return names.length ? `\nRepos: ${names.map((n) => `\`${n}\``).join(", ")}.` : "";
+  }
+
+  /** Tell only the sender, so a refused mention leaves nothing in the channel.
+   *  Only architects are pointed at `/condotto assign`; anyone else would be refused. */
   private async refuseTopLevel(channel: string, user: string): Promise<void> {
+    const architect = this.authority.isArchitect({ surface: SURFACE_ID, externalId: user }, channel);
+    const text = architect
+      ? `${TOP_LEVEL_REFUSAL} Or run \`/condotto assign <repo>\` to open a fresh one.${this.repoListLine()}`
+      : TOP_LEVEL_REFUSAL;
     try {
-      await this.app.client.chat.postEphemeral({ channel, user, text: TOP_LEVEL_REFUSAL });
+      await this.app.client.chat.postEphemeral({ channel, user, text });
     } catch (err) {
       this.log(`[slack] top-level mention refusal failed: ${err}`);
     }

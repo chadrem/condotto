@@ -249,7 +249,7 @@ async function main(): Promise<void> {
     },
     log,
     undefined,
-    { runtimeGrants: config.runtimeGrants },
+    { runtimeGrants: config.runtimeGrants, repoNames: config.repos.map((r) => r.name) },
   );
   manager.registerSurface(slack);
   await slack.start((event) => {
