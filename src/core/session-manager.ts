@@ -3481,11 +3481,17 @@ export class SessionManager {
                 resultSubtype: "success",
               });
               this.store.audit({ sessionId, actor: "agent", event: "message_out", detail: { costUsd: ev.costUsd, ...(ev.workflow ? { workflow: true } : {}) } });
-              // A terse footer with the turn's spend, naming a workflow only when
+              // A terse footer with the turn's spend and the thread's running total
+              // (the turn row above is already in it), naming a workflow only when
               // one actually ran.
               const footerParts = [
                 ...(ev.workflow ? ["⚙︎ multi-agent workflow"] : []),
-                ...(ev.costUsd !== undefined ? [`$${ev.costUsd.toFixed(2)} this turn`] : []),
+                ...(ev.costUsd !== undefined
+                  ? [
+                      `$${ev.costUsd.toFixed(2)} this turn`,
+                      `$${this.store.sessionCostUsd(sessionId).toFixed(2)} this thread`,
+                    ]
+                  : []),
               ];
               const footer = footerParts.length ? `\n\n_${footerParts.join(" · ")}_` : "";
               await deliverFinal(ev.text + footer);

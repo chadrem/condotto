@@ -631,6 +631,13 @@ describe("conversing", () => {
     expect(said).toMatch(/only architects/i);
   });
 
+  test("the reply footer keeps a running total for the thread", async () => {
+    const w = makeWorld();
+    await assignAndMessage(w, "400.000002", "first");
+    await w.manager.handleEvent({ kind: "message", conv: conv("400.000002"), author: architect, text: "second", attachments: [] });
+    expect(w.surface.updates.at(-1)?.text).toEndWith("_$0.01 this turn · $0.02 this thread_");
+  });
+
   test("thread messages become framed turns; replies land in the thread", async () => {
     const w = makeWorld();
     await assignAndMessage(w, "400.000001", "what does this repo do?");
@@ -648,7 +655,7 @@ describe("conversing", () => {
     // Gate allowed the in-worktree read and denied the /etc/hosts escape.
     expect(w.surface.updates.at(-1)?.text).toContain("gate=allow,deny");
     // Every reply ends with its cost; only a turn that ran a workflow says so.
-    expect(w.surface.updates.at(-1)?.text).toEndWith("\n\n_$0.01 this turn_");
+    expect(w.surface.updates.at(-1)?.text).toEndWith("\n\n_$0.01 this turn · $0.01 this thread_");
     // Handle was persisted for park & resume.
     expect(row!.harness_session_handle).toMatchObject({ sessionId: "fake-session-1" });
   });
