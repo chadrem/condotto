@@ -3481,17 +3481,16 @@ export class SessionManager {
                 resultSubtype: "success",
               });
               this.store.audit({ sessionId, actor: "agent", event: "message_out", detail: { costUsd: ev.costUsd, ...(ev.workflow ? { workflow: true } : {}) } });
-              // A terse footer with the turn's spend and the thread's running total
-              // (the turn row above is already in it), naming a workflow only when
-              // one actually ran.
+              // A terse footer with the turn's spend and the thread's running total,
+              // naming a workflow only when one actually ran. The total is re-summed
+              // from the store rather than added up here: the row above is already
+              // in it, and so is any error row this same turn wrote earlier.
+              const threadUsd = this.store.sessionCostUsd(sessionId);
+              const usd = (n: number): string => (n > 0 && n < 0.005 ? "<$0.01" : `$${n.toFixed(2)}`);
               const footerParts = [
                 ...(ev.workflow ? ["⚙︎ multi-agent workflow"] : []),
-                ...(ev.costUsd !== undefined
-                  ? [
-                      `$${ev.costUsd.toFixed(2)} this turn`,
-                      `$${this.store.sessionCostUsd(sessionId).toFixed(2)} this thread`,
-                    ]
-                  : []),
+                ...(ev.costUsd !== undefined ? [`${usd(ev.costUsd)} this turn`] : []),
+                ...(threadUsd > 0 ? [`${usd(threadUsd)} this thread`] : []),
               ];
               const footer = footerParts.length ? `\n\n_${footerParts.join(" · ")}_` : "";
               await deliverFinal(ev.text + footer);

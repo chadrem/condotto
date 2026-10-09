@@ -251,7 +251,7 @@ class FakeHarnessSession implements HarnessSession {
       text:
         `echo(${this._handle.sessionId}) gate=${insideDecision.decision},${outsideDecision.decision}: ` +
         input.text.slice(-60),
-      costUsd: 0.01,
+      costUsd: this.parent.replyCostUsd,
     };
   }
 
@@ -316,6 +316,8 @@ export class FakeHarness implements HarnessAdapter {
   progressBurst = 0;
   /** If set, the next turn reports that it lost its prior conversation. */
   nextContextLost = false;
+  /** The default echo reply's reported cost; undefined models a result without one. */
+  replyCostUsd: number | undefined = 0.01;
   /** If set, the next turn ends in an error carrying this cost (budget tests). */
   nextError: { message: string; costUsd?: number } | null = null;
   /** How many times a live session's interrupt() was called (cancel tests). */

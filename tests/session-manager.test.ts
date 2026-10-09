@@ -638,6 +638,31 @@ describe("conversing", () => {
     expect(w.surface.updates.at(-1)?.text).toEndWith("_$0.01 this turn · $0.02 this thread_");
   });
 
+  test("the thread total counts a turn that ended in an error", async () => {
+    const w = makeWorld();
+    const c = conv("400.000003");
+    await w.manager.handleEvent({ kind: "command", conv: c, author: architect, name: "assign", args: "testrepo" });
+    w.harness.nextError = { message: "boom", costUsd: 0.5 };
+    await w.manager.handleEvent({ kind: "message", conv: c, author: architect, text: "first", attachments: [] });
+    await w.manager.handleEvent({ kind: "message", conv: c, author: architect, text: "second", attachments: [] });
+    expect(w.surface.updates.at(-1)?.text).toEndWith("_$0.01 this turn · $0.51 this thread_");
+  });
+
+  test("tiny spend reads as under a cent, never $0.00", async () => {
+    const w = makeWorld();
+    w.harness.replyCostUsd = 0.004;
+    await assignAndMessage(w, "400.000004", "cheap");
+    expect(w.surface.updates.at(-1)?.text).toEndWith("_<$0.01 this turn · <$0.01 this thread_");
+  });
+
+  test("a reply with no reported cost still shows the thread total", async () => {
+    const w = makeWorld();
+    await assignAndMessage(w, "400.000005", "first");
+    w.harness.replyCostUsd = undefined;
+    await w.manager.handleEvent({ kind: "message", conv: conv("400.000005"), author: architect, text: "second", attachments: [] });
+    expect(w.surface.updates.at(-1)?.text).toEndWith("\n\n_$0.01 this thread_");
+  });
+
   test("thread messages become framed turns; replies land in the thread", async () => {
     const w = makeWorld();
     await assignAndMessage(w, "400.000001", "what does this repo do?");
