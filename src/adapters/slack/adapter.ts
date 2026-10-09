@@ -124,9 +124,11 @@ function encodeConversationId(channel: string, threadTs: string): string {
 //
 // Slack's native AI-app status (`assistant.threads.setStatus`) shows an animated
 // "Condotto is working on it…" in the thread and rotates through the loading
-// messages below. Fixed text, never model output. The docs' own example uses it
-// from an @-mention in a channel thread but never says so outright, and it may
-// need the app's Agents feature or a paid plan, so support is detected at run time:
+// messages below. Fixed text, never model output. Verified 2026-10-08: it works in
+// an ordinary channel thread with only the scopes the README lists (`chat:write`),
+// without the app's Agents feature or `assistant:write`. Slack documents neither,
+// and plans and future scope changes may differ, so support is still detected at
+// run time:
 // a refusal about the app turns it off everywhere, others turn it off for a
 // channel after repeated refusals there. Without it, a 👀 reaction on the message
 // being answered (`reactions:write`) stands in, and nothing if that is refused
@@ -348,7 +350,7 @@ export class SlackAdapter implements SurfaceAdapter {
   private nativeStatusRefusals = new Map<string, number>();
   /** False once `reactions:write` has been refused. */
   private reactionsAllowed = true;
-  /** See `SurfaceAdapter.workingGlyph`: `:<working_emoji>:` when configured, else ⏳. */
+  /** See `SurfaceAdapter.workingGlyph`: `:<working_emoji>:` when configured, else ⏳. Shown only without the native status. */
   readonly workingGlyph: string;
 
   constructor(
@@ -751,6 +753,7 @@ export class SlackAdapter implements SurfaceAdapter {
       }, STATUS_REFRESH_MS);
       refresh.unref?.();
       return {
+        animated: true,
         done: async () => {
           clearInterval(refresh);
           await inFlight;
@@ -762,6 +765,7 @@ export class SlackAdapter implements SurfaceAdapter {
     const timestamp = opts.replyTo;
     if (!(await this.react("add", conv.channelId, timestamp, "eyes"))) return null;
     return {
+      animated: false,
       done: async (outcome) => {
         await this.react("remove", conv.channelId, timestamp, "eyes");
         if (outcome === "ok") await this.react("add", conv.channelId, timestamp, "white_check_mark");

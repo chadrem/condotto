@@ -186,13 +186,14 @@ Create the app at <https://api.slack.com/apps> using **From scratch**. Then:
    `not_in_channel`.
 
 > **The "working" animation.** While Condotto works, its status line shows one plain
-> step and a clock, like `⏳ Running a command: “Run the tests” · 42s`. On top of
-> that it asks Slack for its native animated "Condotto is working on it…" status,
-> with rotating messages. Slack may only allow that once the app's **Agents**
-> feature is on (with the `assistant:write` scope), and some AI features need a
-> paid plan. Condotto finds out on its own: where Slack says no, it uses the 👀
-> reaction instead and logs why, once. For more fun, upload an animated custom
-> emoji and name it in `[slack].working_emoji` to replace the ⏳.
+> step and a clock, like `Running a command: “Run the tests” · 42s`. On top of
+> that it shows Slack's native animated "Condotto is working on it…" status, with
+> rotating messages. That works with the scopes above, no extra setup. If your
+> workspace refuses it, Condotto notices on its own, uses the 👀 reaction instead
+> and logs why, once; turning on the app's **Agents** feature (with the
+> `assistant:write` scope) may then help. Only then does the status line carry an
+> emoji of its own (⏳, or an animated custom one named in `[slack].working_emoji`):
+> one busy signal at a time.
 
 > **Finding someone's Slack ID:** open their profile, click **⋯**, then **Copy
 > member ID**. It looks like `U0123ABC`. Condotto writes it as `slack:U0123ABC`.

@@ -3302,25 +3302,27 @@ export class SessionManager {
 
     // One status message per turn, edited in place (A4: don't flood; the update
     // API is rate-limited). It shows ONE line: what the agent is doing right now, in
-    // plain words, and how long the turn has run, e.g. "⏳ Running a command:
-    // “Run the tests” · 42s". Delivery failures must never be confused with harness
+    // plain words, and how long the turn has run, e.g. "Running a command: “Run
+    // the tests” · 42s". Delivery failures must never be confused with harness
     // failures, and a delivered reply is never overwritten.
     const glyph = surface.workingGlyph ?? "⚙︎";
+    // The surface's own sign of life (Slack: its animated status), started once
+    // the turn really runs. Declared first: the status line reads it.
+    let working: WorkingIndicator | null = null;
     // The clock starts when the turn really starts (it may first wait for a slot).
     let turnStarted: number | null = null;
     let currentStep = firstStep;
     const statusText = (): string => {
       const elapsed = turnStarted === null ? 0 : Date.now() - turnStarted;
       // No clock in the first few seconds: "· 0s" reads as noise.
-      return `${glyph} ${currentStep}${elapsed < 5000 ? "" : ` · ${durationLabel(elapsed, "compact")}`}`;
+      // One busy signal: no glyph while the surface animates its own indicator.
+      const lead = working?.animated ? "" : `${glyph} `;
+      return `${lead}${currentStep}${elapsed < 5000 ? "" : ` · ${durationLabel(elapsed, "compact")}`}`;
     };
     // Posted before the slot wait, as the acknowledgement that the message landed.
     const statusRef = surface.capabilities.editMessages
       ? await surface.post(conv, { text: statusText() }).catch(() => null)
       : null;
-    // The surface's own sign of life (Slack: its animated status), started once
-    // the turn really runs.
-    let working: WorkingIndicator | null = null;
     let turnFailed = false;
     let lastEdit = 0;
     let replyDelivered = false;
@@ -3433,6 +3435,9 @@ export class SessionManager {
         clockTimer.unref?.();
       }
       working = surface.showWorking ? await surface.showWorking(conv, replyTo ? { replyTo } : {}).catch(() => null) : null;
+      // The acknowledgement went out with the glyph, before the surface's own
+      // animation started; take it off now rather than at the next step.
+      if (working?.animated) flushProgress();
       const harnessSession = await this.getOrAttachHarness(session, memoryRoot);
       // A daemon restart kills the bridge but not the row's flag, so the first turn
       // after one re-publishes. Idempotent and a map lookup when the bridge is already

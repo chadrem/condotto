@@ -260,13 +260,20 @@ export interface SurfaceAdapter {
   showWorking?(conv: ConversationRef, opts: { replyTo?: string }): Promise<WorkingIndicator | null>;
   /**
    * A short decorative prefix for the core's in-progress status line (Slack: an
-   * emoji, which can be a custom animated one). Opaque to the core.
+   * emoji, which can be a custom animated one), used when no animated working
+   * indicator is showing. Opaque to the core.
    */
   readonly workingGlyph?: string;
 }
 
 /** A live working indicator from `SurfaceAdapter.showWorking`. */
 export interface WorkingIndicator {
+  /**
+   * True when the surface is showing its own animated busy indicator (Slack's
+   * native status). The core then drops `workingGlyph` from its status line: one
+   * busy signal is enough.
+   */
+  readonly animated: boolean;
   /** The turn ended. Clears the indicator, or marks the outcome. Never throws. */
   done(outcome: "ok" | "failed"): Promise<void>;
 }

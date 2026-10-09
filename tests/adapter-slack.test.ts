@@ -679,6 +679,7 @@ describe("SlackAdapter — working indicator", () => {
     const { adapter, calls } = wired();
     const working = await adapter.showWorking(conv, { replyTo: "1700000001.000100" });
     expect(working).not.toBeNull();
+    expect(working!.animated).toBe(true);
     expect(calls[0]).toMatchObject({
       method: "assistant.threads.setStatus",
       args: { channel_id: "C1", thread_ts: "1700000000.000100" },
@@ -694,6 +695,7 @@ describe("SlackAdapter — working indicator", () => {
     const working = await adapter.showWorking(conv, { replyTo: "1700000001.000100" });
     expect(calls.map((c) => c.method)).toEqual(["assistant.threads.setStatus", "reactions.add"]);
     expect(calls[1]!.args).toMatchObject({ timestamp: "1700000001.000100", name: "eyes" });
+    expect(working!.animated).toBe(false); // a reaction isn't an animation: the glyph stays
     await working!.done("ok");
     expect(calls.slice(2).map((c) => `${c.method}:${c.args.name}`)).toEqual(["reactions.remove:eyes", "reactions.add:white_check_mark"]);
     expect(logs.filter((l) => l.includes("native")).length).toBe(0); // one refusal could be about one thread

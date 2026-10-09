@@ -87,6 +87,8 @@ export class FakeSurface implements SurfaceAdapter {
   working: { conv: ConversationRef; replyTo?: string; outcome?: "ok" | "failed" }[] = [];
   /** Set false to model a surface with no working indicator. */
   offersWorking = true;
+  /** Set true to model a surface animating its own indicator (Slack's native status). */
+  workingAnimated = false;
   readonly workingGlyph = "⏳";
 
   async showWorking(conv: ConversationRef, opts: { replyTo?: string }): Promise<WorkingIndicator | null> {
@@ -97,6 +99,7 @@ export class FakeSurface implements SurfaceAdapter {
     };
     this.working.push(entry);
     return {
+      animated: this.workingAnimated,
       done: async (outcome) => {
         entry.outcome = outcome;
       },

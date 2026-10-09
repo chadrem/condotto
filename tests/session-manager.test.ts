@@ -1499,6 +1499,16 @@ describe("busy indicator", () => {
     expect(w.surface.posts.some((p) => p.text.includes("couldn't pick up our earlier conversation"))).toBe(true);
   });
 
+  test("while the surface animates its own indicator, the status line drops its glyph", async () => {
+    const w = makeWorld();
+    w.surface.workingAnimated = true;
+    await turn(w, "bz10.00001");
+    const status = w.surface.posts.find((p) => p.text.startsWith("⏳"))!; // the acknowledgement, before it started
+    const edits = w.surface.updates.filter((u) => u.messageId === status.messageId && !u.text.includes("echo("));
+    expect(edits.length).toBeGreaterThan(0);
+    for (const u of edits) expect(u.text.startsWith("⏳")).toBe(false);
+  });
+
   test("a surface with no working indicator still gets the status line", async () => {
     const w = makeWorld();
     w.surface.offersWorking = false;
