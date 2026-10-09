@@ -8,7 +8,7 @@
 import { smokeEnv } from "./smoke-fixture";
 import { WorktreeManager } from "../src/core/worktrees";
 import { ClaudeCodeAdapter } from "../src/adapters/claude-code/adapter";
-import type { GateFn, SessionHandle, TurnEvent } from "../src/core/types";
+import type { GateFn } from "../src/core/types";
 
 const N = Math.max(2, Number(process.env.N ?? 4));
 const env = await smokeEnv();
@@ -31,7 +31,6 @@ async function runOne(i: number): Promise<{ i: number; ok: boolean; sessionId: s
     { text: `Reply with exactly this token and nothing else: SESSION_OK_${i}` },
     gate,
   )) {
-    const e = ev as TurnEvent & { handle?: SessionHandle };
     if (ev.kind === "handle_updated") sessionId = (ev.handle as { sessionId: string | null }).sessionId;
     if (ev.kind === "reply") reply = ev.text;
     if (ev.kind === "error") reply = `ERROR: ${ev.message}`;

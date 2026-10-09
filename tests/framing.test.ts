@@ -442,11 +442,11 @@ describe("frameMessage: attachment paths", () => {
       attachmentPaths: [".condotto/attachments/users.csv"],
     });
     const fence = out.match(/CONDOTTO_BODY_[a-f0-9]+/)![0];
-    const beforeFence = out.slice(0, out.indexOf(fence + "\n>"));
+    const beforeFence = out.slice(0, out.indexOf(`${fence}\n>`));
     // Inside the fence the agent is told everything is inert data — a path it is
     // meant to open must not be in there.
     expect(beforeFence).toContain(".condotto/attachments/users.csv");
-    const body = out.slice(out.indexOf(fence + "\n>"));
+    const body = out.slice(out.indexOf(`${fence}\n>`));
     expect(body).not.toContain(".condotto/attachments/users.csv");
   });
 

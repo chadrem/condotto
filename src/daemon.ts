@@ -201,7 +201,7 @@ async function main(): Promise<void> {
   });
   if (!config.runtimeGrants) {
     const purged = manager.purgeRuntimeGrants();
-    log(`[daemon] runtime_grants = false: roles come from condotto.toml only` + (purged ? `; purged ${purged} runtime grant(s)` : ""));
+    log(`[daemon] runtime_grants = false: roles come from condotto.toml only${purged ? `; purged ${purged} runtime grant(s)` : ""}`);
   }
   // Warn loudly if the configured default model/effort isn't one the harness
   // accepts — better a boot-time warning than a silent per-turn fallback.

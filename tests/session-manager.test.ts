@@ -1,4 +1,4 @@
-import { beforeAll, beforeEach, describe, expect, test } from "bun:test";
+import { beforeAll, describe, expect, test } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -987,8 +987,6 @@ describe("roles: command authority", () => {
 });
 
 describe("the tool-call boundary", () => {
-  const writeCall = { id: "tu-write", name: "Write", input: { file_path: "hello.txt", content: "hi" } };
-
   async function assignWithScript(w: World, id: string, calls: any[]): Promise<void> {
     await w.manager.handleEvent({ kind: "command", conv: conv(id), author: architect, name: "assign", args: "testrepo" });
     w.harness.scriptTurn(calls);
@@ -1450,7 +1448,11 @@ describe("concurrency", () => {
     let releaseA!: () => void;
     const heldA = new Promise<void>((r) => (releaseA = r));
     let first = true;
-    w.harness.beforeReply = () => (first ? ((first = false), heldA) : Promise.resolve());
+    w.harness.beforeReply = () => {
+      if (!first) return Promise.resolve();
+      first = false;
+      return heldA;
+    };
 
     const aTurn = w.manager.handleEvent({ kind: "message", conv: conv("f10.000001"), author: architect, text: "aaa", attachments: [] });
     await Bun.sleep(20); // A acquires the slot and holds it
@@ -1817,7 +1819,6 @@ describe("harness capabilities — workflows", () => {
 
 describe("role delegation — grant/revoke", () => {
   const abby = "fake:U_ABBY";
-  const abbyP: Principal = { surface: "fake", externalId: "U_ABBY" };
 
   test("an architect grants architect in this channel only; the grantee gains authority", async () => {
     const w = makeWorld();

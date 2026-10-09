@@ -48,6 +48,7 @@ for await (const ev of sessionA.turn(
   {
     text:
       `Run EXACTLY this bash command and report its stdout verbatim:\n` +
+      // biome-ignore lint/suspicious/noTemplateCurlyInString: a literal shell expansion for the agent to run.
       `  echo "${MARK} slack=[$SLACK_BOT_TOKEN] condotto=[$CONDOTTO_POISON] tool=[$MY_TOOLCHAIN_VAR] home=[$HOME] haspath=[${"${PATH:+yes}"}]"`,
     harness: { model: "fable", effort: "low" },
   },

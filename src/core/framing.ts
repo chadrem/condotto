@@ -64,12 +64,12 @@ const MENTION_SENTINEL_RE = fuzzySentinel("@[[");
 // Every code point the model might render as a line break: CRLF, CR, VT, FF,
 // the info separators FS/GS/RS/US (Bidi_Class B/S), NEL, LS, PS. Normalized to
 // \n BEFORE quoting so each becomes its own quoted line — never an escape.
-const LINE_BREAKS_RE = new RegExp("\\r\\n|[\\r\\u000B\\u000C\\u001C-\\u001F\\u0085\\u2028\\u2029]", "g");
+const LINE_BREAKS_RE = /\r\n|[\r\u000B\u000C\u001C-\u001F\u0085\u2028\u2029]/g;
 // C0 controls (0x00-0x1F excluding tab 0x09 and newline 0x0A), DEL, C1 controls.
-const CONTROLS_RE = new RegExp("[\\u0000-\\u0008\\u000B-\\u001F\\u007F-\\u009F]", "g");
+const CONTROLS_RE = /[\u0000-\u0008\u000B-\u001F\u007F-\u009F]/g;
 // Bidirectional format chars that can visually reorder text: the directional
 // MARKS (ALM/LRM/RLM), embeddings/overrides, and isolates.
-const BIDI_RE = new RegExp("[\\u061C\\u200E\\u200F\\u202A-\\u202E\\u2066-\\u2069]", "g");
+const BIDI_RE = /[\u061C\u200E\u200F\u202A-\u202E\u2066-\u2069]/g;
 
 /** A fresh, unguessable fence tag. Content cannot predict it to forge a fence. */
 function freshFence(): string {
@@ -81,7 +81,7 @@ export function sanitizeDisplayName(name: string): string {
   // marks; strip everything that could smuggle an id, a key=value token, a
   // quote/bracket that breaks out of the header, or a control character.
   return name
-    .replace(/[^\p{L}\p{N} _.\-]/gu, "")
+    .replace(/[^\p{L}\p{N} _.-]/gu, "")
     .replace(/[=:@#[\]<>{}"]/g, "")
     .replace(CONTROLS_RE, "")
     // Never let decoration echo the fence token — it can't forge a fence (that

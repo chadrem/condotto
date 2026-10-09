@@ -666,7 +666,8 @@ export class Store {
   createSession(
     s: Omit<
       SessionRow,
-      "created_at" | "last_active_at" | "budget_limit_usd" | "model" | "effort" | "subagents" | "workflows" | "plan_mode" | "cleanup_at" | "workdir"
+      | "created_at" | "last_active_at" | "budget_limit_usd" | "model" | "effort" | "subagents" | "workflows" | "plan_mode" | "cleanup_at" | "workdir"
+      | "remote_control"
     > & {
       budget_limit_usd?: number | null;
       model?: string | null;

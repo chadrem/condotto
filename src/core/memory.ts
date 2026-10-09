@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { chmod, mkdir, lstat, readdir, realpath, rm } from "node:fs/promises";
-import { existsSync } from "node:fs";
+import { type Dirent, existsSync } from "node:fs";
 import { dirname, join, resolve, sep } from "node:path";
 
 // Memory manager: one Condotto-owned memory directory per (repo, channel).
@@ -189,7 +189,7 @@ async function sweepSymlinks(dir: string, base: string, depth = 0): Promise<stri
     await rm(dir, { recursive: true, force: true }).catch(() => {});
     return [rel(dir)];
   }
-  let entries;
+  let entries: Dirent[];
   try {
     entries = await readdir(dir, { withFileTypes: true });
   } catch {

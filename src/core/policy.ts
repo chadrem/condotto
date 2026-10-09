@@ -359,10 +359,8 @@ function evaluateBase(call: ToolCall, ctx: PolicyContext): PolicyDecision {
 }
 
 function evaluateBash(input: unknown, ctx: PolicyContext): PolicyDecision {
-  const command =
-    typeof input === "object" && input !== null && typeof (input as any).command === "string"
-      ? ((input as any).command as string)
-      : "";
+  const raw = typeof input === "object" && input !== null ? (input as { command?: unknown }).command : undefined;
+  const command = typeof raw === "string" ? raw : "";
   if (!command.trim()) return deny("empty bash command");
 
   // The floor, and the only thing standing between a command and the shell.
@@ -463,7 +461,7 @@ export function bashHardDeny(
   // The leading class means only a path-shaped `.ssh` matches: `~/.ssh`, ` .ssh`,
   // `/.ssh`. A repo file called `foo.ssh` or `.sshconfig` does not.
   if (
-    /(?:^|[\s\/'"=`(])(?:\.ssh(?:\/|\b)|\.aws(?:\/|\b)|\.gnupg(?:\/|\b)|\.kube(?:\/|\b)|id_rsa|id_ed25519|\.config\/gcloud|\.netrc|\/etc\/shadow|\/proc\/(?:self|\d+)\/environ)/i.test(
+    /(?:^|[\s/'"=`(])(?:\.ssh(?:\/|\b)|\.aws(?:\/|\b)|\.gnupg(?:\/|\b)|\.kube(?:\/|\b)|id_rsa|id_ed25519|\.config\/gcloud|\.netrc|\/etc\/shadow|\/proc\/(?:self|\d+)\/environ)/i.test(
       command,
     )
   ) {
@@ -502,7 +500,7 @@ export function bashHardDeny(
 
 function truncate(s: string, max = 120): string {
   const oneLine = s.replace(/\s+/g, " ").trim();
-  return oneLine.length > max ? oneLine.slice(0, max - 1) + "…" : oneLine;
+  return oneLine.length > max ? `${oneLine.slice(0, max - 1)}…` : oneLine;
 }
 
 /**
@@ -524,7 +522,7 @@ export function parseWorkflowMeta(script: unknown): { name?: string; description
     // collapse ALL whitespace incl. newlines (so it can't forge a multi-line
     // protocol block), strip control chars, cap the length.
     const clean = m[2].replace(/[\x00-\x1f\x7f]+/g, " ").replace(/\s+/g, " ").trim();
-    return clean.length > 100 ? clean.slice(0, 99) + "…" : clean || undefined;
+    return clean.length > 100 ? `${clean.slice(0, 99)}…` : clean || undefined;
   };
   const name = grab("name");
   const description = grab("description");
@@ -607,7 +605,7 @@ export function planTextFrom(input: unknown): string | null {
   const raw = (named ?? longest ?? "").replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]+/g, "");
   const text = raw.trim();
   if (text.length === 0) return null;
-  return text.length > MAX_PLAN_CHARS ? text.slice(0, MAX_PLAN_CHARS) + "\n\n… (plan truncated)" : text;
+  return text.length > MAX_PLAN_CHARS ? `${text.slice(0, MAX_PLAN_CHARS)}\n\n… (plan truncated)` : text;
 }
 
 /** Short human-readable description of a tool call, for prompts and audit. */

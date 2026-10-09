@@ -31,7 +31,7 @@ console.log(`[smoke] worktree: ${worktree.path}`);
 // The real policy engine — an attachment read and an outbox write are ordinary
 // in-worktree calls, so nothing here should need a carve-out. If either denies,
 // the design is wrong and this catches it.
-let denials: string[] = [];
+const denials: string[] = [];
 const gate: GateFn = async (call) => {
   const d = evaluate(call, { worktree: worktree.path });
   const target = (call.input as Record<string, unknown> | null)?.file_path ?? "";

@@ -17,13 +17,13 @@ import { mentionToken, principalKey } from "./types";
 import type { Store, SessionRow, RepoRow } from "./store";
 import { ConflictError } from "./store";
 import {
-  WorktreeManager,
+  type WorktreeManager,
   listTopLevelDirs,
   normalizeSubdir,
   sessionCwd,
   verifyWorkdir,
 } from "./worktrees";
-import { MemoryManager, verifyMemoryTarget } from "./memory";
+import { type MemoryManager, verifyMemoryTarget } from "./memory";
 import { checkSkillArgs, frameMessage, sanitizeSkillText } from "./framing";
 import { ATTACHMENTS_REL, OUTBOX_REL, clearOutbox, landAttachments, readOutbox } from "./attachments";
 import { evaluate, memoryTargets, planTextFrom, type PolicyContext } from "./policy";
@@ -765,7 +765,7 @@ export class SessionManager {
           : event.kind === "choice"
             ? { conv: event.conv, label: event.choiceId }
             : null;
-      if (target && target.conv.conversationId) {
+      if (target?.conv.conversationId) {
         const surface = this.surfaces.get(target.conv.surfaceId);
         await surface
           ?.post(target.conv, { text: `⚠️ ${target.label} failed: ${err instanceof Error ? err.message : err}` })
@@ -1223,7 +1223,7 @@ export class SessionManager {
     const repos = this.store.listRepos().length;
     const architects = this.store.countArchitects();
     const inFlight =
-      `${slots.active}/${slots.max}` + (slots.waiting ? ` (${slots.waiting} queued for a slot)` : "");
+      `${slots.active}/${slots.max}${slots.waiting ? ` (${slots.waiting} queued for a slot)` : ""}`;
     return [
       `🛰️ *Condotto operator status* — daemon-wide`,
       `• uptime ${formatDuration(now - this.startedAt)}`,
@@ -1545,7 +1545,7 @@ export class SessionManager {
           // Re-read inside the FIFO: a reactivation may have landed and cleared
           // cleanup_at (or an earlier sweep already collected it).
           const s = this.store.getSession(due.id);
-          if (!s || s.status !== "stopped" || s.cleanup_at === null) return;
+          if (s?.status !== "stopped" || s.cleanup_at === null) return;
           if (new Date(s.cleanup_at).getTime() > now) return; // window pushed out
           const repo = this.store.getRepo(s.repo_id);
           // A stopped session should already be unpublished, but the worktree is about
@@ -2039,7 +2039,7 @@ export class SessionManager {
     }
     if (result.handle === before) return;
     this.store.setSessionRemoteControl(session.id, result.handle);
-    const changedUrl = !before || !before.includes(result.url);
+    const changedUrl = !before?.includes(result.url);
     if (changedUrl) {
       await this.surfaceFor(conv)
         .post(conv, {

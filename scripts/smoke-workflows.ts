@@ -85,7 +85,7 @@ console.log(`\n[smoke] workflow-agent calls reached the gate with agent_id: ${se
 console.log(`[smoke] a workflow-agent READ was allowed + confined:        ${workflowAgentReadAllowed}`);
 console.log(`[smoke] the final reply is the synthesized result (not "launched"): ${functional}`);
 
-const escaped = existsSync(join(worktree.path, "..", "WF_ESCAPE.txt"));
+const escaped = existsSync(WF_ESCAPE);
 console.log(`[smoke] our gate ALLOWED an in-worktree write:                ${confinedWriteAllowedAtGate}`);
 console.log(`[smoke] our gate DENIED the out-of-worktree write:            ${escapeDeniedAtGate}`);
 console.log(`[smoke] no out-of-worktree file landed:                       ${!escaped}`);

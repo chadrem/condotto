@@ -54,7 +54,7 @@ export function renderMrkdwn(markdown: string): string {
   const code: string[] = [];
   const protect = (m: string): string => {
     code.push(m);
-    return "\u0000" + (code.length - 1) + "\u0000";
+    return `\u0000${code.length - 1}\u0000`;
   };
   let text = markdown
     .replace(/\u0000/g, "")
@@ -111,7 +111,7 @@ export function choiceBlocks(prompt: ChoicePrompt): { text: string; blocks: unkn
 
 /** Parse a choice message's block_id back into {choiceId, architectOnly}. */
 export function parseChoiceBlockId(blockId: string | undefined): { choiceId: string; architectOnly: boolean } | null {
-  if (!blockId || !blockId.startsWith(CHOICE_ACTION + ":")) return null;
+  if (!blockId?.startsWith(`${CHOICE_ACTION}:`)) return null;
   const rest = blockId.slice(CHOICE_ACTION.length + 1);
   const lastColon = rest.lastIndexOf(":");
   if (lastColon === -1) return null;

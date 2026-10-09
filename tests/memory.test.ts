@@ -23,7 +23,7 @@ describe("MemoryManager.pathFor", () => {
     const m = new MemoryManager(memRoot);
     const a = m.pathFor(repo, "C123");
     expect(a).toBe(m.pathFor(repo, "C123"));
-    expect(a.startsWith(memRoot + "/")).toBe(true);
+    expect(a.startsWith(`${memRoot}/`)).toBe(true);
   });
 
   test("scopes by CHANNEL — roles are channel-scoped, so memory must be too", () => {

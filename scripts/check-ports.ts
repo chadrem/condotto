@@ -70,7 +70,7 @@ if (import.meta.main) {
   const violations = checkPorts();
   if (violations.length > 0) {
     console.error("Port boundary violations:");
-    for (const v of violations) console.error("  " + v);
+    for (const v of violations) console.error(`  ${v}`);
     process.exit(1);
   }
   console.log("check-ports: OK (no platform imports outside src/adapters/)");

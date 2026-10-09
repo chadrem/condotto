@@ -167,7 +167,7 @@ describe("mention tokens", () => {
 
   test("truncation across a mention never leaves a dangling <", () => {
     // Land the 12_000-char cut inside the `<@U0ABBY>` this token expands to.
-    const out = renderMrkdwn("x".repeat(11_998) + "@[[slack:U0ABBY]]");
+    const out = renderMrkdwn(`${"x".repeat(11_998)}@[[slack:U0ABBY]]`);
     const marker = "\n… _(truncated)_";
     expect(out.endsWith(marker)).toBe(true);
     const body = out.slice(0, -marker.length);

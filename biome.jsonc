@@ -1,0 +1,31 @@
+{
+  "$schema": "./node_modules/@biomejs/biome/configuration_schema.json",
+  "vcs": { "enabled": true, "clientKind": "git", "useIgnoreFile": true },
+  "files": { "includes": ["src/**", "scripts/**", "tests/**"] },
+  // Lint only. Reformatting the tree is its own decision.
+  "formatter": { "enabled": false },
+  "assist": { "enabled": false },
+  "linter": {
+    "enabled": true,
+    "rules": {
+      "preset": "recommended",
+      "style": {
+        // noUncheckedIndexedAccess is on, so `xs[0]!` after a length check is the idiom.
+        "noNonNullAssertion": "off"
+      },
+      "suspicious": {
+        // policy.ts and render.ts match control characters on purpose: that is the defanging.
+        "noControlCharactersInRegex": "off",
+        // `(x ??= init)` is how a lazily created value is read in one step here.
+        "noAssignInExpressions": "off"
+      }
+    }
+  },
+  "overrides": [
+    {
+      // Untyped wire shapes (SDK messages, Slack events) and test doubles.
+      "includes": ["src/adapters/**", "tests/**"],
+      "linter": { "rules": { "suspicious": { "noExplicitAny": "off" } } }
+    }
+  ]
+}

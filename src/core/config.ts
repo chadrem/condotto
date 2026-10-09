@@ -239,14 +239,6 @@ function optPosInt(v: unknown, where: string): number | undefined {
   return v;
 }
 
-function optStringArray(v: unknown, where: string): string[] | undefined {
-  if (v === undefined) return undefined;
-  if (!Array.isArray(v) || !v.every((x) => typeof x === "string")) {
-    throw new Error(`${where} must be an array of strings`);
-  }
-  return v as string[];
-}
-
 /** Warn (never throw) on keys we don't recognize — catches operator typos. */
 function warnUnknownKeys(obj: Record<string, unknown>, known: readonly string[], where: string): void {
   for (const key of Object.keys(obj)) {

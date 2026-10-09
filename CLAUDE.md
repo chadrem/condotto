@@ -236,6 +236,9 @@ of the last three we relied on contradicted the SDK's own documentation.
 - **Build-time safety:** point the system only at a throwaway git repo while
   developing Condotto itself. Slack development runs in the real company
   workspace by explicit architect decision; prefer a dedicated test channel.
+- **`bun run ci` is clean before every commit**: typecheck, lint, tests. `bun test`
+  alone does not typecheck. Silence a lint rule in `biome.jsonc` with a reason, or
+  inline with `biome-ignore` and a reason.
 - **Commit directly to main.** No branches.
 - **Write commit messages like a person.** Short subject in plain English, then
   at most two sentences of why. No headers, no bullets, no essay. Never a

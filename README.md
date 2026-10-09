@@ -738,8 +738,11 @@ repos.
 ## Development
 
 ```sh
+bun run ci              # everything below, in order; must pass before a commit
+bun run typecheck       # tsc, strict
+bun run lint            # Biome; warnings fail too
 bun test                # the full unit suite: no config, no network, no auth
-bun run check:ports     # guards the port boundaries
+bun run check:ports     # guards the port boundaries (bun test runs it too)
 ```
 
 **Smoke tests** drive the real Claude Code adapter end to end, with a live agent and
