@@ -133,6 +133,25 @@ max_concurrent_turns = 6    # cap on harness turns running at once across all
                             #   sessions. Env override: CONDOTTO_MAX_CONCURRENT_TURNS
 
 # ---------------------------------------------------------------------------
+# How long threads last. A thread nobody has spoken in is warned, then stopped,
+# and a stopped session is deleted a while later: its worktree, its branch and
+# the conversation. Every step is announced in the thread, including any
+# uncommitted or unpushed work it would lose.
+# Re-assigning the thread before the deletion picks it back up.
+[cleanup]
+warn_after_hours = 24       # post a warning after this long with no activity.
+                            #   Env override: CONDOTTO_IDLE_WARN_HOURS
+stop_after_hours = 36       # stop the session after this long. Must be more
+                            #   than warn_after_hours. 0 turns idle stops off.
+                            #   Env override: CONDOTTO_IDLE_STOP_HOURS
+keep_stopped_days = 7       # delete a stopped session this long after it stops,
+                            #   however it stopped. `@Condotto stop clean` uses a
+                            #   shorter 24 hours. 0 keeps sessions stopped from
+                            #   then on until someone runs `stop clean`; one that
+                            #   already has a deletion date keeps it.
+                            #   Env override: CONDOTTO_KEEP_STOPPED_DAYS
+
+# ---------------------------------------------------------------------------
 # Sandbox mode (optional). Runs the agent as its own Unix user, so its file
 # permissions — not Condotto's checks alone — keep it away from this file, the
 # SQLite store and other threads' state. The daemon must run as root inside a

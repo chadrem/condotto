@@ -287,7 +287,8 @@ In a channel the bot has been invited to:
 
 1. **Assign a thread.** `/condotto assign webapp` posts an anchor message, and its
    thread is your session. To use an existing thread instead, mention
-   `@Condotto assign` inside it. Slash commands cannot run in threads.
+   `@Condotto assign` inside it. Slash commands cannot run in threads. Condotto
+   answers with one line; `@Condotto help` shows the settings and commands.
 2. **Say what you want.** "What does this repo do?" "Add a `/health` endpoint that
    returns 200." It explores, edits, runs the tests, and reports back.
 3. **Or think first.** `@Condotto plan on` makes the thread read-only. The agent
@@ -302,8 +303,9 @@ In a channel the bot has been invited to:
 6. **Start fresh without losing work.** `@Condotto clear` forgets the conversation
    and nothing else. Same worktree, same branch, same uncommitted changes. Reach
    for it when a long thread has drifted.
-7. **End it.** `@Condotto stop` keeps the worktree. `@Condotto stop clean` schedules
-   it for teardown.
+7. **End it.** `@Condotto stop` ends the session. You can pick it back up for 7
+   days (by default), then it is deleted. `@Condotto stop clean` deletes it after 24 hours.
+   Threads that go quiet end on their own; see [How long threads last](#how-long-threads-last).
 
 ---
 
@@ -324,7 +326,8 @@ mention at the top of a channel just gets a private note asking you to start one
 |---|---|---|---|
 | `@Condotto assign <repo>[/<sub-project>]` | architect | — | Assign *this* thread as a session. |
 | `@Condotto status` | anyone | — | This channel's sessions and their settings. |
-| `@Condotto stop [clean]` | architect | — | End the session. `clean` also discards the worktree. |
+| `@Condotto help` | anyone | — | This thread's settings and every command. |
+| `@Condotto stop [clean]` | architect | — | End the session. It can be resumed for 7 days by default, then it is deleted. `clean` deletes it after 24 hours. |
 | `@Condotto cancel` | architect | — | Interrupt the running turn. The session lives on. |
 | `@Condotto clear` | architect | — | Forget the conversation. Worktree, branch, uncommitted work, settings, memory and spend all survive. |
 | `@Condotto plan on\|off` | architect | **off** | Read-only mode. The agent investigates and posts a plan, and changes nothing until you turn it off. |
@@ -493,7 +496,7 @@ the agent's, because what one thread writes lands in the system prompt of every
 later thread in that channel.
 
 - Notes live in `[paths].memory_root`, never inside a worktree, and they survive
-  `stop clean`. That is the point.
+  the session being deleted. That is the point.
 - Memory is **notes, not authority**. The agent is told so directly: a memory never
   grants permission, whatever it claims.
 - The shape is narrow on purpose: a markdown file directly in the memory root,
@@ -690,12 +693,42 @@ Add them to the threads they belong in with `@Condotto member @them`, or give th
 `observer` grant became `member`, which is now heard in every thread of its
 channel.
 
-### Worktrees and cleanup
+### How long threads last
 
-Per-session worktrees live under `[paths].worktrees_root`. The daemon sweeps hourly
-and at boot, reclaiming unreferenced trees and those a set interval after an
-explicit `@Condotto stop clean`. It never touches a worktree bound to a live or
-parked session, so a parked thread always resumes.
+Slack threads last forever. Condotto's sessions don't. Every session ends up
+deleted, so worktrees never pile up on the machine. With the defaults:
+
+| After | What happens |
+|---|---|
+| 24 hours with no activity | Condotto posts a warning in the thread. A message from an architect or a thread member keeps it going. |
+| 36 hours with no activity | The session stops. The thread is told when it will be deleted and what that would lose. |
+| 7 days after it stops | The worktree, its branch and the conversation are deleted, with one last line in the thread. |
+
+- **Activity** is a message or command from someone Condotto listens to, or the
+  agent finishing a turn. A running turn is never idle. Messages from people
+  Condotto ignores don't count.
+- **Picking it back up.** Until the deletion, an architect types `@Condotto assign`
+  in the thread and everything is back: the code and the conversation. After it,
+  `assign` starts fresh.
+- **Unsaved work** doesn't change the date. If the worktree has uncommitted changes
+  or commits that were never pushed, the stop message says so, so someone can push
+  them or resume the session first.
+- **After a stop, Condotto ignores the thread.** The stop message is the last word.
+  Once the session is deleted, Condotto keeps only its audit log; the code and the
+  conversation, including Claude Code's own transcript of it, are gone.
+- **If the thread can't be reached** (an archived channel, the bot removed),
+  Condotto keeps retrying each message. After a week it goes ahead without
+  them, so an unreachable thread can't hold a worktree forever.
+- Every one of these messages is a fixed template. None of them is written by the
+  agent.
+
+Change the timings in `[cleanup]`. `stop_after_hours = 0` turns idle stops off.
+`keep_stopped_days = 0` keeps sessions stopped from then on until someone runs
+`stop clean`. A session that already has a deletion date keeps it; re-assign the
+thread to cancel it.
+
+The same hourly sweep also removes stray worktree directories that no session owns.
+It never touches a live or parked session's worktree.
 
 ### Cost
 

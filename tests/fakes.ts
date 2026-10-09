@@ -326,5 +326,11 @@ export class FakeHarness implements HarnessAdapter {
     this.shutdownCalls++;
     this.remoteSink = null;
   }
+
+  /** Every transcript the core asked to delete. */
+  forgotten: { handle: SessionHandle; cwd: string }[] = [];
+  async forget(handle: SessionHandle, cwd: string): Promise<void> {
+    this.forgotten.push({ handle, cwd });
+  }
 }
 

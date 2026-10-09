@@ -263,6 +263,10 @@ describe("store worktree GC", () => {
     expect(s.cleanup_at).toBeNull();
     expect(store.getSession("g1")!.cleanup_at).toBeNull();
 
+    // Only a stopped session takes a date.
+    store.markSessionForCleanup("g1", "2026-07-20T00:00:00.000Z");
+    expect(store.getSession("g1")!.cleanup_at).toBeNull();
+    store.updateSessionStatus("g1", "stopped");
     store.markSessionForCleanup("g1", "2026-07-20T00:00:00.000Z");
     expect(store.getSession("g1")!.cleanup_at).toBe("2026-07-20T00:00:00.000Z");
     store.clearSessionCleanup("g1");
@@ -277,12 +281,14 @@ describe("store worktree GC", () => {
     // Not yet due: stopped + a future timestamp.
     store.createSession({ ...baseSession, id: "future", conversation_id: "2", status: "stopped" });
     store.markSessionForCleanup("future", "2999-01-01T00:00:00.000Z");
-    // Never scheduled: a plain-stopped session (cleanup_at null) is never collected.
+    // Never scheduled: a stopped session with no date (cleanup_at null) is never collected.
     store.createSession({ ...baseSession, id: "kept", conversation_id: "3", status: "stopped" });
     // Belt-and-braces: a non-stopped row with a past cleanup_at must NOT surface —
     // the invariant is baked into the query (a live/parked worktree is never GC'd).
+    // markSessionForCleanup refuses a parked row, so plant it directly to test the query.
     store.createSession({ ...baseSession, id: "parked", conversation_id: "4", status: "parked" });
-    store.markSessionForCleanup("parked", "2020-01-01T00:00:00.000Z");
+    (store as any).db.query("UPDATE sessions SET cleanup_at = '2020-01-01T00:00:00.000Z' WHERE id = 'parked'").run();
+    expect(store.getSession("parked")!.cleanup_at).not.toBeNull();
 
     const due = store.sessionsDueForCleanup("2026-07-19T00:00:00.000Z");
     expect(due.map((s) => s.id)).toEqual(["due"]);
@@ -446,7 +452,7 @@ describe("store schema migrations", () => {
   // The current schema version == the number of migrations in the runner. Bump
   // this constant in lockstep whenever a migration is appended — the tests below
   // pin the runner's behavior to it.
-  const CURRENT_SCHEMA_VERSION = 14;
+  const CURRENT_SCHEMA_VERSION = 15;
 
   const migPath = (name: string): string => join(mkdtempSync(join(tmpdir(), "condotto-mig-")), name);
   const userVersion = (path: string): number => {
@@ -485,6 +491,8 @@ describe("store schema migrations", () => {
     raw.run("ALTER TABLE sessions DROP COLUMN remote_control");
     raw.run("ALTER TABLE repos DROP COLUMN instructions"); // v13
     raw.run("DROP TABLE session_members"); // v14
+    raw.run("ALTER TABLE sessions DROP COLUMN idle_warned_at"); // v15
+    raw.run("ALTER TABLE sessions DROP COLUMN notice_failed_since"); // v15
     raw.run("PRAGMA user_version = 9");
     raw.close();
     const store = new Store(path);
@@ -522,6 +530,8 @@ describe("store schema migrations", () => {
     raw.run("ALTER TABLE sessions DROP COLUMN remote_control");
     raw.run("ALTER TABLE repos DROP COLUMN instructions"); // v13 re-runs too
     raw.run("DROP TABLE session_members"); // v14 re-runs too
+    raw.run("ALTER TABLE sessions DROP COLUMN idle_warned_at"); // v15 re-runs too
+    raw.run("ALTER TABLE sessions DROP COLUMN notice_failed_since"); // v15 re-runs too
     raw.run("PRAGMA user_version = 11");
     raw.close();
 
@@ -583,6 +593,8 @@ describe("store schema migrations", () => {
     raw.run("ALTER TABLE sessions DROP COLUMN remote_control"); // v12
     raw.run("ALTER TABLE repos DROP COLUMN instructions"); // v13
     raw.run("DROP TABLE session_members"); // v14
+    raw.run("ALTER TABLE sessions DROP COLUMN idle_warned_at"); // v15
+    raw.run("ALTER TABLE sessions DROP COLUMN notice_failed_since"); // v15
     // v7 dropped these; a v0 store had them, and the baseline's `CREATE TABLE IF
     // NOT EXISTS` cannot re-add a column to a table that already exists.
     raw.run("ALTER TABLE repos ADD COLUMN land_cmd TEXT"); // v1-era, dropped at v7

@@ -1,7 +1,7 @@
 import { mkdir } from "node:fs/promises";
 import { existsSync, lstatSync, readdirSync } from "node:fs";
 import { join, resolve, sep } from "node:path";
-import { directRunner, type CommandRunner } from "./agent-exec";
+import { scrubbedRunner, type CommandRunner, type RunOptions } from "./agent-exec";
 import { DirectTreeIO, type TreeIO } from "./tree-io";
 
 /** The daemon's per-worktree scratch directory, kept out of the repo's index. */
@@ -14,9 +14,22 @@ const CONDOTTO_EXCLUDE_BLOCK = `# condotto: daemon scratch (plan files) — neve
 // never change. HOW the tree is made is a strategy (a linked git worktree by
 // default, an agent-owned clone in sandbox mode); the path rule is not.
 
+/**
+ * Teardown git calls (the cleanup sweep's) have a timeout. Git runs hooks and
+ * config-named commands the agent can plant, and one that never exits would
+ * otherwise wedge the whole hourly sweep. Creating a tree has none: a first
+ * checkout of a large repo is legitimately slow, and a stuck assign wedges only
+ * that one thread, which an architect can see.
+ */
+const GIT_TEARDOWN_TIMEOUT_MS = 2 * 60_000;
+
 /** Run git through a runner. `out` is stdout+stderr for messages; `stdout` alone for values. */
-async function git(run: CommandRunner, args: string[]): Promise<{ ok: boolean; out: string; stdout: string }> {
-  const res = await run(["git", ...args]);
+async function git(
+  run: CommandRunner,
+  args: string[],
+  opts: RunOptions = {},
+): Promise<{ ok: boolean; out: string; stdout: string }> {
+  const res = await run(["git", ...args], opts);
   const stdout = new TextDecoder().decode(res.stdout);
   return { ok: res.code === 0, out: (stdout + res.stderr).trim(), stdout: stdout.trim() };
 }
@@ -168,6 +181,57 @@ export interface WorktreeRemoveSpec {
   branch: string;
 }
 
+/** What deleting a tree would lose, for the thread's stop message. */
+export interface UnsavedWork {
+  /** Uncommitted changes or untracked files. */
+  dirty: boolean;
+  /** Commits that deletion takes with it and that are on no remote branch and not on the default branch. */
+  unpushed: number;
+}
+
+/** How long each unsaved-work git call may take before it counts as unknown. */
+const UNSAVED_CHECK_TIMEOUT_MS = 30_000;
+
+/**
+ * Inspect a tree for work that exists nowhere else. Runs IN the tree through
+ * `run`: the agent's runner in sandbox mode, a secrets-scrubbed one otherwise,
+ * because the tree's config and `.gitattributes` are the agent's and can name
+ * commands for git to run. For the same reason: `core.fsmonitor` and hooks are
+ * pinned off, each call has a shorter timeout (a filter can simply never exit), and
+ * `--no-optional-locks` keeps `status` from taking the index lock, so a stop that
+ * lands mid-turn never breaks the agent's own `git commit`. Null when either
+ * check fails: the caller says it could not tell, rather than guessing.
+ */
+async function inspectUnsaved(
+  run: CommandRunner,
+  path: string,
+  revs: string[],
+  notOn: string[],
+): Promise<UnsavedWork | null> {
+  const base = ["--no-optional-locks", "-C", path, "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null"];
+  const opts = { timeoutMs: UNSAVED_CHECK_TIMEOUT_MS };
+  // Untracked files forced on: config (global, or the tree's own) can hide them,
+  // and a brand-new file is exactly the work that would be lost.
+  const status = await git(run, [...base, "status", "--porcelain", "--untracked-files=all"], opts);
+  if (!status.ok) return null;
+  // The exclusions go on stdin as `^<rev>` lines, not argv: a repo with many tags
+  // supplies tens of thousands of them, past the OS argument limit. `--` so a file
+  // named like a branch is never read as one.
+  const ahead = await git(run, [...base, "rev-list", "--count", "--stdin", ...revs, "--not", "--remotes", "--"], {
+    ...opts,
+    stdin: new TextEncoder().encode(notOn.map((rev) => `^${rev}\n`).join("")),
+  });
+  const unpushed = Number(ahead.stdout);
+  if (!ahead.ok || !Number.isInteger(unpushed)) return null;
+  return { dirty: status.stdout.length > 0, unpushed };
+}
+
+export interface UnsavedSpec {
+  path: string;
+  branch: string;
+  defaultBranch: string;
+}
+
 /**
  * HOW a session's tree comes into being and goes away. Everything else — its
  * stable path, the confinement check on teardown, the GC listing — belongs to the
@@ -178,6 +242,8 @@ export interface WorktreeStrategy {
   create(spec: WorktreeCreateSpec): Promise<void>;
   /** Best-effort teardown; never throws. */
   remove(spec: WorktreeRemoveSpec): Promise<{ deregistered: boolean; branchDeleted: boolean }>;
+  /** What deleting the tree at `path` (and `branch`) would lose, or null if it can't be told. Never throws. */
+  unsavedWork(spec: UnsavedSpec): Promise<UnsavedWork | null>;
 }
 
 /**
@@ -186,7 +252,12 @@ export interface WorktreeStrategy {
  * agent are the same user — it needs the agent to write the shared repo's `.git`.
  */
 export class GitWorktreeStrategy implements WorktreeStrategy {
-  constructor(private run: CommandRunner = directRunner) {}
+  /**
+   * `scrubbedRunner` by default, for every call: the shared repo's `.git` and the
+   * session tree are both agent-writable in this mode, so git here can run hooks
+   * and filters the agent planted, and they must not inherit the daemon's secrets.
+   */
+  constructor(private run: CommandRunner = scrubbedRunner) {}
 
   async create(spec: WorktreeCreateSpec): Promise<void> {
     const res = await git(this.run, ["-C", spec.repoPath, "worktree", "add", "-b", spec.branch, spec.path, spec.defaultBranch]);
@@ -210,21 +281,36 @@ export class GitWorktreeStrategy implements WorktreeStrategy {
   async remove(spec: WorktreeRemoveSpec): Promise<{ deregistered: boolean; branchDeleted: boolean }> {
     let deregistered = false;
     let branchDeleted = false;
+    const t = { timeoutMs: GIT_TEARDOWN_TIMEOUT_MS };
     for (const repoPath of spec.repoPaths) {
-      if ((await git(this.run, ["-C", repoPath, "worktree", "remove", "--force", spec.path])).ok) {
+      if ((await git(this.run, ["-C", repoPath, "worktree", "remove", "--force", spec.path], t)).ok) {
         deregistered = true;
       }
       // Only the owning repo has the branch.
-      if ((await git(this.run, ["-C", repoPath, "branch", "-D", spec.branch])).ok) {
+      if ((await git(this.run, ["-C", repoPath, "branch", "-D", spec.branch], t)).ok) {
         branchDeleted = true;
       }
     }
     if (existsSync(spec.path)) await new DirectTreeIO().remove(spec.path);
     // Prune stale admin entries (`.git/worktrees/<name>`) in every candidate repo.
     for (const repoPath of spec.repoPaths) {
-      await git(this.run, ["-C", repoPath, "worktree", "prune"]);
+      await git(this.run, ["-C", repoPath, "worktree", "prune"], { timeoutMs: GIT_TEARDOWN_TIMEOUT_MS });
     }
     return { deregistered, branchDeleted };
+  }
+
+  /**
+   * Deletion removes the tree and the session branch, so count both; the shared
+   * repo's other branches are the team's and survive. The default branch is a
+   * local ref here.
+   */
+  async unsavedWork(spec: UnsavedSpec): Promise<UnsavedWork | null> {
+    // The default branch as configured, which may be any commit-ish (`create`
+    // hands it to `worktree add` the same way); the trailing `--` keeps a file of
+    // that name from being read as it.
+    return inspectUnsaved(this.run, spec.path, ["HEAD", `refs/heads/${spec.branch}`], [spec.defaultBranch]).catch(
+      () => null,
+    );
   }
 }
 
@@ -265,8 +351,8 @@ export class SandboxCloneStrategy implements WorktreeStrategy {
     private runAsAgent: CommandRunner,
     /** Tree access as the agent. */
     private io: TreeIO,
-    /** Runs as the daemon, and only ever against the shared repo. */
-    private runAsDaemon: CommandRunner = directRunner,
+    /** Runs as the daemon, and only ever against the root-owned shared repo. */
+    private runAsDaemon: CommandRunner = scrubbedRunner,
   ) {}
 
   async create(spec: WorktreeCreateSpec): Promise<void> {
@@ -304,6 +390,36 @@ export class SandboxCloneStrategy implements WorktreeStrategy {
   async remove(spec: WorktreeRemoveSpec): Promise<{ deregistered: boolean; branchDeleted: boolean }> {
     await this.io.remove(spec.path);
     return { deregistered: false, branchDeleted: false };
+  }
+
+  /**
+   * As the agent, in its own clone. Deletion removes the whole clone, so every
+   * local branch, tag and the latest stash count (in the shared-repo mode those
+   * live in the shared repo and survive). The default branch arrived as
+   * `origin/<name>`, which `--remotes` already covers. `--glob` rather than a bare
+   * `refs/stash`, which would be an error when there is no stash.
+   *
+   * The clone copied every tag the shared repo has, and `--remotes` covers only its
+   * branches, so a release tag off those branches would otherwise read as unpushed
+   * work in every session. Every tag the shared repo has (peeled `^{}` lines too)
+   * goes after `--not`, leaving only tags made in this clone. `ls-remote` runs as
+   * the agent through the clone's configured `uploadpack`; if it fails, the whole
+   * check is unknown rather than guessed.
+   */
+  async unsavedWork(spec: UnsavedSpec): Promise<UnsavedWork | null> {
+    try {
+      const tags = await git(this.runAsAgent, ["-C", spec.path, "ls-remote", "--tags", "origin"], {
+        timeoutMs: UNSAVED_CHECK_TIMEOUT_MS,
+      });
+      if (!tags.ok) return null;
+      const shared = tags.stdout
+        .split("\n")
+        .map((line) => line.split("\t")[0] ?? "")
+        .filter((oid) => /^[0-9a-f]{40,64}$/.test(oid));
+      return await inspectUnsaved(this.runAsAgent, spec.path, ["HEAD", "--branches", "--tags", "--glob=refs/stash"], shared);
+    } catch {
+      return null;
+    }
   }
 }
 
@@ -346,6 +462,13 @@ export class WorktreeManager {
 
     await this.strategy.create({ repoPath: opts.repoPath, defaultBranch: opts.defaultBranch, path, branch });
     return { path, branch };
+  }
+
+  /** What deleting this session's tree would lose (see `UnsavedWork`); null if unknown. */
+  async unsavedWork(opts: { sessionId: string; branch: string; defaultBranch: string }): Promise<UnsavedWork | null> {
+    const path = this.pathFor(opts.sessionId);
+    if (!(await this.io.exists(path))) return null;
+    return this.strategy.unsavedWork({ path, branch: opts.branch, defaultBranch: opts.defaultBranch });
   }
 
   /** Session-id directories currently under the worktree root — each name IS a

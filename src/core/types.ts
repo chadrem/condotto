@@ -555,6 +555,13 @@ export interface HarnessAdapter {
    */
   resume(handle: SessionHandle, cwd: string, system: string, root?: string): Promise<HarnessSession>;
   /**
+   * Delete the conversation the harness stored for this session (its transcript),
+   * so a deleted or cleared session really is forgotten on this machine. `cwd` is
+   * the session's working directory, as passed to `create`/`resume`. Best-effort
+   * and idempotent: never throws, and a transcript that is already gone is fine.
+   */
+  forget?(handle: SessionHandle, cwd: string): Promise<void>;
+  /**
    * Release anything the adapter holds that outlives an individual session object —
    * today, published remote-control bridges. Called once on daemon shutdown.
    * Idempotent, never throws, and bounded: shutdown must not block on a wedged

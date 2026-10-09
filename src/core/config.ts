@@ -74,6 +74,15 @@ export interface CondottoConfig {
    * at boot.
    */
   runtimeGrants: boolean;
+  /**
+   * Idle auto-cleanup (`[cleanup]`). A parked thread is warned after `idleWarnMs`
+   * without activity and stopped after `idleStopMs`; `idleStopMs = 0` turns both
+   * off. A stopped session is deleted `keepStoppedMs` after it stops; 0 keeps
+   * stopped sessions until an architect runs `stop clean`.
+   */
+  idleWarnMs: number;
+  idleStopMs: number;
+  keepStoppedMs: number;
 }
 
 /** Surface (Slack) credentials — owned by the composition root, never the core. */
@@ -145,6 +154,19 @@ export const DEFAULT_WORKFLOWS = true;
  * turning it off is `[defaults].memory = false`, or per repo.
  */
 export const DEFAULT_MEMORY = true;
+
+/**
+ * Idle auto-cleanup defaults: warn a quiet thread at 24h, stop it at 36h, delete
+ * a stopped session 7 days later. Seven days also stays well inside Claude Code's
+ * own transcript retention (about 30 days by default), so any session that can
+ * still be resumed still has its conversation.
+ */
+export const DEFAULT_IDLE_WARN_HOURS = 24;
+export const DEFAULT_IDLE_STOP_HOURS = 36;
+export const DEFAULT_KEEP_STOPPED_DAYS = 7;
+export const HOUR_MS = 60 * 60 * 1000;
+/** Ten years. Far past any useful setting, and well inside what a Date can hold. */
+const MAX_CLEANUP_HOURS = 10 * 365 * 24;
 
 /** Default location and env override for the single config file. */
 export const DEFAULT_CONFIG_PATH = "condotto.toml";
@@ -223,10 +245,11 @@ function optBool(v: unknown, where: string): boolean | undefined {
   return v;
 }
 
-function optPosNumber(v: unknown, where: string): number | undefined {
+/** A finite number above 0, or at least 0 with `allowZero`; undefined when absent. */
+function optNumber(v: unknown, where: string, allowZero = false): number | undefined {
   if (v === undefined) return undefined;
-  if (typeof v !== "number" || !Number.isFinite(v) || v <= 0) {
-    throw new Error(`${where} must be a positive number`);
+  if (typeof v !== "number" || !Number.isFinite(v) || v < 0 || (v === 0 && !allowZero)) {
+    throw new Error(`${where} must be ${allowZero ? "a number, 0 or more" : "a positive number"}`);
   }
   return v;
 }
@@ -254,10 +277,13 @@ function warnUnknownKeys(obj: Record<string, unknown>, known: readonly string[],
 const envStr = (raw: string | undefined): string | undefined =>
   raw !== undefined && raw.trim() !== "" ? raw.trim() : undefined;
 
-function envPosNumber(raw: string | undefined, name: string): number | undefined {
+/** The env twin of `optNumber`. */
+function envNumber(raw: string | undefined, name: string, allowZero = false): number | undefined {
   if (raw === undefined || raw.trim() === "") return undefined;
   const n = Number(raw);
-  if (!Number.isFinite(n) || n <= 0) throw new Error(`${name} must be a positive number, got "${raw}"`);
+  if (!Number.isFinite(n) || n < 0 || (n === 0 && !allowZero)) {
+    throw new Error(`${name} must be ${allowZero ? "a number, 0 or more" : "a positive number"}, got "${raw}"`);
+  }
   return n;
 }
 
@@ -301,7 +327,7 @@ function parseRepoEntry(entry: unknown, where: string): RepoConfig {
     // (2026-07-26). The daemon-run command path existed because the agent's shell
     // was gated; now the agent runs its own tests. An existing config that still
     // declares them boots fine — the keys are ignored, not rejected.
-    costCapUsd: optPosNumber(e.cost_cap_usd, `${where}.cost_cap_usd`),
+    costCapUsd: optNumber(e.cost_cap_usd, `${where}.cost_cap_usd`),
     // Opaque model/effort tokens, validated by the harness adapter.
     // Per-repo harness posture is tri-state: an explicit boolean pins it, absent
     // falls through to the daemon default.
@@ -459,7 +485,9 @@ const TOP_LEVEL_KEYS = [
   "defaults",
   "sandbox",
   "runtime_grants",
+  "cleanup",
 ] as const;
+const CLEANUP_KEYS = ["warn_after_hours", "stop_after_hours", "keep_stopped_days"] as const;
 const AUTH_KEYS = ["mode", "api_key"] as const;
 const PATHS_KEYS = ["db", "worktrees_root", "memory_root"] as const;
 const DEFAULTS_KEYS = [
@@ -471,6 +499,51 @@ const DEFAULTS_KEYS = [
   "cost_cap_usd",
   "max_concurrent_turns",
 ] as const;
+
+/**
+ * `[cleanup]`, in milliseconds. Fractional hours are allowed (handy for trying it
+ * out in a test channel). A stop must come after the warning, because the warning
+ * is the only notice a thread gets before it stops.
+ */
+function parseCleanup(
+  toml: Record<string, unknown>,
+  env: Record<string, string | undefined>,
+): { idleWarnMs: number; idleStopMs: number; keepStoppedMs: number } {
+  const t = toml.cleanup === undefined ? {} : asTable(toml.cleanup, "[cleanup]");
+  warnUnknownKeys(t, CLEANUP_KEYS, "[cleanup]");
+  const warnHours =
+    envNumber(env.CONDOTTO_IDLE_WARN_HOURS, "CONDOTTO_IDLE_WARN_HOURS", true) ??
+    optNumber(t.warn_after_hours, "[cleanup].warn_after_hours", true) ??
+    DEFAULT_IDLE_WARN_HOURS;
+  const stopHours =
+    envNumber(env.CONDOTTO_IDLE_STOP_HOURS, "CONDOTTO_IDLE_STOP_HOURS", true) ??
+    optNumber(t.stop_after_hours, "[cleanup].stop_after_hours", true) ??
+    DEFAULT_IDLE_STOP_HOURS;
+  const keepDays =
+    envNumber(env.CONDOTTO_KEEP_STOPPED_DAYS, "CONDOTTO_KEEP_STOPPED_DAYS", true) ??
+    optNumber(t.keep_stopped_days, "[cleanup].keep_stopped_days", true) ??
+    DEFAULT_KEEP_STOPPED_DAYS;
+  for (const [key, hours] of [
+    ["warn_after_hours", warnHours],
+    ["stop_after_hours", stopHours],
+    ["keep_stopped_days", keepDays * 24],
+  ] as const) {
+    if (hours > MAX_CLEANUP_HOURS) {
+      throw new Error(
+        `[cleanup].${key} is too large; the most is ten years. To turn a step off, set ` +
+          `stop_after_hours = 0 or keep_stopped_days = 0.`,
+      );
+    }
+  }
+  if (stopHours > 0 && (warnHours <= 0 || warnHours >= stopHours)) {
+    throw new Error(
+      `[cleanup].warn_after_hours (${warnHours}) must be more than 0 and less than stop_after_hours ` +
+        `(${stopHours}), so a thread is always warned before it stops. Set stop_after_hours = 0 to turn ` +
+        `idle stops off.`,
+    );
+  }
+  return { idleWarnMs: warnHours * HOUR_MS, idleStopMs: stopHours * HOUR_MS, keepStoppedMs: keepDays * 24 * HOUR_MS };
+}
 
 /**
  * Resolve a daemon-wide boolean default: env override wins, then the file, then
@@ -563,8 +636,8 @@ export function loadConfig(
     repos,
     roles: parseRoles(toml, env),
     defaultCostCapUsd:
-      envPosNumber(env.CONDOTTO_COST_CAP_USD, "CONDOTTO_COST_CAP_USD") ??
-      optPosNumber(defaults.cost_cap_usd, "[defaults].cost_cap_usd") ??
+      envNumber(env.CONDOTTO_COST_CAP_USD, "CONDOTTO_COST_CAP_USD") ??
+      optNumber(defaults.cost_cap_usd, "[defaults].cost_cap_usd") ??
       DEFAULT_COST_CAP_USD,
     maxConcurrentTurns:
       envPosInt(env.CONDOTTO_MAX_CONCURRENT_TURNS, "CONDOTTO_MAX_CONCURRENT_TURNS") ??
@@ -579,6 +652,7 @@ export function loadConfig(
     defaultMemory,
     sandbox,
     runtimeGrants,
+    ...parseCleanup(toml, env),
   };
 }
 

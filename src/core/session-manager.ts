@@ -17,6 +17,7 @@ import { mentionToken, principalKey } from "./types";
 import type { Store, SessionRow, RepoRow } from "./store";
 import { ConflictError } from "./store";
 import {
+  type UnsavedWork,
   type WorktreeManager,
   listTopLevelDirs,
   normalizeSubdir,
@@ -34,6 +35,10 @@ import {
   DEFAULT_MODEL,
   DEFAULT_SUBAGENTS,
   DEFAULT_WORKFLOWS,
+  DEFAULT_IDLE_STOP_HOURS,
+  DEFAULT_IDLE_WARN_HOURS,
+  DEFAULT_KEEP_STOPPED_DAYS,
+  HOUR_MS,
 } from "./config";
 
 /**
@@ -299,11 +304,11 @@ function describeTarget(repoName: string, workdir: string | null): string {
 }
 
 /**
- * A short, one-time summary of what people can do in an assigned thread. Posted
- * when a session starts or reactivates so the commands are discoverable in the
- * thread itself, not only in the docs. Kept terse — it is a chat message.
+ * A short summary of what people can do in an assigned thread, posted by
+ * `@Condotto help` so the commands are discoverable in the thread itself, not
+ * only in the docs. Kept terse — it is a chat message.
  */
-function threadCommandHelp(opts: { runtimeGrants: boolean; remoteControl: boolean }): string {
+function threadCommandHelp(opts: { runtimeGrants: boolean; remoteControl: boolean; keepStopped: string }): string {
   return [
     `Architect commands — mention me in this thread:`,
     `• \`@Condotto model <opus|sonnet|fable>\` / \`@Condotto effort <low…max>\` — tune the implementer`,
@@ -319,7 +324,7 @@ function threadCommandHelp(opts: { runtimeGrants: boolean; remoteControl: boolea
       : []),
     `• \`@Condotto clear\` — forget the conversation and start fresh (the worktree, your uncommitted work, and these settings all stay)`,
     `• \`@Condotto /<skill> [args]\` — run one of my skills · \`@Condotto skills\` — list what's available`,
-    `• \`@Condotto status\` — list sessions · \`@Condotto stop\` — end this session (keeps the worktree; \`stop clean\` discards it)`,
+    `• \`@Condotto status\` — list sessions · \`@Condotto stop\` — end this session (${opts.keepStopped}; \`stop clean\` deletes it sooner)`,
   ].join("\n");
 }
 
@@ -392,9 +397,18 @@ export interface SessionManagerOptions {
    * How long after an explicit `@Condotto stop clean` the GC keeps the worktree
    * before collecting it. A grace window: the clean-stopped session stays
    * reactivatable until it elapses (a reactivation cancels the teardown). Default
-   * 24h. A plain `stop` is never scheduled, so this never applies to it.
+   * 24h. Any other stop uses `keepStoppedMs`.
    */
   worktreeRetentionMs?: number;
+  /**
+   * Idle auto-cleanup (`[cleanup]`, see `sweepIdle`). Warn a parked thread after
+   * `idleWarnMs` without activity and stop it after `idleStopMs` (0 = never).
+   * Delete a stopped session `keepStoppedMs` after it stops (0 = keep it until
+   * `stop clean`).
+   */
+  idleWarnMs?: number;
+  idleStopMs?: number;
+  keepStoppedMs?: number;
   /**
    * Owns the per-(repo, channel) agent-memory directories. Omitted = memory is
    * unavailable daemon-wide regardless of any repo's `memory = true`, which is what
@@ -409,6 +423,11 @@ export interface SessionManagerOptions {
    * longer than an assign, so a real crash-orphan still ages out promptly.
    */
   orphanMinAgeMs?: number;
+  /**
+   * How long a sweep waits on one session's queue before moving on (see
+   * `serialized`). Default 2 min: longer than any sweep step's own work.
+   */
+  sweepWaitMs?: number;
   /**
    * Epoch-ms the daemon started (operator status uptime). The manager is
    * constructed once at boot, so it defaults to construction time — a faithful
@@ -464,19 +483,157 @@ class Semaphore {
   }
 }
 
-/** Human-readable elapsed time for the operator status uptime. Coarse by
- *  design — two largest units — since operators glance at it, not stopwatch it. */
-function formatDuration(ms: number): string {
-  const s = Math.max(0, Math.floor(ms / 1000));
-  const d = Math.floor(s / 86400);
-  const h = Math.floor((s % 86400) / 3600);
-  const m = Math.floor((s % 3600) / 60);
-  const sec = s % 60;
-  if (d) return `${d}d ${h}h`;
-  if (h) return `${h}h ${m}m`;
-  if (m) return `${m}m ${sec}s`;
-  return `${sec}s`;
+
+const DAY_MS = 24 * HOUR_MS;
+
+// ---------------------------------------------------------------------------
+// Lifecycle notices: what a thread is told when it is warned, stopped or
+// deleted. Fixed templates the daemon posts, never model output, so nothing in a
+// thread or a repo can change what they say. They only interpolate values the
+// daemon owns (counts, dates, durations, the branch Condotto named); never
+// message text, display names, file names or commit messages. Each one says
+// what happens to the conversation, what happens to the code, and what to do.
+
+/**
+ * A human duration, in one of two styles. `compact` is the operator dashboard's
+ * two largest units ("1d 12h", "3m 20s"): operators glance at it, not stopwatch
+ * it. `words` is how thread messages say it, coarser as it grows ("7 days",
+ * "36 hours", "1.5 hours", "45 minutes").
+ */
+function durationLabel(ms: number, style: "compact" | "words"): string {
+  if (style === "compact") {
+    const s = Math.max(0, Math.floor(ms / 1000));
+    const d = Math.floor(s / 86400);
+    const h = Math.floor((s % 86400) / 3600);
+    const m = Math.floor((s % 3600) / 60);
+    const sec = s % 60;
+    if (d) return `${d}d ${h}h`;
+    if (h) return `${h}h ${m}m`;
+    if (m) return `${m}m ${sec}s`;
+    return `${sec}s`;
+  }
+  const plural = (n: number, unit: string) => `${n} ${unit}${n === 1 ? "" : "s"}`;
+  if (ms >= 3 * DAY_MS) return plural(Math.round(ms / DAY_MS), "day");
+  if (ms >= 2 * HOUR_MS) return plural(Math.round(ms / HOUR_MS), "hour");
+  if (ms >= HOUR_MS) return plural(Number((ms / HOUR_MS).toFixed(1)), "hour");
+  return plural(Math.max(1, Math.round(ms / 60_000)), "minute");
 }
+
+/** Thread-message wording for a duration. */
+const spanLabel = (ms: number) => durationLabel(ms, "words");
+
+
+/** "Thursday, Oct 15", in the daemon's timezone. */
+function dayLabel(at: number): string {
+  return new Date(at).toLocaleDateString("en-US", { weekday: "long", month: "short", day: "numeric" });
+}
+
+/**
+ * "in 24 hours" when it is soon, else "on Thursday, Oct 15". Past the date (the
+ * hourly sweep hasn't run yet, or a deletion keeps failing) it is "shortly":
+ * "in 1 minute" would stay wrong for up to an hour.
+ */
+function whenLabel(at: number, now: number): string {
+  if (at <= now) return "shortly";
+  return at - now < 2 * DAY_MS ? `in ${spanLabel(at - now)}` : `on ${dayLabel(at)}`;
+}
+
+/** "for 24 hours" when it is soon, else "until Thursday, Oct 15"; past the date, see `whenLabel`. */
+function keptLabel(at: number, now: number): string {
+  if (at <= now) return "only until the next cleanup, which is due now";
+  return at - now < 2 * DAY_MS ? `for ${spanLabel(at - now)}` : `until ${dayLabel(at)}`;
+}
+
+/** The code line of a stop notice: what deleting the tree at `when` would lose. */
+function unsavedLine(unsaved: UnsavedWork | null, when: string): string {
+  if (unsaved === null) {
+    return `• I couldn't check for unsaved changes, so assume anything that isn't pushed will be lost ${when}.`;
+  }
+  const parts = [
+    ...(unsaved.dirty ? ["uncommitted changes"] : []),
+    ...(unsaved.unpushed > 0
+      ? [`${unsaved.unpushed} commit${unsaved.unpushed === 1 ? "" : "s"} that ${unsaved.unpushed === 1 ? "was" : "were"} never pushed`]
+      : []),
+  ];
+  // "Git tracks", because ignored files (build output, a local .env) are not checked.
+  if (parts.length === 0) return `• Everything git tracks here is committed and pushed, so deleting it loses none of that.`;
+  const many = unsaved.dirty || unsaved.unpushed !== 1;
+  return (
+    `• ⚠️ There ${many ? "are" : "is"} ${parts.join(" and ")}. ${many ? "They'll" : "It'll"} be lost ${when} ` +
+    `unless someone ${unsaved.dirty ? "commits and pushes" : "pushes"} ${many ? "them" : "it"} or picks this ` +
+    `session back up.`
+  );
+}
+
+function idleWarningNotice(idleMs: number, stopInMs: number): string {
+  return (
+    `*This thread has been quiet for ${spanLabel(idleMs)}.* I'll stop this session in ${spanLabel(stopInMs)} ` +
+    `to free up space. A message here from an architect or a member of this thread keeps it going.`
+  );
+}
+
+/**
+ * Posted when a session stops, by an architect or for being idle. It is the last
+ * thing the thread hears, because replies to a stopped thread are ignored, so it
+ * carries the whole story: when everything is deleted and what that loses.
+ */
+function stopNotice(opts: {
+  idleMs: number | null;
+  wasStopped: boolean;
+  cleanupAt: number | null;
+  now: number;
+  unsaved: UnsavedWork | null;
+}): string {
+  const head = opts.idleMs !== null
+    ? `*This session stopped after ${spanLabel(opts.idleMs)} with no activity. I won't see replies here.*`
+    : opts.wasStopped
+      ? `*This session is stopped. I won't see replies here.*`
+      : `*Session stopped. I won't see replies here.*`;
+  if (opts.cleanupAt === null) {
+    return [
+      head,
+      `• The conversation and the code are kept until an architect types \`@Condotto stop clean\`.`,
+      `To pick up where you left off, an architect can type \`@Condotto assign\`.`,
+    ].join("\n");
+  }
+  const when = whenLabel(opts.cleanupAt, opts.now);
+  return [
+    head,
+    `• The code and the conversation are kept ${keptLabel(opts.cleanupAt, opts.now)}, then deleted.`,
+    unsavedLine(opts.unsaved, when),
+    `To pick up where you left off before then, an architect can type \`@Condotto assign\`.`,
+  ].join("\n");
+}
+
+/** One-time notice to a session stopped before stops had a deletion date. */
+function datedNotice(keepMs: number, cleanupAt: number, now: number, unsaved: UnsavedWork | null): string {
+  const when = whenLabel(cleanupAt, now);
+  return [
+    `*Stopped sessions are now deleted ${spanLabel(keepMs)} after they stop.* This one's code and ` +
+      `conversation will be deleted ${when}.`,
+    unsavedLine(unsaved, when),
+    `To keep it, an architect can type \`@Condotto assign\` before then.`,
+  ].join("\n");
+}
+
+const KEPT_NOTICE =
+  `*Never mind, I'm keeping this session.* Someone spoke here just as I was stopping it, so it stays ` +
+  `open and I'm still listening.`;
+
+/**
+ * How long the sweep keeps retrying a notice to a thread it cannot post to (an
+ * archived channel, the bot removed) before going ahead without it. Fixed, not
+ * the keep window: how long to keep stopped work and how long to wait on an
+ * unreachable thread are different questions.
+ */
+const UNREACHABLE_GIVE_UP_MS = 7 * DAY_MS;
+
+/** How a thread finds the settings and commands, which `@Condotto help` lists in full. */
+const HELP_POINTER = "Say `@Condotto help` for settings and commands.";
+
+const CLEANED_NOTICE =
+  `*This session has been cleaned up.* Its code and conversation are deleted; anything that was pushed ` +
+  `is safe in the repo. An architect can type \`@Condotto assign\` to start fresh.`;
 
 export class SessionManager {
   private surfaces = new Map<string, SurfaceAdapter>();
@@ -488,7 +645,11 @@ export class SessionManager {
   private readonly defaultSubagents: boolean;
   private readonly defaultWorkflows: boolean;
   private readonly worktreeRetentionMs: number;
+  private readonly idleWarnMs: number;
+  private readonly idleStopMs: number;
+  private readonly keepStoppedMs: number;
   private readonly orphanMinAgeMs: number;
+  private readonly sweepWaitMs: number;
   private readonly turnSlots: Semaphore;
   /** Daemon start time for the operator-status uptime. */
   private readonly startedAt: number;
@@ -517,7 +678,11 @@ export class SessionManager {
     // 24h default: long enough that a hasty `stop clean` can still be recovered
     // (re-assign the thread), short enough to reclaim disk on a real cadence.
     this.worktreeRetentionMs = opts.worktreeRetentionMs ?? 24 * 60 * 60 * 1000;
+    this.idleWarnMs = opts.idleWarnMs ?? DEFAULT_IDLE_WARN_HOURS * HOUR_MS;
+    this.idleStopMs = opts.idleStopMs ?? DEFAULT_IDLE_STOP_HOURS * HOUR_MS;
+    this.keepStoppedMs = opts.keepStoppedMs ?? DEFAULT_KEEP_STOPPED_DAYS * 24 * HOUR_MS;
     this.orphanMinAgeMs = opts.orphanMinAgeMs ?? 10 * 60 * 1000;
+    this.sweepWaitMs = opts.sweepWaitMs ?? 2 * 60 * 1000;
     this.turnSlots = new Semaphore(Math.max(1, opts.maxConcurrentTurns ?? DEFAULT_MAX_CONCURRENT_TURNS));
     this.memory = opts.memory;
     this.startedAt = opts.startedAt ?? Date.now();
@@ -531,6 +696,10 @@ export class SessionManager {
     return threadCommandHelp({
       runtimeGrants: this.runtimeGrants,
       remoteControl: this.harness.capabilities.remoteControl && this.remoteControlRefusal === undefined,
+      keepStopped:
+        this.keepStoppedMs > 0
+          ? `it can be resumed for ${spanLabel(this.keepStoppedMs)}, then it is deleted`
+          : "it can be resumed later",
     });
   }
 
@@ -616,10 +785,10 @@ export class SessionManager {
   }
 
   /**
-   * A settings announcement posted when Condotto joins (or rejoins) a thread —
-   * like Claude Code's startup banner. Lists EVERY setting, including the
-   * ones that are off, so the current posture is unambiguous at a glance. The
-   * repo row supplies trust + the test command.
+   * The settings `@Condotto help` shows — like Claude Code's startup banner.
+   * Lists EVERY setting, including the ones that are off, so the current posture
+   * is unambiguous at a glance. Joining a thread posts only a short pointer here,
+   * so a new thread isn't opened with a wall of text.
    */
   private settingsBlock(session: SessionRow, repo: RepoRow | null): string {
     const subagents = session.subagents === 1;
@@ -794,6 +963,23 @@ export class SessionManager {
   private async handleCommand(
     event: Extract<InboundEvent, { kind: "command" }>,
   ): Promise<void> {
+    // A command from someone we hear counts as activity in a live thread, so the
+    // idle sweep never warns a thread people are steering. A stopped one stays as
+    // it is; reactivation touches it itself.
+    const live = event.conv.conversationId
+      ? this.store.getSessionByConversation(event.conv.surfaceId, event.conv.conversationId)
+      : null;
+    // Not `stop`: an architect stopping the thread is not a reason to keep it, and
+    // the touch would make an idle stop already in progress back off and say it is
+    // keeping the session just before this stop lands.
+    if (
+      live &&
+      live.status !== "stopped" &&
+      event.name !== "stop" &&
+      this.hears(principalKey(event.author), event.conv.channelId, live.id)
+    ) {
+      this.store.touchSession(live.id);
+    }
     switch (event.name) {
       case "assign":
         await this.assign(event.conv, event.author, event.args);
@@ -894,7 +1080,7 @@ export class SessionManager {
           return;
         }
       }
-      // One conversation -> one session, forever: re-assignment reactivates.
+      // One conversation -> one session until it is deleted: re-assignment reactivates.
       // Serialize through the FIFO so it cannot overlap an in-flight turn.
       const entry = this.entryFor(existing.id);
       entry.chain = entry.chain.then(async () => {
@@ -912,9 +1098,11 @@ export class SessionManager {
           return;
         }
         this.store.updateSessionStatus(existing.id, "parked");
-        // A clean-stopped session being reactivated cancels its scheduled teardown
-        // — the worktree lives on for the resumed work (journey 6).
+        // Reactivation cancels the scheduled deletion — the worktree lives on for
+        // the resumed work (journey 6) — and restarts the idle clock, or the next
+        // sweep would find it already quiet past the warning.
         this.store.clearSessionCleanup(existing.id);
+        this.store.touchSession(existing.id);
         this.store.audit({
           sessionId: existing.id,
           actor: principalKey(author),
@@ -929,11 +1117,12 @@ export class SessionManager {
             // and so does the adapter's own self-heal when a session can't be resumed.
             // Claiming context we don't have is the one thing this line must not do.
             (cur.harness_session_handle !== null
-              ? `I still have the prior context.\n`
-              : `I don't have the prior conversation, so re-state what you need.\n`) +
-            this.settingsBlock(existing, this.store.getRepo(existing.repo_id)) +
-            `\n\n` +
-            this.commandHelp(),
+              ? `I still have the prior context. `
+              : `I don't have the prior conversation, so re-state what you need. `) +
+            HELP_POINTER +
+            // The one setting worth repeating here: a thread back in plan mode
+            // would otherwise refuse every change with nobody knowing why.
+            (cur.plan_mode === 1 ? `\n📋 Plan mode is still on: I'll propose a plan and change nothing until it's off.` : ""),
         });
       });
       await entry.chain;
@@ -1063,15 +1252,8 @@ export class SessionManager {
     });
     await surface.post(conv, {
       text:
-        `I'm on it — repo \`${repo.name}\`${workdir ? `, sub-project \`${workdir}\`` : ""}, ` +
-        `branch \`${worktree.branch}\`.\n` +
-        this.settingsBlock(session, repo) +
-        `\n\n` +
-        `Reply in this thread to talk. An architect's message sets me working — edits ` +
-        `and commands just run, inside this worktree. I also hear thread members ` +
-        `(\`@Condotto member @user\`): theirs is carried into the next architect turn. ` +
-        `Nobody else is heard.\n\n` +
-        this.commandHelp(),
+        `I'm on it: repo \`${repo.name}\`${workdir ? `, sub-project \`${workdir}\`` : ""}, ` +
+        `branch \`${worktree.branch}\`. Reply here to talk. ${HELP_POINTER}`,
     });
   }
 
@@ -1117,7 +1299,26 @@ export class SessionManager {
           `branch \`${session.branch}\`.\n` +
           this.settingsBlock(session, this.store.getRepo(session.repo_id)) +
           `\n\n` +
+          `Reply in this thread to talk. An architect's message sets me working — edits ` +
+          `and commands just run, inside this worktree. I also hear thread members ` +
+          `(\`@Condotto member @user\`): theirs is carried into the next architect turn. ` +
+          `Nobody else is heard.\n\n` +
           this.commandHelp(),
+      });
+      return;
+    }
+    // A stopped session is still this thread's until it is deleted, and resumable;
+    // offering repo buttons would say it was never assigned (and `assign` refuses
+    // to re-point it anyway).
+    if (session) {
+      const at = session.cleanup_at === null ? null : new Date(session.cleanup_at).getTime();
+      await surface.post(conv, {
+        text:
+          `*This session is stopped, so I'm not listening here.* ` +
+          (at === null
+            ? `Its code and conversation are kept until an architect types \`@Condotto stop clean\`. `
+            : `Its code and conversation are kept ${keptLabel(at, Date.now())}, then deleted. `) +
+          `An architect can type \`@Condotto assign\` to pick it back up.`,
       });
       return;
     }
@@ -1226,7 +1427,7 @@ export class SessionManager {
       `${slots.active}/${slots.max}${slots.waiting ? ` (${slots.waiting} queued for a slot)` : ""}`;
     return [
       `🛰️ *Condotto operator status* — daemon-wide`,
-      `• uptime ${formatDuration(now - this.startedAt)}`,
+      `• uptime ${durationLabel(now - this.startedAt, "compact")}`,
       `• sessions: *${active}* active · *${parked}* parked · ${stopped} stopped`,
       `• turns in flight: *${inFlight}*`,
       `• config: default model \`${this.defaultModel}\` · effort \`${this.defaultEffort}\` · ` +
@@ -1247,17 +1448,16 @@ export class SessionManager {
     const list = this.renderChannelSessions(channelId);
     const how =
       "To stop one, open its thread and mention `@Condotto stop` " +
-      "(or `@Condotto stop clean` to also discard its worktree).";
+      "(or `@Condotto stop clean` to delete it sooner).";
     return list
       ? `${list}\n\n${how}`
       : "No active sessions in this channel. Start one with `/condotto assign <repo>`.";
   }
 
   /**
-   * `@Condotto stop [clean]` (architect-only). Plain `stop`
-   * ends the session but KEEPS its worktree for reactivation (journey 6 /  j5);
-   * `stop clean` additionally schedules the worktree for teardown a retention
-   * interval later — a grace window in which a re-assign still recovers it.
+   * `@Condotto stop [clean]` (architect-only). Every stop dates the session for
+   * deletion: plain `stop` keeps it `keepStoppedMs` so it can be resumed, `stop
+   * clean` only the shorter retention window. Re-assigning before then resumes it.
    */
   private async stopSession(conv: ConversationRef, author: Principal, args: string): Promise<void> {
     const surface = this.surfaceFor(conv);
@@ -1273,23 +1473,65 @@ export class SessionManager {
       return;
     }
     const clean = args.trim().toLowerCase() === "clean";
-    const wasStopped = session.status === "stopped";
-    // Already stopped: a plain re-stop is a no-op, but `stop clean` can STILL
-    // schedule teardown of the still-preserved worktree — so an architect who
-    // plain-stopped can reclaim the disk later without re-assigning (this is the
-    // recovery action the plain-stop message advertises; review 2026-07-19).
-    if (wasStopped && !clean) {
+    const now = Date.now();
+    // Already stopped: a plain re-stop changes nothing, but `stop clean` can still
+    // bring the deletion forward (never push it back), and a session stopped before
+    // stops were dated gets its date now rather than at the next sweep.
+    const undated = session.cleanup_at === null && this.keepStoppedMs > 0;
+    if (session.status === "stopped" && !clean && !undated) {
+      const at = session.cleanup_at === null ? null : new Date(session.cleanup_at).getTime();
       await surface.post(conv, {
         text:
-          `This session is already stopped — its worktree is preserved. ` +
-          `\`@Condotto stop clean\` to discard it, or re-assign this thread to resume.`,
+          `This session is already stopped. ` +
+          (at === null
+            ? `Its conversation and code are kept until an architect types \`@Condotto stop clean\`. `
+            : `Its conversation and code will be deleted ${whenLabel(at, now)}. `) +
+          `An architect can type \`@Condotto assign\` to resume it` +
+          (at === null ? "." : `, or \`@Condotto stop clean\` to delete it sooner.`),
       });
       return;
     }
+    await this.stopNow(session, principalKey(author), { clean, now });
+  }
+
+  /** When a stop made now would be deleted: null = kept until `stop clean`. */
+  private cleanupDate(clean: boolean, now: number): number | null {
+    // `stop clean` always has a date, and never a later one than a plain stop
+    // would get. Otherwise a zero keep window means kept until `stop clean`.
+    if (clean) {
+      return now + (this.keepStoppedMs > 0 ? Math.min(this.worktreeRetentionMs, this.keepStoppedMs) : this.worktreeRetentionMs);
+    }
+    return this.keepStoppedMs > 0 ? now + this.keepStoppedMs : null;
+  }
+
+  /**
+   * An architect's `stop`: takes effect at once — stop publishing, mark stopped,
+   * drop the harness, date the deletion — and only then checks for unsaved work
+   * and tells the thread (`stopNotice`), best-effort. Nothing slow sits between
+   * the command and the stop, so the session can't keep taking turns after it.
+   *
+   * Does not wait for the FIFO: the stop must land even mid-turn (in-flight output
+   * may still arrive). The live entry and its FIFO are kept — deleting mid-turn
+   * would let a later reactivation start a second concurrent turn.
+   */
+  private async stopNow(session: SessionRow, actor: string, opts: { clean: boolean; now: number }): Promise<void> {
+    const conv = this.convOf(session);
+    const wasStopped = session.status === "stopped";
+    const cleanupAt = this.cleanupDate(opts.clean, opts.now);
+    // Re-stopping a stopped session can only bring its deletion forward. A fresh
+    // stop owns its date outright, whatever a stale row might carry.
+    if (wasStopped && session.cleanup_at !== null) {
+      const existing = new Date(session.cleanup_at).getTime();
+      if (cleanupAt === null || existing <= cleanupAt) {
+        await this.surfaceFor(conv).post(conv, {
+          text:
+            `This session is already set to be deleted ${whenLabel(existing, opts.now)}. ` +
+            `An architect can type \`@Condotto assign\` to resume it before then.`,
+        });
+        return;
+      }
+    }
     if (!wasStopped) {
-      // Mark stopped immediately (in-flight turn output may still land), but keep
-      // the live entry and its FIFO — deleting mid-turn would let a later
-      // reactivation start a second concurrent turn on the same session.
       // Stop publishing BEFORE dropping the harness: the bridge is reachable through
       // it, and a dropped reference would leave the thread drivable from a phone after
       // this surface was told it had stopped.
@@ -1298,33 +1540,148 @@ export class SessionManager {
       const entry = this.live.get(session.id);
       if (entry) entry.harness = null;
     }
-    if (clean) {
-      const cleanupAt = new Date(Date.now() + this.worktreeRetentionMs).toISOString();
-      this.store.markSessionForCleanup(session.id, cleanupAt);
-      this.store.audit({
-        sessionId: session.id,
-        actor: principalKey(author),
-        event: "session_stopped",
-        detail: { clean: true, cleanupAt, ...(wasStopped ? { alreadyStopped: true } : {}) },
-      });
-      await surface.post(conv, {
-        text:
-          `${wasStopped ? "Worktree marked for cleanup" : "Session stopped and marked for cleanup"} — ` +
-          `I'll remove the worktree and branch \`${session.branch}\` after ${this.retentionLabel()}. ` +
-          `Re-assign this thread before then (\`@Condotto assign ${session.repo_id}\`) to keep it.`,
-      });
-    } else {
-      this.store.audit({
-        sessionId: session.id,
-        actor: principalKey(author),
-        event: "session_stopped",
-      });
-      await surface.post(conv, {
-        text:
-          `Session stopped. Worktree preserved at ${session.worktree_path} — re-assign this ` +
-          `thread anytime to resume, or \`@Condotto stop clean\` to discard it.`,
-      });
+    // A fresh stop owns its date outright; marking never pushes an existing one back.
+    if (!wasStopped || cleanupAt === null) this.store.clearSessionCleanup(session.id);
+    if (cleanupAt !== null) this.store.markSessionForCleanup(session.id, new Date(cleanupAt).toISOString());
+    const unsaved = cleanupAt === null ? null : await this.unsavedWork(session);
+    this.store.audit({
+      sessionId: session.id,
+      actor,
+      event: "session_stopped",
+      detail: {
+        reason: "manual",
+        clean: opts.clean,
+        cleanupAt: cleanupAt === null ? null : new Date(cleanupAt).toISOString(),
+        unsaved,
+        ...(wasStopped ? { alreadyStopped: true } : {}),
+      },
+    });
+    // A reactivation may have landed during the check; then this notice is stale.
+    if (this.store.getSession(session.id)?.status !== "stopped") return;
+    await this.surfaceFor(conv)
+      .post(conv, { text: stopNotice({ idleMs: null, wasStopped, cleanupAt, now: opts.now, unsaved }) })
+      .catch((e) => this.log(`[session ${session.id}] stop notice failed: ${e}`));
+  }
+
+  /**
+   * The idle sweep's stop, run inside the session's FIFO. The thread is told
+   * FIRST (`tell`: posted, or unreachable past the give-up window), and only then
+   * is the session stopped — by one conditional update that fails if anyone spoke
+   * or an architect stopped it in the meantime. If a reply won that race the
+   * thread gets a short "keeping it" follow-up, so the notice it just saw is not
+   * the last word. Returns whether it stopped.
+   */
+  private async stopIdle(s: SessionRow, now: number): Promise<boolean> {
+    const conv = this.convOf(s);
+    const cleanupAt = this.cleanupDate(false, now);
+    const unsaved = cleanupAt === null ? null : await this.unsavedWork(s);
+    const before = this.store.getSession(s.id);
+    if (before?.status !== "parked" || before.last_active_at !== s.last_active_at) return false;
+    const text = stopNotice({
+      idleMs: now - new Date(s.last_active_at).getTime(),
+      wasStopped: false,
+      cleanupAt,
+      now,
+      unsaved,
+    });
+    if (!(await this.tell(s, text, now))) return false;
+    if (!this.store.stopIfIdle(s.id, s.last_active_at)) {
+      if (this.store.getSession(s.id)?.status === "parked") {
+        await this.surfaceFor(conv)
+          .post(conv, { text: KEPT_NOTICE })
+          .catch((e) => this.log(`[idle] keep notice for session ${s.id} failed: ${e}`));
+      }
+      return false;
     }
+    if (s.remote_control) await this.stopPublishing(s, "session_stopped");
+    const entry = this.live.get(s.id);
+    if (entry) entry.harness = null;
+    if (cleanupAt !== null) this.store.markSessionForCleanup(s.id, new Date(cleanupAt).toISOString());
+    this.store.audit({
+      sessionId: s.id,
+      actor: "system",
+      event: "session_stopped",
+      detail: {
+        reason: "idle",
+        clean: false,
+        cleanupAt: cleanupAt === null ? null : new Date(cleanupAt).toISOString(),
+        unsaved,
+      },
+    });
+    return true;
+  }
+
+  /**
+   * Post one of the sweep's notices. True when it posted, so the sweep may act.
+   * On failure the thread's failure clock starts (or keeps running) and this is
+   * false, so the sweep retries next hour — until the thread has been unreachable
+   * for `UNREACHABLE_GIVE_UP_MS`, when it gives up and returns true: an archived
+   * channel or a removed bot must not keep a worktree forever, and nobody can read
+   * that thread anyway.
+   */
+  private async tell(session: SessionRow, text: string, now: number): Promise<boolean> {
+    try {
+      await this.surfaceFor(this.convOf(session)).post(this.convOf(session), { text });
+      this.store.clearNoticeFailed(session.id);
+      return true;
+    } catch (e) {
+      const since = this.store.noteNoticeFailed(session.id, new Date(now).toISOString());
+      const giveUp = new Date(since).getTime() <= now - UNREACHABLE_GIVE_UP_MS;
+      this.log(
+        `[idle] notice to session ${session.id} failed (${e}); ` +
+          (giveUp ? `unreachable since ${since}, going ahead without it` : "will retry"),
+      );
+      if (giveUp) this.store.audit({ sessionId: session.id, actor: "system", event: "notice_skipped", detail: { since } });
+      return giveUp;
+    }
+  }
+
+  /**
+   * Run `fn` in this session's FIFO, after any turn, stop or reactivation already
+   * queued, but wait at most `sweepWaitMs` for it. One session busy with a long
+   * turn must not hold up the sweep for every other thread, so past that the sweep
+   * moves on and `fn` runs whenever the session frees up. That is safe because every
+   * sweep step re-reads its row inside `fn` and acts only if it still qualifies.
+   *
+   * The live entry is never removed here, even one created just for this: a message
+   * may already hold it across an await, and dropping it would give the session a
+   * second FIFO. Entries go when the GC deletes the session. Errors are logged.
+   */
+  private async serialized(sessionId: string, label: string, fn: () => Promise<void>): Promise<void> {
+    const entry = this.entryFor(sessionId);
+    const link = entry.chain.then(fn).catch((e) => this.log(`[${label}] session ${sessionId}: ${e}`));
+    entry.chain = link;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const finished = await Promise.race([
+      link.then(() => true),
+      new Promise<boolean>((resolve) => {
+        timer = setTimeout(() => resolve(false), this.sweepWaitMs);
+      }),
+    ]);
+    clearTimeout(timer);
+    if (!finished) this.log(`[${label}] session ${sessionId} is busy; its step will run when it frees up`);
+  }
+
+  /** Delete the transcript the harness keeps for this session's handle. Never throws. */
+  private async forgetTranscript(s: SessionRow): Promise<void> {
+    if (s.harness_session_handle === null) return;
+    await this.harness
+      .forget?.(s.harness_session_handle, sessionCwd(s.worktree_path, s.workdir))
+      .catch((e) => this.log(`[session ${s.id}] forgetting the transcript failed: ${e}`));
+  }
+
+  /** What deleting this session's tree would lose. Never throws; null = unknown. */
+  private async unsavedWork(session: SessionRow): Promise<UnsavedWork | null> {
+    const repo = this.store.getRepo(session.repo_id);
+    if (!repo) return null;
+    return this.worktrees
+      .unsavedWork({ sessionId: session.id, branch: session.branch, defaultBranch: repo.default_branch })
+      .catch(() => null);
+  }
+
+  /** The thread a session lives in, rebuilt from its row. */
+  private convOf(session: SessionRow): ConversationRef {
+    return { surfaceId: session.surface_id, channelId: session.channel_id, conversationId: session.conversation_id };
   }
 
   /**
@@ -1432,6 +1789,8 @@ export class SessionManager {
         // Durable write first: a crash between the two leaves a cleared session
         // rather than a resurrectable one.
         this.store.clearSessionHandle(s.id);
+        // "Forget" means forget: the old transcript goes too, not just our pointer.
+        await this.forgetTranscript(s);
         // Then the cache — getOrAttachHarness returns `entry.harness` before it ever
         // looks at the handle, so the row alone would not clear a warm session. Null
         // the harness but KEEP the entry: deleting it drops the FIFO chain.
@@ -1496,40 +1855,30 @@ export class SessionManager {
     await entry.chain;
   }
 
-  /** Human label for the worktree retention window (stop-clean messaging). */
-  private retentionLabel(): string {
-    const hours = this.worktreeRetentionMs / 3_600_000;
-    if (hours >= 1) {
-      const h = Number.isInteger(hours) ? hours : Number(hours.toFixed(1));
-      return `${h} hour${h === 1 ? "" : "s"}`;
-    }
-    const mins = Math.max(1, Math.round(this.worktreeRetentionMs / 60_000));
-    return `${mins} minute${mins === 1 ? "" : "s"}`;
-  }
-
   /**
-   * Worktree garbage collection). Reclaims disk from
-   * worktrees no longer bound to a live or parked session, and NEVER touches one
-   * that is — the park-and-resume invariant. Two collection targets:
+   * Worktree garbage collection. Reclaims disk from worktrees no longer bound to a
+   * live or parked session, and NEVER touches one that is — the park-and-resume
+   * invariant. Two collection targets:
    *
-   *   1. **Clean-stopped, past retention** — a session explicitly ended with
-   *      `@Condotto stop clean` whose grace window has elapsed. Remove its worktree
-   *      + branch, then discard the (deliberately abandoned) session row. Serialized
-   *      through the per-session FIFO and re-read there, so a teardown can never race
-   *      an in-flight turn or a reactivation that just cancelled the cleanup.
+   *   1. **Stopped, past their deletion date** — every stop dates the session
+   *      (`cleanup_at`). Remove its worktree + branch and its transcript, discard
+   *      the session row, then tell the thread: afterwards it is one Condotto was
+   *      never part of.
+   *      Serialized through the per-session FIFO and re-read there, so a teardown can
+   *      never race an in-flight turn or a reactivation that just cancelled it.
    *   2. **Orphan directories** — a worktree dir with no session row at all: the
    *      assign-race leak's backstop, plus any tree stranded by a crash between
    *      `git worktree add` and the DB insert. No row ⇒ no turns ⇒ no FIFO needed.
    *
-   * A plain `stop` (cleanup_at NULL) is invisible here — its worktree is kept for
-   * reactivation (journey 6). Idempotent and best-effort (one bad tree never aborts
-   * the sweep); safe to call at boot and on a timer. `now` is injectable for tests;
-   * `opts.orphanMinAgeMs` overrides the orphan grace per call (the daemon's boot
-   * sweep passes 0 — no surface is live yet, so no assign can be mid-flight).
+   * Idempotent and best-effort (one bad tree never aborts the sweep); safe to call
+   * at boot and on a timer. `now` is injectable for tests; `opts.orphanMinAgeMs`
+   * overrides the orphan grace per call (the daemon's boot sweep passes 0 — no
+   * surface is live yet, so no assign can be mid-flight). `opts.sessions: false`
+   * skips (1), which the boot sweep needs because (1) posts to the thread.
    */
   async collectWorktrees(
     now: number = Date.now(),
-    opts: { orphanMinAgeMs?: number } = {},
+    opts: { orphanMinAgeMs?: number; sessions?: boolean } = {},
   ): Promise<{ cleaned: number; orphans: number }> {
     const repos = this.store.listRepos();
     const allRepoPaths = repos.map((r) => r.path);
@@ -1537,38 +1886,45 @@ export class SessionManager {
     let cleaned = 0;
     let orphans = 0;
 
-    // (1) Clean-stopped sessions past their retention interval.
-    for (const due of this.store.sessionsDueForCleanup(new Date(now).toISOString())) {
-      const entry = this.entryFor(due.id);
-      entry.chain = entry.chain
-        .then(async () => {
-          // Re-read inside the FIFO: a reactivation may have landed and cleared
-          // cleanup_at (or an earlier sweep already collected it).
-          const s = this.store.getSession(due.id);
-          if (s?.status !== "stopped" || s.cleanup_at === null) return;
-          if (new Date(s.cleanup_at).getTime() > now) return; // window pushed out
-          const repo = this.store.getRepo(s.repo_id);
-          // A stopped session should already be unpublished, but the worktree is about
-          // to be deleted underneath it — so prove it rather than assume it. This is
-          // the last point at which anything can reach the bridge.
-          if (s.remote_control) await this.stopPublishing(s, "worktree_collected");
-          const res = await this.worktrees.remove({
-            repoPaths: repo ? [repo.path] : allRepoPaths,
-            sessionId: s.id,
-            branch: s.branch,
-          });
-          this.store.deleteSession(s.id);
-          this.live.delete(s.id);
-          this.store.audit({
-            sessionId: s.id,
-            actor: "system",
-            event: "worktree_cleaned",
-            detail: { branch: s.branch, worktree: s.worktree_path, removed: res.removed },
-          });
-          cleaned++;
-        })
-        .catch((e) => this.log(`[gc] cleanup of session ${due.id} failed: ${e}`));
-      await entry.chain;
+    // (1) Stopped sessions past their deletion date.
+    const due = opts.sessions === false ? [] : this.store.sessionsDueForCleanup(new Date(now).toISOString());
+    for (const d of due) {
+      await this.serialized(d.id, "gc", async () => {
+        // Re-read inside the FIFO: a reactivation may have landed and cleared
+        // cleanup_at (or an earlier sweep already collected it).
+        const s = this.store.getSession(d.id);
+        if (s?.status !== "stopped" || s.cleanup_at === null) return;
+        if (new Date(s.cleanup_at).getTime() > now) return; // window pushed out
+        const repo = this.store.getRepo(s.repo_id);
+        // A stopped session should already be unpublished, but the worktree is about
+        // to be deleted underneath it — so prove it rather than assume it. This is
+        // the last point at which anything can reach the bridge.
+        if (s.remote_control) await this.stopPublishing(s, "worktree_collected");
+        // The conversation goes with the code. First, while the cwd still exists:
+        // the harness may locate the transcript by it.
+        await this.forgetTranscript(s);
+        const res = await this.worktrees.remove({
+          repoPaths: repo ? [repo.path] : allRepoPaths,
+          sessionId: s.id,
+          branch: s.branch,
+        });
+        this.store.deleteSession(s.id);
+        this.live.delete(s.id);
+        this.store.audit({
+          sessionId: s.id,
+          actor: "system",
+          event: "worktree_cleaned",
+          detail: { branch: s.branch, worktree: s.worktree_path, removed: res.removed },
+        });
+        cleaned++;
+        // Said once it is true, best-effort, and never retried: the row is gone,
+        // and the stop notice already gave the date. Posting before the deletion
+        // would repeat every hour if the deletion kept failing.
+        await this.surfaces
+          .get(s.surface_id)
+          ?.post(this.convOf(s), { text: CLEANED_NOTICE })
+          .catch((e) => this.log(`[gc] cleanup notice for session ${s.id} failed: ${e}`));
+      });
     }
 
     // (2) Orphan directories with no session row.
@@ -1591,9 +1947,101 @@ export class SessionManager {
     }
 
     if (cleaned || orphans) {
-      this.log(`[gc] worktree cleanup: ${cleaned} clean-stopped, ${orphans} orphan(s) removed`);
+      this.log(`[gc] worktree cleanup: ${cleaned} stopped, ${orphans} orphan(s) removed`);
     }
     return { cleaned, orphans };
+  }
+
+  /**
+   * Idle auto-cleanup, run on the GC timer. Three passes, each best-effort per
+   * session:
+   *
+   *   1. **Warn** a parked thread quiet for `idleWarnMs`, once per quiet spell
+   *      (`touchSession` clears the mark, so any activity re-arms it).
+   *   2. **Stop** a thread quiet for `idleStopMs` — but only once its warning is
+   *      at least `idleStopMs - idleWarnMs` old. After a long daemon outage both
+   *      thresholds pass at once, and this is what still gives the thread its full
+   *      warning before it stops.
+   *   3. **Date** any stopped session that has no deletion date (stopped before
+   *      stops were dated), with a one-time notice. Every stop dates its session
+   *      now, so this pass drains itself.
+   *
+   * Only parked sessions are ever warned or stopped: an active one has a turn
+   * running, which is never idle. `now` is injectable for tests. The counts it
+   * returns leave out steps deferred behind a busy session (see `serialized`).
+   */
+  async sweepIdle(now: number = Date.now()): Promise<{ warned: number; stopped: number; dated: number }> {
+    let warned = 0;
+    let stopped = 0;
+    let dated = 0;
+    const iso = (ms: number) => new Date(ms).toISOString();
+    // The time a step actually runs, on the sweep's (injectable) clock: a step
+    // `serialized` deferred behind a busy session runs later than the sweep began,
+    // and dates and "warned at" must reflect when it really happened.
+    const started = Date.now();
+    const at = () => now + (Date.now() - started);
+
+    // Every pass re-reads its session inside the FIFO and acts only if the row
+    // still qualifies: a reply, turn, stop or reactivation may have landed since
+    // the query, and acting on the stale snapshot is how a thread that just woke
+    // up would get warned, stopped or dated.
+    if (this.idleStopMs > 0) {
+      const warnCutoff = iso(now - this.idleWarnMs);
+      for (const candidate of this.store.sessionsIdleSince(warnCutoff)) {
+        if (candidate.idle_warned_at !== null) continue;
+        await this.serialized(candidate.id, "idle", async () => {
+          const s = this.store.getSession(candidate.id);
+          if (s?.status !== "parked" || s.idle_warned_at !== null || s.last_active_at > warnCutoff) return;
+          const quietMs = at() - new Date(s.last_active_at).getTime();
+          if (!(await this.tell(s, idleWarningNotice(quietMs, this.idleStopMs - this.idleWarnMs), at()))) return;
+          // Only if nothing happened while the notice was posting: activity
+          // touches the row outside the FIFO, and its reset must win.
+          if (!this.store.markIdleWarned(s.id, iso(at()), s.last_active_at)) return;
+          this.store.audit({ sessionId: s.id, actor: "system", event: "idle_warned" });
+          warned++;
+        });
+      }
+
+      const stopCutoff = iso(now - this.idleStopMs);
+      const warnedBy = iso(now - (this.idleStopMs - this.idleWarnMs));
+      for (const candidate of this.store.sessionsIdleSince(stopCutoff)) {
+        if (candidate.idle_warned_at === null || candidate.idle_warned_at > warnedBy) continue;
+        await this.serialized(candidate.id, "idle", async () => {
+          const s = this.store.getSession(candidate.id);
+          if (s?.status !== "parked" || s.last_active_at > stopCutoff) return;
+          if (s.idle_warned_at === null || s.idle_warned_at > warnedBy) return;
+          if (await this.stopIdle(s, at())) stopped++;
+        });
+      }
+    }
+
+    if (this.keepStoppedMs > 0) {
+      for (const candidate of this.store.stoppedWithoutCleanup()) {
+        await this.serialized(candidate.id, "idle", async () => {
+          const s = this.store.getSession(candidate.id);
+          if (s?.status !== "stopped" || s.cleanup_at !== null) return;
+          // Told first, dated second: a thread whose notice failed to post stays
+          // undated and is retried next sweep (see `tell`).
+          const stepNow = at();
+          const cleanupAt = stepNow + this.keepStoppedMs;
+          const unsaved = await this.unsavedWork(s);
+          if (!(await this.tell(s, datedNotice(this.keepStoppedMs, cleanupAt, stepNow, unsaved), stepNow))) return;
+          this.store.markSessionForCleanup(s.id, iso(cleanupAt));
+          this.store.audit({
+            sessionId: s.id,
+            actor: "system",
+            event: "cleanup_scheduled",
+            detail: { cleanupAt: iso(cleanupAt), unsaved },
+          });
+          dated++;
+        });
+      }
+    }
+
+    if (warned || stopped || dated) {
+      this.log(`[idle] ${warned} warned, ${stopped} stopped, ${dated} stopped session(s) given a deletion date`);
+    }
+    return { warned, stopped, dated };
   }
 
   /**
@@ -2615,6 +3063,8 @@ export class SessionManager {
       }
       return;
     }
+    // Someone we hear spoke: the thread is not idle (see `sweepIdle`).
+    this.store.touchSession(session.id);
 
     // Files land in the worktree BEFORE the message is framed, and for a held
     // message too: the file has to be on disk by the time the architect's next

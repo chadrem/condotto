@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { EventEmitter } from "node:events";
-import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import {
@@ -970,5 +970,71 @@ describe("claude-code adapter: remote control under api_key auth", () => {
     const on = await session.setRemoteControl!(true, { name: "t", sink });
     expect(on.ok).toBe(false);
     if (!on.ok) expect(on.reason).toMatch(/API key/);
+  });
+});
+
+describe("forget: deleting a session's transcript", () => {
+  const ID_ = "0b9f3c2e-1d4a-4c8e-9f00-123456789abc";
+  const handle = { v: 1, sessionId: ID_ };
+
+  test("default mode asks the SDK for the session's own project directory", async () => {
+    const calls: { id: string; dir?: string }[] = [];
+    const adapter = new ClaudeCodeAdapter(undefined, undefined, undefined, undefined, async (id, o) => {
+      calls.push({ id, dir: o?.dir });
+    });
+    await adapter.forget(handle, "/work/tree");
+    expect(calls).toEqual([{ id: ID_, dir: "/work/tree" }]);
+  });
+
+  test("falls back to the SDK's search of every project directory, and never throws", async () => {
+    const calls: (string | undefined)[] = [];
+    const adapter = new ClaudeCodeAdapter(undefined, undefined, undefined, undefined, async (_id, o) => {
+      calls.push(o?.dir);
+      throw new Error("not found");
+    });
+    await adapter.forget(handle, "/work/tree");
+    expect(calls).toEqual(["/work/tree", undefined]);
+  });
+
+  test("a handle with no session, a bad handle, or a non-UUID id deletes nothing", async () => {
+    let calls = 0;
+    const adapter = new ClaudeCodeAdapter(undefined, undefined, undefined, undefined, async () => {
+      calls++;
+    });
+    await adapter.forget({ v: 1, sessionId: null }, "/w");
+    await adapter.forget({ v: 9 }, "/w");
+    await adapter.forget({ v: 1, sessionId: "../../etc" }, "/w");
+    expect(calls).toBe(0);
+  });
+
+  test("sandbox mode finds and removes the transcript through the agent's tree IO, touching nothing else", async () => {
+    const home = mkdtempSync(join(tmpdir(), "condotto-agent-home-"));
+    const projects = join(home, ".claude", "projects");
+    mkdirSync(join(projects, "-some-tree", ID_), { recursive: true });
+    writeFileSync(join(projects, "-some-tree", `${ID_}.jsonl`), "{}\n");
+    writeFileSync(join(projects, "-some-tree", ID_, "agent-1.jsonl"), "{}\n");
+    writeFileSync(join(projects, "-some-tree", "other-session.jsonl"), "{}\n");
+    mkdirSync(join(projects, "-another-tree"), { recursive: true });
+    let sdkCalls = 0;
+    const saved = process.env.CLAUDE_CONFIG_DIR;
+    delete process.env.CLAUDE_CONFIG_DIR;
+    try {
+      const adapter = new ClaudeCodeAdapter(
+        undefined,
+        undefined,
+        undefined,
+        { identity: { agentUid: 1001, agentGid: 1002, agentHome: home }, io: new DirectTreeIO() },
+        async () => {
+          sdkCalls++;
+        },
+      );
+      await adapter.forget(handle, "/some/tree");
+    } finally {
+      if (saved !== undefined) process.env.CLAUDE_CONFIG_DIR = saved;
+    }
+    expect(sdkCalls).toBe(0); // never the daemon's own fs, via the SDK
+    expect(existsSync(join(projects, "-some-tree", `${ID_}.jsonl`))).toBe(false);
+    expect(existsSync(join(projects, "-some-tree", ID_))).toBe(false);
+    expect(existsSync(join(projects, "-some-tree", "other-session.jsonl"))).toBe(true);
   });
 });

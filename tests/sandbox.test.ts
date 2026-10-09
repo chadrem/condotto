@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { existsSync, mkdtempSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -129,6 +129,29 @@ describe("AgentTreeIO — command construction", () => {
     // No -L / -H: find must never follow a link, including the outbox itself.
     expect(r.calls[0]!.argv).not.toContain("-L");
     expect(r.calls[0]!.argv).not.toContain("-H");
+  });
+
+  test("subdirsHolding is one find two levels down, matching the name literally", async () => {
+    const r = recorder(() => ({ stdout: enc("/home/agent/.claude/projects/-wt-s1\u0000") }));
+    const io = new AgentTreeIO(r.run, r.runSync);
+    expect(await io.subdirsHolding("/home/agent/.claude/projects", "a*b?.jsonl")).toEqual(["-wt-s1"]);
+    expect(r.calls.length).toBe(1);
+    expect(r.calls[0]!.argv).toEqual([
+      "find", "/home/agent/.claude/projects", "-mindepth", "2", "-maxdepth", "2", "-type", "f",
+      "-name", "a\\*b\\?.jsonl", "-printf", "%h\\0",
+    ]);
+    expect(r.calls[0]!.argv).not.toContain("-L");
+  });
+
+  test("DirectTreeIO.subdirsHolding skips symlinked files and directories", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "condotto-holding-"));
+    mkdirSync(join(dir, "real"));
+    writeFileSync(join(dir, "real", "t.jsonl"), "{}");
+    mkdirSync(join(dir, "linkfile"));
+    symlinkSync(join(dir, "real", "t.jsonl"), join(dir, "linkfile", "t.jsonl"));
+    symlinkSync(join(dir, "real"), join(dir, "linkdir"));
+    mkdirSync(join(dir, "empty"));
+    expect(await new DirectTreeIO().subdirsHolding(dir, "t.jsonl")).toEqual(["real"]);
   });
 
   test("writeFile/readFile really move bytes through a spawned process's stdin/stdout", async () => {
@@ -289,3 +312,64 @@ describe("SandboxCloneStrategy", () => {
     expect(existsSync(join(repoPath, "README.md"))).toBe(true);
   });
 });
+
+describe("SandboxCloneStrategy.unsavedWork", () => {
+  test("tens of thousands of shared tags go on stdin, never argv", async () => {
+    const oids = Array.from({ length: 60_000 }, (_, i) => i.toString(16).padStart(40, "0"));
+    let revList: { argv: string[]; stdin?: Uint8Array } | undefined;
+    const agent: CommandRunner = async (argv, opts) => {
+      if (argv.includes("ls-remote")) {
+        return { code: 0, stdout: enc(oids.map((o, i) => `${o}\trefs/tags/v${i}`).join("\n")), stderr: "" };
+      }
+      if (argv.includes("rev-list")) revList = { argv, stdin: opts?.stdin };
+      return { code: 0, stdout: enc(argv.includes("rev-list") ? "0\n" : ""), stderr: "" };
+    };
+    const strategy = new SandboxCloneStrategy(agent, new DirectTreeIO());
+    expect(await strategy.unsavedWork({ path: "/wt/s1", branch: "condotto/s1", defaultBranch: "main" })).toEqual({
+      dirty: false,
+      unpushed: 0,
+    });
+    expect(revList!.argv.length).toBeLessThan(30);
+    expect(revList!.argv).toContain("--stdin");
+    const lines = new TextDecoder().decode(revList!.stdin).trim().split("\n");
+    expect(lines.length).toBe(60_000);
+    expect(lines[0]).toBe(`^${oids[0]}`);
+  });
+
+  test("the shared repo's own tags never count; a tag made in the clone does", async () => {
+    const run = async (cmd: string[], cwd?: string) => {
+      const res = await directRunner(cmd, { cwd });
+      if (res.code !== 0) throw new Error(`${cmd.join(" ")}: ${res.stderr}`);
+      return new TextDecoder().decode(res.stdout).trim();
+    };
+    const base = mkdtempSync(join(tmpdir(), "condotto-sbx-tags-"));
+    const repoPath = join(base, "repo");
+    const commit = (cwd: string, msg: string) =>
+      run(["git", "-C", cwd, "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "--allow-empty", "-m", msg]);
+    await run(["git", "init", "-q", "-b", "main", repoPath]);
+    await commit(repoPath, "init");
+    // A release tag on a side branch that was then deleted: the tag is not on any
+    // branch of the shared repo, which is exactly what `--remotes` can't see.
+    await run(["git", "-C", repoPath, "checkout", "-q", "-b", "release"]);
+    await commit(repoPath, "release fix");
+    await run(["git", "-C", repoPath, "tag", "-a", "v1.0", "-m", "v1.0"]);
+    await run(["git", "-C", repoPath, "checkout", "-q", "main"]);
+    await run(["git", "-C", repoPath, "branch", "-q", "-D", "release"]);
+
+    const io = new DirectTreeIO();
+    const root = join(base, "worktrees");
+    await run(["mkdir", "-p", root]);
+    const wm = new WorktreeManager(root, { strategy: new SandboxCloneStrategy(directRunner, io), io });
+    const info = await wm.create({ repoPath, defaultBranch: "main", sessionId: "sess-sbx-tags-0001" });
+    const check = () => wm.unsavedWork({ sessionId: "sess-sbx-tags-0001", branch: info.branch, defaultBranch: "main" });
+    expect(await check()).toEqual({ dirty: false, unpushed: 0 });
+
+    // Work tagged in the clone, then left off every branch, still counts.
+    await run(["git", "-C", info.path, "checkout", "-q", "--detach"]);
+    await commit(info.path, "agent work");
+    await run(["git", "-C", info.path, "tag", "agent-mark"]);
+    await run(["git", "-C", info.path, "checkout", "-q", info.branch]);
+    expect(await check()).toEqual({ dirty: false, unpushed: 1 });
+  });
+});
+

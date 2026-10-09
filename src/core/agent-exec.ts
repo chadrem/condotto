@@ -71,6 +71,12 @@ export interface RunOptions {
   /** Bytes to feed on stdin; omitted = no stdin. */
   stdin?: Uint8Array;
   cwd?: string;
+  /**
+   * Give up after this long: the process is killed and the result is exit code
+   * 124 with empty output. For commands whose behaviour the agent can influence
+   * (git in its tree runs filters it defined), so one can never hang the daemon.
+   */
+  timeoutMs?: number;
 }
 
 /** Runs an argv to completion. Injectable so tests never need real setuid. */
@@ -85,16 +91,55 @@ function spawnAsync(argv: string[], env: Record<string, string> | undefined, opt
     stdin: opts.stdin ? opts.stdin : "ignore",
     stdout: "pipe",
     stderr: "pipe",
+    // Its own process group, so a timeout can kill everything it started.
+    detached: opts.timeoutMs !== undefined,
   });
-  return Promise.all([
+  const done = Promise.all([
     new Response(proc.stdout).arrayBuffer(),
     new Response(proc.stderr).text(),
     proc.exited,
   ]).then(([out, err, code]) => ({ code, stdout: new Uint8Array(out), stderr: err }));
+  if (opts.timeoutMs === undefined) return done;
+  // Kill the whole group: a grandchild (a git filter) would otherwise outlive git,
+  // and a sweep that retries hourly would leave one behind every time. Resolve on
+  // the timer, not the streams, in case something still holds them open.
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timedOut = new Promise<RunResult>((resolve) => {
+    timer = setTimeout(() => {
+      try {
+        process.kill(-proc.pid, "SIGKILL");
+      } catch {
+        proc.kill("SIGKILL");
+      }
+      resolve({ code: 124, stdout: new Uint8Array(), stderr: `timed out after ${opts.timeoutMs}ms` });
+    }, opts.timeoutMs);
+  });
+  return Promise.race([done, timedOut]).finally(() => clearTimeout(timer));
 }
 
 /** Runs the argv as-is, with the daemon's own privileges and environment. */
 export const directRunner: CommandRunner = (argv, opts) => spawnAsync(argv, undefined, opts);
+
+/**
+ * The daemon's own secrets: Slack tokens and Condotto's configuration. The one
+ * list: the harness adapter strips the same prefixes from the agent's environment.
+ */
+export const DAEMON_SECRET_ENV_PREFIXES = ["SLACK_", "CONDOTTO_"];
+
+/**
+ * The daemon's privileges and environment, minus the daemon's own secrets. For
+ * git the daemon runs against an agent-writable repo or tree outside sandbox mode:
+ * git runs hooks and filter drivers the agent can plant, and they must not inherit
+ * the Slack tokens. Everything else stays, because a checkout legitimately needs
+ * it (an SSH agent socket or a proxy for Git LFS, git's own `GIT_*` settings).
+ */
+export const scrubbedRunner: CommandRunner = (argv, opts) => {
+  const env: Record<string, string> = {};
+  for (const [k, v] of Object.entries(process.env)) {
+    if (v !== undefined && !DAEMON_SECRET_ENV_PREFIXES.some((p) => k.startsWith(p))) env[k] = v;
+  }
+  return spawnAsync(argv, env, opts);
+};
 
 /**
  * Runs the argv as the agent. The cwd defaults to `/` because the daemon's own

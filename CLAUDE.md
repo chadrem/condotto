@@ -139,7 +139,7 @@ the two controls that hold it up are in `core/attachments.ts`'s header.
 
 ## Key invariants (enforce in code, not just schema)
 
-- `(surface_id, conversation_id)` maps to exactly one session, forever. One
+- `(surface_id, conversation_id)` maps to at most one session at a time. One
   conversation, one worktree, one harness session handle.
 - `worktree_path` is stable and absolute. The SDK keys session storage by encoded
   cwd, so moving a live session's worktree loses the session.

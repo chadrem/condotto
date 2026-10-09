@@ -1,6 +1,6 @@
 import { existsSync } from "node:fs";
 import { basename, join } from "node:path";
-import { loadConfig, loadSlackConfig, loadAuthConfig, subscriptionScaleWarning } from "./core/config";
+import { HOUR_MS, loadConfig, loadSlackConfig, loadAuthConfig, subscriptionScaleWarning } from "./core/config";
 import { Store } from "./core/store";
 import { SandboxCloneStrategy, WorktreeManager } from "./core/worktrees";
 import { agentRunner, agentRunnerSync, proveCanDropPrivileges } from "./core/agent-exec";
@@ -16,9 +16,10 @@ import { SlackAdapter } from "./adapters/slack/adapter";
 
 const log = (msg: string) => console.log(`${new Date().toISOString()} ${msg}`);
 
-/** How often the daemon sweeps for collectible worktrees. A boot sweep
- *  plus this tick reclaim clean-stopped (past-retention) and orphaned trees; the
- *  sweep never touches a live/parked worktree. */
+/** How often the daemon sweeps: deletes stopped sessions past their date and
+ *  orphaned trees, then warns and stops idle threads (`sweepIdle`). Hourly, so a
+ *  notice can land up to an hour after its threshold. The sweep never touches a
+ *  live/parked worktree. */
 const WORKTREE_GC_INTERVAL_MS = 60 * 60 * 1000; // hourly
 
 /** The program name to show in `--help`: the compiled binary's own filename
@@ -189,6 +190,9 @@ async function main(): Promise<void> {
     defaultEffort: config.defaultEffort,
     defaultSubagents: config.defaultSubagents,
     defaultWorkflows: config.defaultWorkflows,
+    idleWarnMs: config.idleWarnMs,
+    idleStopMs: config.idleStopMs,
+    keepStoppedMs: config.keepStoppedMs,
     treeIO,
     runtimeGrants: config.runtimeGrants,
     ...(config.sandbox
@@ -218,20 +222,27 @@ async function main(): Promise<void> {
       `subagents ${config.defaultSubagents ? "ON" : "off"} / workflows ${config.defaultWorkflows ? "ON" : "off"} / ` +
       `memory ${config.defaultMemory ? "ON" : "off"}`,
   );
+  const hours = (ms: number) => `${ms / HOUR_MS}h`;
+  log(
+    `[daemon] cleanup: ` +
+      (config.idleStopMs > 0 ? `warn idle threads at ${hours(config.idleWarnMs)}, stop at ${hours(config.idleStopMs)}` : "idle stops off") +
+      `, ` +
+      (config.keepStoppedMs > 0 ? `delete stopped sessions after ${hours(config.keepStoppedMs)}` : "keep stopped sessions"),
+  );
 
-  // Worktree GC: sweep once at boot — before any surface is live, so a
-  // reactivation can't race the initial teardown — then hand off to a timer below.
-  // Never touches a live/parked worktree; best-effort, never fatal.
+  // Orphan sweep once at boot, before any surface is live. Stopped sessions wait
+  // for the first sweep after the surface starts, because deleting one posts to
+  // its thread. Best-effort, never fatal.
   {
-    const { cleaned, orphans } = await manager
+    const { orphans } = await manager
       // orphanMinAgeMs: 0 — no surface is live yet, so no assign can be mid-flight;
       // a crash-orphan of any age is safe to reclaim immediately at boot.
-      .collectWorktrees(Date.now(), { orphanMinAgeMs: 0 })
+      .collectWorktrees(Date.now(), { orphanMinAgeMs: 0, sessions: false })
       .catch((e) => {
         log(`[daemon] initial worktree GC failed: ${e}`);
         return { cleaned: 0, orphans: 0 };
       });
-    if (cleaned || orphans) log(`[daemon] boot worktree GC: ${cleaned} clean-stopped, ${orphans} orphan(s) reclaimed`);
+    if (orphans) log(`[daemon] boot worktree GC: ${orphans} orphan(s) reclaimed`);
   }
 
   // Surface credentials belong to the adapter, not the core domain config — the
@@ -259,19 +270,24 @@ async function main(): Promise<void> {
   const parked = store.listSessions({ surfaceId: slack.id }).length;
   log(`[daemon] ready — db=${config.dbPath}, sessions on record: ${parked}`);
 
-  // Periodic worktree GC. unref() so it never keeps the process alive; a
-  // re-entrancy guard skips a tick if the prior sweep is still running (git spawns).
+  // Periodic sweep, once now and then hourly. unref() so it never keeps the
+  // process alive; a re-entrancy guard skips a tick if the prior sweep is still
+  // running (git spawns).
   let gcRunning = false;
-  const gcTimer = setInterval(() => {
+  const sweep = () => {
     if (gcRunning) return;
     gcRunning = true;
     void manager
       .collectWorktrees()
       .catch((e) => log(`[daemon] worktree GC failed: ${e}`))
+      .then(() => manager.sweepIdle())
+      .catch((e) => log(`[daemon] idle sweep failed: ${e}`))
       .finally(() => {
         gcRunning = false;
       });
-  }, WORKTREE_GC_INTERVAL_MS);
+  };
+  sweep();
+  const gcTimer = setInterval(sweep, WORKTREE_GC_INTERVAL_MS);
   gcTimer.unref?.();
 
   const shutdown = async (signal: string) => {

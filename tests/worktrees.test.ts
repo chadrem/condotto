@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, test } from "bun:test";
 import { mkdtempSync, existsSync, mkdirSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { scrubbedRunner } from "../src/core/agent-exec";
 import {
   WorktreeManager,
   listTopLevelDirs,
@@ -24,6 +25,27 @@ async function run(cmd: string[], cwd?: string): Promise<string> {
   ]);
   if (code !== 0) throw new Error(`command failed: ${cmd.join(" ")}\n${out}${err}`);
   return (out + err).trim();
+}
+
+/**
+ * Run `fn` with two daemon secrets and one ordinary variable set, and return the
+ * variable names a planted hook or filter wrote to `out` (one `env` line each).
+ * Setting them here reaches the child because the runner passes an explicit env
+ * built from `process.env` at call time.
+ */
+async function namesSeenBy(out: string, fn: () => Promise<unknown>): Promise<string[]> {
+  process.env.SLACK_TEST_TOKEN = "xoxb-test";
+  process.env.CONDOTTO_TEST_SECRET = "s3cret";
+  process.env.ORDINARY_TEST_VAR = "kept";
+  try {
+    await fn();
+  } finally {
+    delete process.env.SLACK_TEST_TOKEN;
+    delete process.env.CONDOTTO_TEST_SECRET;
+    delete process.env.ORDINARY_TEST_VAR;
+  }
+  expect(existsSync(out)).toBe(true); // the hook or filter ran, so the caller's checks mean something
+  return (await Bun.file(out).text()).split("\n").map((l) => l.split("=")[0]!);
 }
 
 let repoPath: string;
@@ -177,6 +199,113 @@ describe("WorktreeManager.create + remove", () => {
 // gate (runs before a worktree exists); `verifyWorkdir` is the filesystem gate
 // that must resolve symlinks, because the policy engine's containment test is
 // lexical and this path becomes the base relative paths resolve against.
+
+describe("WorktreeManager.unsavedWork", () => {
+  const commit = (cwd: string, msg: string) =>
+    run(["git", "-C", cwd, "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", msg]);
+
+  test("a fresh tree has nothing unsaved; edits and unpushed commits are counted", async () => {
+    const wm = new WorktreeManager(root);
+    const info = await wm.create({ repoPath, defaultBranch: "main", sessionId: "sess-unsaved-1" });
+    expect(await wm.unsavedWork({ sessionId: "sess-unsaved-1", branch: info.branch, defaultBranch: "main" })).toEqual({ dirty: false, unpushed: 0 });
+
+    writeFileSync(join(info.path, "a.txt"), "a\n");
+    expect(await wm.unsavedWork({ sessionId: "sess-unsaved-1", branch: info.branch, defaultBranch: "main" })).toEqual({ dirty: true, unpushed: 0 });
+
+    await run(["git", "-C", info.path, "add", "a.txt"]);
+    await commit(info.path, "a");
+    expect(await wm.unsavedWork({ sessionId: "sess-unsaved-1", branch: info.branch, defaultBranch: "main" })).toEqual({ dirty: false, unpushed: 1 });
+  });
+
+  test("commits on the session branch count even after HEAD moves off it", async () => {
+    const wm = new WorktreeManager(root);
+    const info = await wm.create({ repoPath, defaultBranch: "main", sessionId: "sess-unsaved-2" });
+    writeFileSync(join(info.path, "a.txt"), "a\n");
+    await run(["git", "-C", info.path, "add", "a.txt"]);
+    await commit(info.path, "a");
+    await run(["git", "-C", info.path, "checkout", "-q", "--detach", "main"]);
+    expect(await wm.unsavedWork({ sessionId: "sess-unsaved-2", branch: info.branch, defaultBranch: "main" })).toEqual({
+      dirty: false,
+      unpushed: 1,
+    });
+  });
+
+  test("a file named like the default branch is not mistaken for it", async () => {
+    const wm = new WorktreeManager(root);
+    const info = await wm.create({ repoPath, defaultBranch: "main", sessionId: "sess-unsaved-3" });
+    writeFileSync(join(info.path, "main"), "not a branch\n");
+    await run(["git", "-C", info.path, "add", "main"]);
+    await commit(info.path, "file called main");
+    expect(await wm.unsavedWork({ sessionId: "sess-unsaved-3", branch: info.branch, defaultBranch: "main" })).toEqual({
+      dirty: false,
+      unpushed: 1,
+    });
+  });
+
+  test("new files count even when config hides untracked files from status", async () => {
+    const wm = new WorktreeManager(root);
+    const info = await wm.create({ repoPath, defaultBranch: "main", sessionId: "sess-unsaved-4" });
+    await run(["git", "-C", info.path, "config", "status.showUntrackedFiles", "no"]);
+    writeFileSync(join(info.path, "brand-new.txt"), "work\n");
+    expect((await wm.unsavedWork({ sessionId: "sess-unsaved-4", branch: info.branch, defaultBranch: "main" }))?.dirty).toBe(true);
+  });
+
+  test("a default branch given as any commit-ish works, not just a branch name", async () => {
+    const wm = new WorktreeManager(root);
+    const info = await wm.create({ repoPath, defaultBranch: "main~0", sessionId: "sess-unsaved-5" });
+    expect(await wm.unsavedWork({ sessionId: "sess-unsaved-5", branch: info.branch, defaultBranch: "main~0" })).toEqual({
+      dirty: false,
+      unpushed: 0,
+    });
+  });
+
+  test("a missing tree is unknown, not clean", async () => {
+    const wm = new WorktreeManager(root);
+    expect(await wm.unsavedWork({ sessionId: "sess-never-made", branch: "condotto/sess-nev", defaultBranch: "main" })).toBeNull();
+  });
+
+  test("a filter driver the agent planted never sees the daemon's secrets", async () => {
+    // `git status` runs clean filters named by the tree's .gitattributes and config,
+    // both of which the agent can write. Outside sandbox mode it runs as the daemon,
+    // so the daemon's secrets must not be in its environment.
+    const wm = new WorktreeManager(root);
+    const info = await wm.create({ repoPath, defaultBranch: "main", sessionId: "sess-unsaved-env" });
+    const out = join(mkdtempSync(join(tmpdir(), "condotto-env-")), "env.txt");
+    writeFileSync(join(info.path, ".gitattributes"), "* filter=leak\n");
+    await run(["git", "-C", info.path, "config", "filter.leak.clean", `sh -c 'env > ${out}; cat'`]);
+    writeFileSync(join(info.path, "README.md"), "# changed\n");
+
+    const seen = await namesSeenBy(out, async () => {
+      expect((await wm.unsavedWork({ sessionId: "sess-unsaved-env", branch: info.branch, defaultBranch: "main" }))?.dirty).toBe(true);
+    });
+    expect(seen).toContain("ORDINARY_TEST_VAR"); // everything else still reaches git
+    expect(seen).not.toContain("SLACK_TEST_TOKEN");
+    expect(seen).not.toContain("CONDOTTO_TEST_SECRET");
+  });
+});
+
+describe("git the daemon runs never carries its secrets", () => {
+  test("a hook planted in the shared repo runs during `git worktree add` without the daemon's secrets", async () => {
+    const out = join(mkdtempSync(join(tmpdir(), "condotto-hookenv-")), "env.txt");
+    const hook = join(repoPath, ".git", "hooks", "post-checkout");
+    writeFileSync(hook, `#!/bin/sh\nenv > ${out}\n`, { mode: 0o755 });
+    const seen = await namesSeenBy(out, () =>
+      new WorktreeManager(root).create({ repoPath, defaultBranch: "main", sessionId: "sess-hook-env" }),
+    );
+    expect(seen).toContain("ORDINARY_TEST_VAR"); // a proxy or SSH agent socket would survive too
+    expect(seen).not.toContain("SLACK_TEST_TOKEN");
+    expect(seen).not.toContain("CONDOTTO_TEST_SECRET");
+  });
+});
+
+describe("runner timeouts", () => {
+  test("a command that never exits is killed and reported, even if a grandchild holds its output open", async () => {
+    const started = Date.now();
+    const res = await scrubbedRunner(["sh", "-c", "(sleep 30 >&2 &); sleep 30"], { timeoutMs: 200 });
+    expect(res.code).toBe(124);
+    expect(Date.now() - started).toBeLessThan(5000);
+  });
+});
 
 describe("normalizeSubdir (pure shape validation)", () => {
   test("the repo root has several spellings, all meaning null", () => {

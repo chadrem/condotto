@@ -1,10 +1,10 @@
-import { query, type SpawnOptions, type SpawnedProcess } from "@anthropic-ai/claude-agent-sdk";
+import { deleteSession, query, type SpawnOptions, type SpawnedProcess } from "@anthropic-ai/claude-agent-sdk";
 import { extractFromBunfs } from "@anthropic-ai/claude-agent-sdk/extract";
 import { spawn as nodeSpawn, type ChildProcess } from "node:child_process";
 import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
-import { setprivArgv, type SandboxIdentity } from "../../core/agent-exec";
+import { DAEMON_SECRET_ENV_PREFIXES, setprivArgv, type SandboxIdentity } from "../../core/agent-exec";
 import { DirectTreeIO, type TreeIO } from "../../core/tree-io";
 import type {
   GateFn,
@@ -519,24 +519,22 @@ const TURN_INACTIVITY_MS = 10 * 60_000;
 const DRAIN_AFTER_ABORT_MS = 30_000;
 
 /**
+ * The resolved harness credential, handed down by the composition root. Structurally
+ * `core/config`'s `AuthConfig`, restated locally so the adapter depends on the shape
+ * rather than importing a core type through the port.
+ */
+export type HarnessAuth = { mode: "api_key" | "subscription"; apiKey?: string };
+/**
  * Env-scrub the agent shell. The SDK's `options.env` REPLACES the
  * subprocess environment entirely (sdk.d.ts:1411), so this is a DENYLIST over a
- * spread of `process.env`: drop the daemon's own secret namespaces (`SLACK_*`,
- * `CONDOTTO_*`) so an in-worktree Bash command can never read the daemon's Slack
+ * spread of `process.env`: drop the daemon's own secret namespaces
+ * (`DAEMON_SECRET_ENV_PREFIXES`, from the core: `SLACK_*`, `CONDOTTO_*`) so an in-worktree Bash command can never read the daemon's Slack
  * tokens or config from its own environ, while PRESERVING everything the toolchain
  * and the Claude Code CLI need — `PATH`/`HOME`, the repo's build env, and the Claude
  * auth token (which never matches these prefixes, so keychain OAuth AND a headless
  * `CLAUDE_CODE_OAUTH_TOKEN` both survive). Belt-and-braces over the policy floor's
  * credential hard-deny. Verified under keychain OAuth.
  */
-const DAEMON_SECRET_ENV_PREFIXES = ["SLACK_", "CONDOTTO_"];
-
-/**
- * The resolved harness credential, handed down by the composition root. Structurally
- * `core/config`'s `AuthConfig`, restated locally so the adapter depends on the shape
- * rather than importing a core type through the port.
- */
-export type HarnessAuth = { mode: "api_key" | "subscription"; apiKey?: string };
 export function scrubDaemonEnv(base: NodeJS.ProcessEnv, auth?: HarnessAuth): Record<string, string> {
   const out: Record<string, string> = {};
   for (const [k, v] of Object.entries(base)) {
@@ -1397,6 +1395,8 @@ function describeWorkflowEvent(m: Record<string, any>): string | null {
   }
 }
 
+type DeleteSessionFn = (sessionId: string, options?: { dir?: string }) => Promise<void>;
+
 export class ClaudeCodeAdapter implements HarnessAdapter {
   readonly id = "claude-code";
   /**
@@ -1422,6 +1422,8 @@ export class ClaudeCodeAdapter implements HarnessAdapter {
      * Undefined = today's behaviour, the CLI runs as the daemon's own user.
      */
     private sandbox?: AdapterSandbox,
+    /** Injectable SDK `deleteSession` (tests pass a fake). */
+    private deleteSessionFn: DeleteSessionFn = deleteSession,
   ) {
     // Built here, not in a field initializer: those run before parameter properties
     // are assigned, so one would see `auth` as undefined.
@@ -1483,6 +1485,46 @@ export class ClaudeCodeAdapter implements HarnessAdapter {
       this.bridges,
       this.sandbox,
     );
+  }
+
+  /**
+   * Delete the session's transcript: `<id>.jsonl` and the `<id>/` directory of
+   * subagent transcripts, under the CLI's projects directory.
+   *
+   * Default mode asks the SDK, which owns that layout. The directory name is the
+   * cwd with every non-alphanumeric turned into `-`, but past 200 characters it is
+   * truncated and suffixed with a hash, so it is not ours to recompute. `dir` finds
+   * it directly; without `dir` the SDK searches every project directory, the
+   * fallback when the cwd it resolves differs from ours.
+   *
+   * Sandbox mode cannot use the SDK: the transcripts are in the agent's home, and
+   * the daemon never touches agent-writable files with its own privileges. It does
+   * the same search the SDK does, as the agent, in one lookup through the tree IO.
+   */
+  async forget(handle: SessionHandle, cwd: string): Promise<void> {
+    let id: string | null;
+    try {
+      id = asHandle(handle).sessionId;
+    } catch {
+      return;
+    }
+    // The id becomes a path segment below, so it must be exactly a UUID.
+    if (!id || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id)) return;
+    try {
+      if (this.sandbox) {
+        const { identity, io } = this.sandbox;
+        const projects = join(process.env.CLAUDE_CONFIG_DIR ?? join(identity.agentHome, ".claude"), "projects");
+        for (const dir of await io.subdirsHolding(projects, `${id}.jsonl`)) {
+          await io.remove(join(projects, dir, `${id}.jsonl`));
+          await io.remove(join(projects, dir, id));
+        }
+        return;
+      }
+      const sessionId = id;
+      await this.deleteSessionFn(sessionId, { dir: cwd }).catch(() => this.deleteSessionFn(sessionId));
+    } catch {
+      // Not found anywhere, or unreadable: nothing more this can do.
+    }
   }
 
   async resume(handle: SessionHandle, cwd: string, system: string, root?: string): Promise<HarnessSession> {

@@ -39,6 +39,12 @@ export interface TreeIO {
   listNames(dir: string): Promise<string[] | null>;
   /** Names of real (non-symlink) subdirectories directly in `dir`; [] when unreadable. */
   listDirs(dir: string): Promise<string[]>;
+  /**
+   * Names of the real subdirectories of `dir` that hold a regular file called
+   * exactly `name` (that is, every `dir/<sub>/<name>`). One lookup however many
+   * subdirectories there are; [] when unreadable.
+   */
+  subdirsHolding(dir: string, name: string): Promise<string[]>;
   /** `rm -rf`. Never throws. */
   remove(path: string): Promise<void>;
   /** The canonical absolute path, or null when it does not exist. */
@@ -84,6 +90,13 @@ export class DirectTreeIO implements TreeIO {
     if (!existsSync(dir)) return [];
     const entries = await readdir(dir, { withFileTypes: true }).catch(() => []);
     return entries.filter((e) => e.isDirectory()).map((e) => e.name);
+  }
+  async subdirsHolding(dir: string, name: string): Promise<string[]> {
+    const out: string[] = [];
+    for (const sub of await this.listDirs(dir)) {
+      if ((await lstat(join(dir, sub, name)).catch(() => null))?.isFile()) out.push(sub);
+    }
+    return out;
   }
   async remove(path: string): Promise<void> {
     await rm(path, { recursive: true, force: true }).catch(() => {});
@@ -181,6 +194,18 @@ export class AgentTreeIO implements TreeIO {
   async listDirs(dir: string): Promise<string[]> {
     const res = await this.run(findDirect(AgentTreeIO.abs(dir), ["-type", "d"], "%f\\0"));
     return res.code === 0 ? nulFields(res.stdout) : [];
+  }
+
+  async subdirsHolding(dir: string, name: string): Promise<string[]> {
+    // Escaped so `-name` matches the name literally, not as a glob. Without `-L`,
+    // find neither follows a symlinked subdirectory nor counts a symlink as `-type f`.
+    const literal = name.replace(/[*?[\]\\]/g, "\\$&");
+    const res = await this.run([
+      "find", AgentTreeIO.abs(dir), "-mindepth", "2", "-maxdepth", "2", "-type", "f", "-name", literal, "-printf", "%h\\0",
+    ]);
+    // Whatever find printed counts even if it exits non-zero: one unreadable
+    // subdirectory must not hide a match in another.
+    return nulFields(res.stdout).map((parent) => parent.slice(parent.lastIndexOf("/") + 1));
   }
 
   async remove(path: string): Promise<void> {

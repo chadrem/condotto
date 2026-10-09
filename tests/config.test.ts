@@ -591,6 +591,42 @@ describe("loadConfig runtime_grants", () => {
   });
 });
 
+describe("loadConfig [cleanup]", () => {
+  const HOUR = 3600 * 1000;
+
+  test("defaults: warn at 24h, stop at 36h, delete stopped sessions after 7 days", () => {
+    const c = loadConfig({}, cfgFile(""));
+    expect(c.idleWarnMs).toBe(24 * HOUR);
+    expect(c.idleStopMs).toBe(36 * HOUR);
+    expect(c.keepStoppedMs).toBe(7 * 24 * HOUR);
+  });
+
+  test("file values, fractional hours, and env overrides", () => {
+    const c = loadConfig(
+      { CONDOTTO_KEEP_STOPPED_DAYS: "3" },
+      cfgFile(`[cleanup]\nwarn_after_hours = 0.5\nstop_after_hours = 1\nkeep_stopped_days = 14\n`),
+    );
+    expect(c.idleWarnMs).toBe(0.5 * HOUR);
+    expect(c.idleStopMs).toBe(HOUR);
+    expect(c.keepStoppedMs).toBe(3 * 24 * HOUR);
+  });
+
+  test("0 turns idle stops off, and keeps stopped sessions", () => {
+    const c = loadConfig({}, cfgFile(`[cleanup]\nstop_after_hours = 0\nkeep_stopped_days = 0\n`));
+    expect(c.idleStopMs).toBe(0);
+    expect(c.keepStoppedMs).toBe(0);
+  });
+
+  test("a stop at or before the warning fails fast", () => {
+    expect(() => loadConfig({}, cfgFile(`[cleanup]\nwarn_after_hours = 36\nstop_after_hours = 36\n`))).toThrow(
+      /always warned before it stops/,
+    );
+    expect(() => loadConfig({}, cfgFile(`[cleanup]\nwarn_after_hours = 0\n`))).toThrow(/always warned/);
+    expect(() => loadConfig({}, cfgFile(`[cleanup]\nkeep_stopped_days = -1\n`))).toThrow(/0 or more/);
+    expect(() => loadConfig({}, cfgFile(`[cleanup]\nkeep_stopped_days = 1e9\n`))).toThrow(/too large/);
+  });
+});
+
 describe("loadConfig [[repos]].instructions", () => {
   test("read when set, trimmed; absent when unset", () => {
     const path = tomlFile(

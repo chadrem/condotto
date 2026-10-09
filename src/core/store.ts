@@ -3,7 +3,7 @@ import type { Role, SessionHandle } from "./types";
 
 // SQLite store. One process, one file, WAL mode.
 // Invariants enforced here in code, not just schema:
-//   - (surface_id, conversation_id) -> exactly one session, forever (UNIQUE).
+//   - (surface_id, conversation_id) -> at most one session at a time (UNIQUE).
 //   - worktree_path is absolute and never rewritten once set.
 //   - harness_session_handle is opaque JSON: persisted verbatim, never parsed
 //     beyond JSON round-tripping.
@@ -67,14 +67,28 @@ export interface SessionRow {
    */
   remote_control: string | null;
   /**
-   * Worktree GC: when non-null, this session was explicitly stopped with
-   * the `clean` variant and its worktree becomes collectible at this ISO
-   * timestamp (the stop time + retention interval). NULL is the resting state —
-   * a live/parked session, or a plain `stop` that keeps its worktree for
-   * reactivation. The GC NEVER collects a NULL row's
-   * worktree, which is how the park-and-resume invariant is held.
+   * Worktree GC: when non-null, this session is stopped and its worktree (and
+   * this row) becomes collectible at this ISO timestamp. Every stop sets it: a
+   * plain or idle stop to stop + the keep-stopped window, `stop clean` to stop +
+   * the shorter retention interval. NULL is a live/parked session — the GC never
+   * collects one, which is how the park-and-resume invariant is held — or a row
+   * stopped before stops were dated, which the idle sweep dates on its next pass.
    */
   cleanup_at: string | null;
+  /**
+   * When the idle sweep warned this thread that it is about to be stopped. NULL
+   * = not warned since the last activity; `touchSession` clears it, so any
+   * activity re-arms the warning.
+   */
+  idle_warned_at: string | null;
+  /**
+   * When a lifecycle notice to this thread first failed to post, in the current
+   * run of failures. NULL = the last one posted. Cleanup waits for a thread to
+   * be told, but not forever: one unreachable for long enough (an archived
+   * channel, the bot removed) proceeds without it. Cleared by any successful
+   * notice and by activity.
+   */
+  notice_failed_since: string | null;
   created_at: string;
   last_active_at: string;
 }
@@ -278,9 +292,10 @@ function migrateBaselineV1(db: Database): void {
 
 /**
  * Migration **v2** (worktree GC): schedule column for the worktree garbage
- * collector. `cleanup_at` is set only by an explicit `@Condotto stop clean` (to
- * stop-time + retention interval); the GC collects the worktree once due and then
- * discards the session row. A plain stop leaves it NULL — never collected. Plain
+ * collector; the GC collects the worktree once due and then discards the session
+ * row. When this shipped only `stop clean` set it. Since idle auto-cleanup (v15)
+ * every stop does, so a NULL on a stopped row now means it predates dated stops
+ * (see `SessionRow.cleanup_at`). Plain
  * forward DDL: unlike the baseline it only ever runs on a store already at v1, so
  * no `ensureColumn` gymnastics are needed (the runner guarantees exactly-once).
  */
@@ -469,6 +484,16 @@ function migrateV14(db: Database): void {
   `);
 }
 
+/**
+ * Migration **v15** (idle auto-cleanup): when the idle sweep warned a thread that
+ * it is about to be stopped, and when notices to it started failing. NULL for
+ * both is every existing row: not warned, nothing failed.
+ */
+function migrateV15(db: Database): void {
+  db.run(`ALTER TABLE sessions ADD COLUMN idle_warned_at TEXT`);
+  db.run(`ALTER TABLE sessions ADD COLUMN notice_failed_since TEXT`);
+}
+
 /** Add `column` to `table` only if absent (idempotent ALTER — SQLite has no
  *  `ADD COLUMN IF NOT EXISTS`). Used by the baseline migration to evolve tables
  *  a pre-runner DB already created. */
@@ -520,7 +545,8 @@ export class Store {
       migrateV12, // v12: sessions.remote_control for the per-thread claude.ai bridge.
       migrateV13, // v13: repos.instructions, the per-repo operator prompt addendum.
       migrateV14, // v14: session_members, who an architect let speak in a thread.
-      // v15+: append new migrations here. They only ever run on a store already
+      migrateV15, // v15: sessions.idle_warned_at + notice_failed_since for idle auto-cleanup.
+      // v16+: append new migrations here. They only ever run on a store already
       // at the prior version, so they can be plain forward DDL — no IF NOT EXISTS
       // gymnastics.
     ];
@@ -667,7 +693,7 @@ export class Store {
     s: Omit<
       SessionRow,
       | "created_at" | "last_active_at" | "budget_limit_usd" | "model" | "effort" | "subagents" | "workflows" | "plan_mode" | "cleanup_at" | "workdir"
-      | "remote_control"
+      | "remote_control" | "idle_warned_at" | "notice_failed_since"
     > & {
       budget_limit_usd?: number | null;
       model?: string | null;
@@ -737,6 +763,8 @@ export class Store {
       // published to claude.ai by anything other than an architect asking for it.
       remote_control: null,
       cleanup_at: null,
+      idle_warned_at: null,
+      notice_failed_since: null,
       created_at: now,
       last_active_at: now,
     };
@@ -824,10 +852,80 @@ export class Store {
       .changes;
   }
 
+  /**
+   * Record activity: restarts the idle clock and re-arms the idle warning. Also
+   * forgets failed notices — something just reached us from this thread.
+   */
   touchSession(id: string): void {
     this.db
-      .query(`UPDATE sessions SET last_active_at = $now WHERE id = $id`)
+      .query(
+        `UPDATE sessions SET last_active_at = $now, idle_warned_at = NULL, notice_failed_since = NULL
+         WHERE id = $id`,
+      )
       .run({ id, now: new Date().toISOString() });
+  }
+
+  /** A notice failed to post: start the failure clock if it isn't running. Returns its start. */
+  noteNoticeFailed(id: string, at: string): string {
+    this.db
+      .query(`UPDATE sessions SET notice_failed_since = COALESCE(notice_failed_since, $at) WHERE id = $id`)
+      .run({ id, at });
+    return this.getSession(id)?.notice_failed_since ?? at;
+  }
+
+  /** A notice posted: the thread is reachable. */
+  clearNoticeFailed(id: string): void {
+    this.db.query(`UPDATE sessions SET notice_failed_since = NULL WHERE id = $id`).run({ id });
+  }
+
+  // -- idle auto-cleanup ----------------------------------------------------
+
+  /**
+   * The idle stop's one atomic step: parked -> stopped, only if nothing has
+   * happened since `lastActiveSeen`. Returns whether it stopped.
+   */
+  stopIfIdle(id: string, lastActiveSeen: string): boolean {
+    return (
+      this.db
+        .query(`UPDATE sessions SET status = 'stopped' WHERE id = $id AND status = 'parked' AND last_active_at = $seen`)
+        .run({ id, seen: lastActiveSeen }).changes > 0
+    );
+  }
+
+  /**
+   * Record the idle warning, but only if the session has had no activity since
+   * `lastActiveSeen` — a reply that lands while the warning is posting must leave
+   * the row unwarned. Returns whether it was recorded.
+   */
+  markIdleWarned(id: string, at: string, lastActiveSeen: string): boolean {
+    return (
+      this.db
+        .query(`UPDATE sessions SET idle_warned_at = $at WHERE id = $id AND last_active_at = $seen`)
+        .run({ id, at, seen: lastActiveSeen }).changes > 0
+    );
+  }
+
+  /**
+   * Parked sessions with no activity since `cutoffIso`. Only parked: an active
+   * session has a turn running, which is never idle, and a stopped one is the GC's.
+   */
+  sessionsIdleSince(cutoffIso: string): SessionRow[] {
+    const rows = this.db
+      .query<RawSessionRow, { cutoff: string }>(
+        `SELECT * FROM sessions
+         WHERE status = 'parked' AND last_active_at <= $cutoff
+         ORDER BY last_active_at ASC`,
+      )
+      .all({ cutoff: cutoffIso });
+    return rows.map((r) => inflate(r)!) as SessionRow[];
+  }
+
+  /** Stopped sessions with no deletion date: stopped before stops were dated. */
+  stoppedWithoutCleanup(): SessionRow[] {
+    const rows = this.db
+      .query<RawSessionRow, []>(`SELECT * FROM sessions WHERE status = 'stopped' AND cleanup_at IS NULL`)
+      .all();
+    return rows.map((r) => inflate(r)!) as SessionRow[];
   }
 
   /** Set a session's cost ceiling (`@Condotto budget`). null = no ceiling. */
@@ -918,22 +1016,30 @@ export class Store {
 
   /**
    * Schedule this session's worktree for collection at `cleanupAt` (ISO) — set by
-   * an explicit `@Condotto stop clean`. Only a `stopped` session is ever marked;
+   * every stop, and only ever brought forward. Only a `stopped` session is ever
+   * marked (enforced here, so a reactivation that wins a race is never left with a date);
    * the GC re-checks status before acting. Reactivation clears it via
    * `clearSessionCleanup`, so a within-window resume cancels the teardown.
    */
   markSessionForCleanup(id: string, cleanupAt: string): void {
-    this.db.query(`UPDATE sessions SET cleanup_at = $at WHERE id = $id`).run({ id, at: cleanupAt });
+    // Earliest wins: a date is only ever brought forward, so two stops racing (an
+    // idle stop and an architect's `stop clean`) can't push a deletion back.
+    this.db
+      .query(
+        `UPDATE sessions SET cleanup_at = CASE WHEN cleanup_at IS NULL OR cleanup_at > $at THEN $at ELSE cleanup_at END
+         WHERE id = $id AND status = 'stopped'`,
+      )
+      .run({ id, at: cleanupAt });
   }
 
-  /** Cancel a scheduled worktree cleanup (a clean-stopped session was reactivated). */
+  /** Cancel a scheduled worktree cleanup (a stopped session was reactivated). */
   clearSessionCleanup(id: string): void {
     this.db.query(`UPDATE sessions SET cleanup_at = NULL WHERE id = $id`).run({ id });
   }
 
   /**
-   * Sessions whose worktree is due for collection: explicitly clean-stopped
-   * (`cleanup_at` set) and past that instant. The `status = 'stopped'` guard bakes
+   * Sessions whose worktree is due for collection: stopped, with `cleanup_at`
+   * set and past that instant. The `status = 'stopped'` guard bakes
    * the park-and-resume invariant into the query itself — a
    * live/parked row can never surface here even if a `cleanup_at` somehow lingered.
    * ISO-8601 UTC strings compare lexically == chronologically, so the `<=` is safe.
@@ -951,7 +1057,7 @@ export class Store {
 
   /**
    * Delete a session and its operational rows (approvals, turns) in one
-   * transaction — used by the GC to discard a clean-stopped session once its
+   * transaction — used by the GC to discard a stopped session once its
    * worktree is gone. The `audit_log` is deliberately KEPT (it has no FK to
    * sessions): the durable security/decision trail must survive a discard, even
    * though the conversational turn history and approval ledger rows do not. FK

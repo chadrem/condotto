@@ -350,9 +350,13 @@ describe("assign", () => {
     expect(existsSync(join(row!.worktree_path, "README.md"))).toBe(true);
     const intro = w.surface.posts.at(-1)!.text;
     expect(intro).toContain("I'm on it");
-    // The intro advertises the thread commands (discoverable in-thread, not just docs).
-    expect(intro).toContain("@Condotto budget");
-    expect(intro).toContain("@Condotto stop");
+    // Short on purpose: it points at help rather than listing everything.
+    expect(intro).toContain("@Condotto help");
+    expect(intro).not.toContain("@Condotto budget");
+    // Help is where the commands are discoverable in-thread.
+    await w.manager.handleEvent({ kind: "command", conv: conv("100.000001"), author: architect, name: "help", args: "" });
+    expect(w.surface.posts.at(-1)!.text).toContain("@Condotto budget");
+    expect(w.surface.posts.at(-1)!.text).toContain("@Condotto stop");
   });
 
   test("assigning an already-assigned conversation is refused", async () => {
@@ -1051,6 +1055,7 @@ describe("cost budgets & runaway cap", () => {
   test("the settings block says so rather than printing a number", async () => {
     const w = makeWorld(undefined, { costCap: null });
     await w.manager.handleEvent({ kind: "command", conv: conv("e0v.000001"), author: architect, name: "assign", args: "testrepo" });
+    await w.manager.handleEvent({ kind: "command", conv: conv("e0v.000001"), author: architect, name: "help", args: "" });
     expect(w.surface.posts.at(-1)!.text).toContain("cost budget no limit");
   });
 
@@ -1227,6 +1232,16 @@ describe("clear — resetting the agent's context", () => {
     // would have left created at 1.
     expect(w.harness.created.length).toBe(2);
     expect(w.harness.resumed.length).toBe(0);
+  });
+
+  test("clear deletes the old transcript, not just the pointer to it", async () => {
+    const w = makeWorld();
+    await assign(w, "cl0.000001");
+    await say(w, "cl0.000001", "hi");
+    const row = w.store.getSessionByConversation("fake", "cl0.000001")!;
+    const handle = row.harness_session_handle;
+    await clear(w, "cl0.000001");
+    expect(w.harness.forgotten).toEqual([{ handle, cwd: row.worktree_path }]);
   });
 
   test("the session row's handle is SQL NULL after a clear, and the session is not stopped", async () => {
@@ -1477,6 +1492,7 @@ describe("harness capabilities — model & effort", () => {
   test("assign advertises the default model & effort (Opus + medium)", async () => {
     const w = makeWorld();
     await assign(w, "cap1.000001");
+    await w.manager.handleEvent({ kind: "command", conv: conv("cap1.000001"), author: architect, name: "help", args: "" });
     const intro = w.surface.posts.at(-1)!.text;
     expect(intro).toContain("model `opus`");
     expect(intro).toContain("effort `medium`");
@@ -1544,6 +1560,7 @@ describe("harness capabilities — model & effort", () => {
       defaultEffort: "xhigh",
     });
     await assign(w, "cap6.000001");
+    await w.manager.handleEvent({ kind: "command", conv: conv("cap6.000001"), author: architect, name: "help", args: "" });
     const s = w.store.getSessionByConversation("fake", "cap6.000001")!;
     expect(s.model).toBe("fable");
     expect(s.effort).toBe("xhigh");
@@ -1559,6 +1576,7 @@ describe("harness capabilities — model & effort", () => {
       defaultModel: "bogus-model",
     });
     await assign(w, "cap7.000001");
+    await w.manager.handleEvent({ kind: "command", conv: conv("cap7.000001"), author: architect, name: "help", args: "" });
     const s = w.store.getSessionByConversation("fake", "cap7.000001")!;
     expect(s.model).toBeNull(); // not applied
     expect(w.surface.posts.at(-1)!.text).toContain("model `opus`"); // effective default
@@ -1574,6 +1592,7 @@ describe("harness capabilities — subagents & workflows", () => {
   test("subagents default ON, and the intro says so", async () => {
     const w = makeWorld();
     await assign(w, "sb1.000001");
+    await w.manager.handleEvent({ kind: "command", conv: conv("sb1.000001"), author: architect, name: "help", args: "" });
     expect(w.store.getSessionByConversation("fake", "sb1.000001")!.subagents).toBe(1);
     expect(w.surface.posts.at(-1)!.text).toContain("subagents *on*");
     expect(w.surface.posts.at(-1)!.text).toContain("workflows *on*");
@@ -1594,6 +1613,7 @@ describe("harness capabilities — subagents & workflows", () => {
   test("the join announcement lists EVERY setting", async () => {
     const w = makeWorld();
     await assign(w, "set1.000001");
+    await w.manager.handleEvent({ kind: "command", conv: conv("set1.000001"), author: architect, name: "help", args: "" });
     const intro = w.surface.posts.at(-1)!.text;
     expect(intro).toContain("Session settings");
     expect(intro).toContain("model `opus`");
@@ -1690,6 +1710,7 @@ describe("harness capabilities — workflows", () => {
   test("workflows default ON, and the join announcement lists it", async () => {
     const w = makeWorld();
     await assign(w, "wf1.000001");
+    await w.manager.handleEvent({ kind: "command", conv: conv("wf1.000001"), author: architect, name: "help", args: "" });
     expect(w.store.getSessionByConversation("fake", "wf1.000001")!.workflows).toBe(1);
     const intro = w.surface.posts.at(-1)!.text;
     expect(intro).toContain("workflows *on*");
@@ -1706,6 +1727,7 @@ describe("harness capabilities — workflows", () => {
       workflows: false,
     });
     await assign(w, "wf1b.000001");
+    await w.manager.handleEvent({ kind: "command", conv: conv("wf1b.000001"), author: architect, name: "help", args: "" });
     const s = w.store.getSessionByConversation("fake", "wf1b.000001")!;
     expect(s.subagents).toBe(0);
     expect(s.workflows).toBe(0);
@@ -2048,22 +2070,70 @@ describe("worktree cleanup — GC & the park-and-resume invariant", () => {
   const assign = (w: World, id: string) =>
     w.manager.handleEvent({ kind: "command", conv: conv(id), author: architect, name: "assign", args: "testrepo" });
   const FAR_FUTURE = Date.now() + 3650 * 24 * 3600 * 1000; // ~10y — well past any window
+  const DAY = 24 * 3600 * 1000;
 
-  test("a plain `stop` keeps the worktree; the GC never collects it (journey 5/6)", async () => {
+  test("a plain `stop` keeps the worktree for the keep window, then the GC deletes it and says so", async () => {
     const w = isolatedWorld();
     await assign(w, "gc-plain");
     const s = w.store.getSessionByConversation("fake", "gc-plain")!;
     expect(existsSync(s.worktree_path)).toBe(true);
 
     await w.manager.handleEvent({ kind: "command", conv: conv("gc-plain"), author: architect, name: "stop", args: "" });
-    expect(w.store.getSession(s.id)!.cleanup_at).toBeNull(); // never scheduled
-    expect(w.surface.posts.at(-1)!.text).toContain("Worktree preserved");
+    const cleanupAt = new Date(w.store.getSession(s.id)!.cleanup_at!).getTime();
+    expect(Math.abs(cleanupAt - (Date.now() + 7 * DAY))).toBeLessThan(60_000); // default 7 days
+    const notice = w.surface.posts.at(-1)!.text;
+    expect(notice).toContain("I won't see replies here");
+    expect(notice).toContain("committed and pushed"); // nothing changed in the tree
 
-    // Even sweeping far in the future, a plain-stopped tree is untouched.
-    const res = await w.manager.collectWorktrees(FAR_FUTURE);
-    expect(res).toEqual({ cleaned: 0, orphans: 0 });
+    // Inside the window: kept.
+    expect(await w.manager.collectWorktrees(Date.now() + 6 * DAY)).toEqual({ cleaned: 0, orphans: 0 });
     expect(existsSync(s.worktree_path)).toBe(true);
-    expect(w.store.getSession(s.id)!.status).toBe("stopped");
+    // Past it: deleted, with one last line in the thread, and the row is gone.
+    expect((await w.manager.collectWorktrees(Date.now() + 8 * DAY)).cleaned).toBe(1);
+    expect(existsSync(s.worktree_path)).toBe(false);
+    expect(w.store.getSession(s.id)).toBeNull();
+    expect(w.surface.posts.at(-1)!.text).toContain("has been cleaned up");
+  });
+
+  test("deleting a session deletes its transcript too", async () => {
+    const w = isolatedWorld(1000);
+    await assign(w, "gc-forget");
+    const s = w.store.getSessionByConversation("fake", "gc-forget")!;
+    w.store.updateSessionHandle(s.id, { v: 1, sessionId: "fake-session" });
+    await w.manager.handleEvent({ kind: "command", conv: conv("gc-forget"), author: architect, name: "stop", args: "clean" });
+    await w.manager.collectWorktrees(Date.now() + 5000);
+    expect(w.harness.forgotten).toEqual([{ handle: { v: 1, sessionId: "fake-session" }, cwd: s.worktree_path }]);
+  });
+
+  test("keep_stopped_days = 0 keeps a plain-stopped session until `stop clean`", async () => {
+    const root = mkdtempSync(join(tmpdir(), "condotto-gc-root-"));
+    const w = makeWorld(undefined, { worktreesRoot: root, manager: { keepStoppedMs: 0 } });
+    await assign(w, "gc-forever");
+    const s = w.store.getSessionByConversation("fake", "gc-forever")!;
+    await w.manager.handleEvent({ kind: "command", conv: conv("gc-forever"), author: architect, name: "stop", args: "" });
+    expect(w.store.getSession(s.id)!.cleanup_at).toBeNull();
+    expect(w.surface.posts.at(-1)!.text).toContain("kept until an architect types `@Condotto stop clean`");
+    expect(await w.manager.collectWorktrees(FAR_FUTURE)).toEqual({ cleaned: 0, orphans: 0 });
+    // And the idle sweep does not date it either.
+    expect((await w.manager.sweepIdle()).dated).toBe(0);
+    expect(existsSync(s.worktree_path)).toBe(true);
+  });
+
+  test("the stop notice names uncommitted changes and unpushed commits, which never change the date", async () => {
+    const w = isolatedWorld();
+    await assign(w, "gc-unsaved");
+    const s = w.store.getSessionByConversation("fake", "gc-unsaved")!;
+    await Bun.write(join(s.worktree_path, "work.txt"), "first\n");
+    await run(["git", "-C", s.worktree_path, "add", "work.txt"]);
+    await run(["git", "-C", s.worktree_path, "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "wip"]);
+    await Bun.write(join(s.worktree_path, "more.txt"), "second\n");
+
+    await w.manager.handleEvent({ kind: "command", conv: conv("gc-unsaved"), author: architect, name: "stop", args: "" });
+    const notice = w.surface.posts.at(-1)!.text;
+    expect(notice).toContain("uncommitted changes and 1 commit that was never pushed");
+    expect(notice).toContain("unless someone commits and pushes them");
+    const cleanupAt = new Date(w.store.getSession(s.id)!.cleanup_at!).getTime();
+    expect(Math.abs(cleanupAt - (Date.now() + 7 * DAY))).toBeLessThan(60_000);
   });
 
   test("a parked (resting) session's worktree is never collected", async () => {
@@ -2083,7 +2153,7 @@ describe("worktree cleanup — GC & the park-and-resume invariant", () => {
     await assign(w, "gc-clean-window");
     const s = w.store.getSessionByConversation("fake", "gc-clean-window")!;
     await w.manager.handleEvent({ kind: "command", conv: conv("gc-clean-window"), author: architect, name: "stop", args: "clean" });
-    expect(w.surface.posts.at(-1)!.text).toMatch(/marked for cleanup/i);
+    expect(w.surface.posts.at(-1)!.text).toContain("kept for 1 minute, then deleted");
     expect(w.store.getSession(s.id)!.cleanup_at).not.toBeNull();
 
     // GC at "now" — before the window elapses — collects nothing.
@@ -2137,17 +2207,15 @@ describe("worktree cleanup — GC & the park-and-resume invariant", () => {
     expect(w.store.getSession(s.id)).not.toBeNull();
   });
 
-  test("`stop clean` on an already-plain-stopped session schedules teardown (advertised recovery works)", async () => {
+  test("`stop clean` after a plain `stop` brings the deletion forward, and never pushes it back", async () => {
     const w = isolatedWorld(1000);
     await assign(w, "gc-late-clean");
     const s = w.store.getSessionByConversation("fake", "gc-late-clean")!;
-    // Plain stop first (keeps the tree), then LATER decide to reclaim the disk.
     await w.manager.handleEvent({ kind: "command", conv: conv("gc-late-clean"), author: architect, name: "stop", args: "" });
-    expect(w.store.getSession(s.id)!.cleanup_at).toBeNull();
+    const plainAt = w.store.getSession(s.id)!.cleanup_at!;
     await w.manager.handleEvent({ kind: "command", conv: conv("gc-late-clean"), author: architect, name: "stop", args: "clean" });
-    // The advertised recovery action is real — cleanup is now scheduled.
-    expect(w.store.getSession(s.id)!.cleanup_at).not.toBeNull();
-    expect(w.surface.posts.at(-1)!.text).toMatch(/marked for cleanup/i);
+    const cleanAt = w.store.getSession(s.id)!.cleanup_at!;
+    expect(cleanAt < plainAt).toBe(true);
     const res = await w.manager.collectWorktrees(Date.now() + 5000);
     expect(res.cleaned).toBe(1);
     expect(existsSync(s.worktree_path)).toBe(false);
@@ -2222,6 +2290,368 @@ describe("worktree cleanup — GC & the park-and-resume invariant", () => {
     const swept = await w.manager.collectWorktrees(Date.now() + 20 * 60 * 1000);
     expect(swept.orphans).toBe(1);
     expect(existsSync(orphan.path)).toBe(false);
+  });
+});
+
+describe("idle auto-cleanup", () => {
+  const HOUR = 3600 * 1000;
+  function idleWorld(manager: Partial<SessionManagerOptions> = {}): World {
+    return makeWorld(undefined, { worktreesRoot: mkdtempSync(join(tmpdir(), "condotto-idle-root-")), manager });
+  }
+  async function assigned(w: World, id: string) {
+    await w.manager.handleEvent({ kind: "command", conv: conv(id), author: architect, name: "assign", args: "testrepo" });
+    return w.store.getSessionByConversation("fake", id)!;
+  }
+  /** Hours past the session's last activity (the sweep's clock is injected). */
+  const after = (w: World, id: string, hours: number) =>
+    new Date(w.store.getSession(id)!.last_active_at).getTime() + hours * HOUR;
+
+  test("quiet under 24h: nothing; at 24h: one warning, never repeated", async () => {
+    const w = idleWorld();
+    const s = await assigned(w, "idle-warn");
+    expect(await w.manager.sweepIdle(after(w, s.id, 23))).toEqual({ warned: 0, stopped: 0, dated: 0 });
+    const posts = w.surface.posts.length;
+    expect((await w.manager.sweepIdle(after(w, s.id, 25))).warned).toBe(1);
+    expect(w.surface.posts.at(-1)!.text).toContain("quiet for 25 hours"); // the real gap, not the threshold
+    expect(w.surface.posts.at(-1)!.text).toContain("stop this session in 12 hours");
+    expect((await w.manager.sweepIdle(after(w, s.id, 26))).warned).toBe(0);
+    expect(w.surface.posts.length).toBe(posts + 1);
+  });
+
+  test("past 36h with the full 12h warning: stopped, dated 7 days out, and told so", async () => {
+    const w = idleWorld();
+    const s = await assigned(w, "idle-stop");
+    await w.manager.sweepIdle(after(w, s.id, 25));
+    const now = after(w, s.id, 37.02);
+    expect((await w.manager.sweepIdle(now)).stopped).toBe(1);
+    const row = w.store.getSession(s.id)!;
+    expect(row.status).toBe("stopped");
+    expect(Math.abs(new Date(row.cleanup_at!).getTime() - (now + 7 * 24 * HOUR))).toBeLessThan(1000);
+    const notice = w.surface.posts.at(-1)!.text;
+    expect(notice).toContain("stopped after 37 hours with no activity");
+    expect(notice).toContain("I won't see replies here");
+    expect(w.store.listAudit(s.id).some((a) => a.event === "session_stopped" && a.actor === "system")).toBe(true);
+  });
+
+  test("after an outage both thresholds pass at once, and the thread still gets its full warning first", async () => {
+    const w = idleWorld();
+    const s = await assigned(w, "idle-outage");
+    const first = await w.manager.sweepIdle(after(w, s.id, 100));
+    expect(first).toEqual({ warned: 1, stopped: 0, dated: 0 });
+    expect((await w.manager.sweepIdle(after(w, s.id, 111))).stopped).toBe(0);
+    expect((await w.manager.sweepIdle(after(w, s.id, 112.02))).stopped).toBe(1);
+  });
+
+  test("a heard reply clears the warning; an unheard one does not", async () => {
+    const w = idleWorld();
+    const s = await assigned(w, "idle-reply");
+    const outsider: Principal = { surface: "fake", externalId: "U_OUT" };
+    await w.manager.sweepIdle(after(w, s.id, 25));
+    expect(w.store.getSession(s.id)!.idle_warned_at).not.toBeNull();
+
+    await w.manager.handleEvent({ kind: "message", conv: conv("idle-reply"), author: outsider, text: "any update?", attachments: [] });
+    expect(w.store.getSession(s.id)!.idle_warned_at).not.toBeNull();
+
+    // A thread member's message is held, not run, so this exercises the message path
+    // itself rather than the end of a turn.
+    await w.manager.handleEvent({ kind: "command", conv: conv("idle-reply"), author: architect, name: "members", args: "add fake:U_MEMBER" });
+    w.store.markIdleWarned(s.id, new Date().toISOString(), w.store.getSession(s.id)!.last_active_at);
+    await w.manager.handleEvent({ kind: "message", conv: conv("idle-reply"), author: member, text: "still on it", attachments: [] });
+    expect(w.store.getSession(s.id)!.idle_warned_at).toBeNull();
+    // Unwarned, the next sweep warns again rather than stopping.
+    expect(await w.manager.sweepIdle(after(w, s.id, 37.02))).toMatchObject({ warned: 1, stopped: 0 });
+  });
+
+  test("a running turn and a stopped session are never warned or stopped", async () => {
+    const w = idleWorld();
+    const running = await assigned(w, "idle-active");
+    w.store.updateSessionStatus(running.id, "active");
+    const stopped = await assigned(w, "idle-stopped");
+    await w.manager.handleEvent({ kind: "command", conv: conv("idle-stopped"), author: architect, name: "stop", args: "" });
+    const res = await w.manager.sweepIdle(after(w, running.id, 1000));
+    expect(res).toEqual({ warned: 0, stopped: 0, dated: 0 });
+    expect(w.store.getSession(running.id)!.status).toBe("active");
+    expect(w.store.getSession(stopped.id)!.status).toBe("stopped");
+  });
+
+  test("reactivating restarts the idle clock and cancels the deletion", async () => {
+    const w = idleWorld();
+    const s = await assigned(w, "idle-resume");
+    await w.manager.sweepIdle(after(w, s.id, 25));
+    await w.manager.sweepIdle(after(w, s.id, 37.02));
+    expect(w.store.getSession(s.id)!.status).toBe("stopped");
+    await assigned(w, "idle-resume");
+    const row = w.store.getSession(s.id)!;
+    expect(row.status).toBe("parked");
+    expect(row.cleanup_at).toBeNull();
+    expect(row.idle_warned_at).toBeNull();
+    expect(await w.manager.sweepIdle(Date.now() + HOUR)).toEqual({ warned: 0, stopped: 0, dated: 0 });
+  });
+
+  test("stop_after_hours = 0 turns idle warnings and stops off", async () => {
+    const w = idleWorld({ idleStopMs: 0 });
+    const s = await assigned(w, "idle-off");
+    expect(await w.manager.sweepIdle(after(w, s.id, 1000))).toEqual({ warned: 0, stopped: 0, dated: 0 });
+  });
+
+  test("a session stopped before stops were dated gets a date and exactly one notice", async () => {
+    const w = idleWorld();
+    const s = await assigned(w, "idle-legacy");
+    await w.manager.handleEvent({ kind: "command", conv: conv("idle-legacy"), author: architect, name: "stop", args: "" });
+    w.store.clearSessionCleanup(s.id); // as an older build left it
+    const now = Date.now();
+    expect((await w.manager.sweepIdle(now)).dated).toBe(1);
+    // Within a second: steps date themselves by when they actually ran.
+    expect(Math.abs(new Date(w.store.getSession(s.id)!.cleanup_at!).getTime() - (now + 7 * 24 * HOUR))).toBeLessThan(1000);
+    expect(w.surface.posts.at(-1)!.text).toContain("Stopped sessions are now deleted 7 days after they stop");
+    expect((await w.manager.sweepIdle(now)).dated).toBe(0);
+  });
+
+  test("the boot sweep leaves due sessions for a sweep that can post to their thread", async () => {
+    const w = idleWorld({ worktreeRetentionMs: 1000 });
+    const s = await assigned(w, "idle-boot");
+    await w.manager.handleEvent({ kind: "command", conv: conv("idle-boot"), author: architect, name: "stop", args: "clean" });
+    const later = Date.now() + 5000;
+    expect((await w.manager.collectWorktrees(later, { orphanMinAgeMs: 0, sessions: false })).cleaned).toBe(0);
+    expect(existsSync(s.worktree_path)).toBe(true);
+    expect((await w.manager.collectWorktrees(later)).cleaned).toBe(1);
+  });
+
+  test("an idle stop whose notice fails to post changes nothing, and is retried", async () => {
+    const w = idleWorld();
+    const s = await assigned(w, "idle-silent");
+    await w.manager.sweepIdle(after(w, s.id, 25));
+    const post = w.surface.post.bind(w.surface);
+    w.surface.post = async () => {
+      throw new Error("slack is down");
+    };
+    expect((await w.manager.sweepIdle(after(w, s.id, 37.02))).stopped).toBe(0);
+    const row = w.store.getSession(s.id)!;
+    expect(row.status).toBe("parked");
+    expect(row.cleanup_at).toBeNull();
+    w.surface.post = post;
+    expect((await w.manager.sweepIdle(after(w, s.id, 38.02))).stopped).toBe(1);
+    expect(w.surface.posts.at(-1)!.text).toContain("I won't see replies here");
+  });
+
+  test("an architect's stop takes effect even when its notice can't be posted", async () => {
+    const w = idleWorld();
+    const s = await assigned(w, "idle-stopfail");
+    w.surface.post = async () => {
+      throw new Error("slack is down");
+    };
+    await w.manager.handleEvent({ kind: "command", conv: conv("idle-stopfail"), author: architect, name: "stop", args: "" });
+    expect(w.store.getSession(s.id)!.status).toBe("stopped");
+    expect(w.store.getSession(s.id)!.cleanup_at).not.toBeNull();
+  });
+
+  test("an unreachable thread is retried, then cleaned up without notice after a week", async () => {
+    const w = idleWorld();
+    const s = await assigned(w, "idle-unreachable");
+    w.surface.post = async () => {
+      throw new Error("is_archived");
+    };
+    const t0 = after(w, s.id, 25);
+    expect((await w.manager.sweepIdle(t0)).warned).toBe(0);
+    expect(w.store.getSession(s.id)!.notice_failed_since).not.toBeNull();
+    // Still inside the week: keep retrying, do nothing.
+    expect((await w.manager.sweepIdle(t0 + 6 * 24 * HOUR)).warned).toBe(0);
+    // Past it: the warning is skipped, and 12 hours later so is the stop notice.
+    expect((await w.manager.sweepIdle(t0 + 7 * 24 * HOUR + 60_000)).warned).toBe(1);
+    expect((await w.manager.sweepIdle(t0 + 7 * 24 * HOUR + 12 * HOUR + 120_000)).stopped).toBe(1);
+    expect(w.store.getSession(s.id)!.status).toBe("stopped");
+    expect(w.store.listAudit(s.id).some((a) => a.event === "notice_skipped")).toBe(true);
+  });
+
+  test("a reply that lands during the unsaved-work check stops the idle stop", async () => {
+    const w = idleWorld();
+    const s = await assigned(w, "idle-check-race");
+    await w.manager.sweepIdle(after(w, s.id, 25));
+    const now = after(w, s.id, 37.02);
+    (w.manager as any).unsavedWork = async (row: { id: string }) => {
+      await new Promise((r) => setTimeout(r, 5)); // activity timestamps are per millisecond
+      w.store.touchSession(row.id);
+      return null;
+    };
+    expect((await w.manager.sweepIdle(now)).stopped).toBe(0);
+    expect(w.store.getSession(s.id)!.status).toBe("parked");
+  });
+
+  test("a reply that lands while the stop notice is posting keeps the session, and says so", async () => {
+    const w = idleWorld();
+    const s = await assigned(w, "idle-post-race");
+    await w.manager.sweepIdle(after(w, s.id, 25));
+    const post = w.surface.post.bind(w.surface);
+    let first = true;
+    w.surface.post = async (c, m) => {
+      if (first) {
+        first = false;
+        await new Promise((r) => setTimeout(r, 5));
+        w.store.touchSession(s.id);
+      }
+      return post(c, m);
+    };
+    expect((await w.manager.sweepIdle(after(w, s.id, 37.02))).stopped).toBe(0);
+    expect(w.store.getSession(s.id)!.status).toBe("parked");
+    expect(w.store.getSession(s.id)!.cleanup_at).toBeNull();
+    expect(w.surface.posts.at(-1)!.text).toContain("I'm keeping this session");
+  });
+
+  test("an architect's stop takes effect before the unsaved-work check runs", async () => {
+    const w = idleWorld();
+    await assigned(w, "idle-stopfirst");
+    let statusDuringCheck: string | undefined;
+    (w.manager as any).unsavedWork = async (row: { id: string }) => {
+      statusDuringCheck = w.store.getSession(row.id)!.status;
+      return null;
+    };
+    await w.manager.handleEvent({ kind: "command", conv: conv("idle-stopfirst"), author: architect, name: "stop", args: "" });
+    expect(statusDuringCheck).toBe("stopped");
+  });
+
+  test("a plain re-stop of a session stopped before stops were dated dates it now", async () => {
+    const w = idleWorld();
+    const s = await assigned(w, "idle-restop-legacy");
+    await w.manager.handleEvent({ kind: "command", conv: conv("idle-restop-legacy"), author: architect, name: "stop", args: "" });
+    w.store.clearSessionCleanup(s.id);
+    await w.manager.handleEvent({ kind: "command", conv: conv("idle-restop-legacy"), author: architect, name: "stop", args: "" });
+    expect(w.store.getSession(s.id)!.cleanup_at).not.toBeNull();
+    expect(w.surface.posts.at(-1)!.text).toContain("The code and the conversation are kept until");
+  });
+
+  test("past its deletion date but before the sweep, a stopped thread says 'shortly', not '1 minute'", async () => {
+    const w = idleWorld({ worktreeRetentionMs: 0 });
+    await assigned(w, "idle-pastdue");
+    await w.manager.handleEvent({ kind: "command", conv: conv("idle-pastdue"), author: architect, name: "stop", args: "clean" });
+    await new Promise((r) => setTimeout(r, 5)); // the date is now in the past
+    await w.manager.handleEvent({ kind: "command", conv: conv("idle-pastdue"), author: architect, name: "help", args: "" });
+    const reply = w.surface.posts.at(-1)!.text;
+    expect(reply).toContain("only until the next cleanup, which is due now");
+    expect(reply).not.toContain("1 minute");
+    await w.manager.handleEvent({ kind: "command", conv: conv("idle-pastdue"), author: architect, name: "stop", args: "" });
+    expect(w.surface.posts.at(-1)!.text).toContain("will be deleted shortly");
+  });
+
+  test("a second `stop clean` that changes nothing says so", async () => {
+    const w = idleWorld();
+    const s = await assigned(w, "idle-reclean");
+    await w.manager.handleEvent({ kind: "command", conv: conv("idle-reclean"), author: architect, name: "stop", args: "clean" });
+    const at = w.store.getSession(s.id)!.cleanup_at;
+    const audits = w.store.listAudit(s.id).length;
+    await w.manager.handleEvent({ kind: "command", conv: conv("idle-reclean"), author: architect, name: "stop", args: "clean" });
+    expect(w.surface.posts.at(-1)!.text).toContain("already set to be deleted");
+    expect(w.store.getSession(s.id)!.cleanup_at).toBe(at);
+    expect(w.store.listAudit(s.id).length).toBe(audits);
+  });
+
+  test("`stop clean` never deletes later than a plain stop would", async () => {
+    const w = idleWorld({ keepStoppedMs: 6 * HOUR });
+    const s = await assigned(w, "idle-shortkeep");
+    await w.manager.handleEvent({ kind: "command", conv: conv("idle-shortkeep"), author: architect, name: "stop", args: "clean" });
+    const at = new Date(w.store.getSession(s.id)!.cleanup_at!).getTime();
+    expect(Math.abs(at - (Date.now() + 6 * HOUR))).toBeLessThan(60_000);
+  });
+
+  test("a fresh stop owns its date: a stale cleanup_at on a parked row never pulls it forward", async () => {
+    const w = idleWorld();
+    const s = await assigned(w, "idle-stale");
+    // markSessionForCleanup refuses a parked row, so plant the stale date directly.
+    (w.store as any).db.query("UPDATE sessions SET cleanup_at = $at WHERE id = $id").run({
+      id: s.id,
+      at: new Date(Date.now() - 24 * HOUR).toISOString(),
+    });
+    await w.manager.handleEvent({ kind: "command", conv: conv("idle-stale"), author: architect, name: "stop", args: "" });
+    const at = new Date(w.store.getSession(s.id)!.cleanup_at!).getTime();
+    expect(Math.abs(at - (Date.now() + 7 * 24 * HOUR))).toBeLessThan(60_000);
+  });
+
+  test("activity while the warning is posting wins: the thread is left unwarned", async () => {
+    const w = idleWorld();
+    const s = await assigned(w, "idle-race");
+    const post = w.surface.post.bind(w.surface);
+    w.surface.post = async (c, m) => {
+      // Someone replies in the moment the warning is on its way out.
+      await new Promise((r) => setTimeout(r, 5));
+      w.store.touchSession(s.id);
+      return post(c, m);
+    };
+    expect((await w.manager.sweepIdle(after(w, s.id, 25))).warned).toBe(0);
+    expect(w.store.getSession(s.id)!.idle_warned_at).toBeNull();
+  });
+
+  test("a zero `stop clean` window means the next sweep, not never", async () => {
+    const w = idleWorld({ worktreeRetentionMs: 0 });
+    const s = await assigned(w, "idle-zero");
+    await w.manager.handleEvent({ kind: "command", conv: conv("idle-zero"), author: architect, name: "stop", args: "clean" });
+    expect(w.store.getSession(s.id)!.cleanup_at).not.toBeNull();
+    expect((await w.manager.collectWorktrees(Date.now() + 1)).cleaned).toBe(1);
+  });
+
+  test("one session busy with a long turn does not hold up the sweep for the others", async () => {
+    const w = idleWorld({ sweepWaitMs: 50 });
+    const busy = await assigned(w, "idle-busy");
+    const other = await assigned(w, "idle-other");
+    let release!: () => void;
+    const entry = (w.manager as any).entryFor(busy.id);
+    entry.chain = new Promise<void>((r) => {
+      release = r;
+    }); // a turn that is still running
+    const now = Math.max(after(w, busy.id, 25), after(w, other.id, 25));
+    const started = Date.now();
+    await w.manager.sweepIdle(now);
+    expect(Date.now() - started).toBeLessThan(5000);
+    expect(w.store.getSession(other.id)!.idle_warned_at).not.toBeNull();
+    expect(w.store.getSession(busy.id)!.idle_warned_at).toBeNull();
+    // Its step was queued, not dropped: it runs once the turn ends.
+    release();
+    await entry.chain;
+    expect(w.store.getSession(busy.id)!.idle_warned_at).not.toBeNull();
+  });
+
+  test("a `stop` command is never activity, so it can't make an idle stop back off", async () => {
+    // Were it activity, a stop typed while an idle stop is posting would make the
+    // idle stop see the touch, say it is keeping the session, and then be stopped.
+    const w = idleWorld();
+    const s = await assigned(w, "idle-stopcmd");
+    await w.manager.handleEvent({ kind: "command", conv: conv("idle-stopcmd"), author: architect, name: "members", args: "add fake:U_MEMBER" });
+    await w.manager.sweepIdle(after(w, s.id, 25));
+    const before = w.store.getSession(s.id)!;
+    await new Promise((r) => setTimeout(r, 5)); // activity timestamps are per millisecond
+    // A heard member's `stop` is refused (architects only) and leaves the clock alone.
+    await w.manager.handleEvent({ kind: "command", conv: conv("idle-stopcmd"), author: member, name: "stop", args: "" });
+    const row = w.store.getSession(s.id)!;
+    expect(row.status).toBe("parked");
+    expect(row.last_active_at).toBe(before.last_active_at);
+    expect(row.idle_warned_at).toBe(before.idle_warned_at);
+  });
+
+  test("the 'cleaned up' message is posted once, only after the deletion succeeds", async () => {
+    const w = idleWorld({ worktreeRetentionMs: 1000 });
+    const s = await assigned(w, "idle-gcfail");
+    await w.manager.handleEvent({ kind: "command", conv: conv("idle-gcfail"), author: architect, name: "stop", args: "clean" });
+    const worktrees = (w.manager as any).worktrees;
+    const remove = worktrees.remove.bind(worktrees);
+    worktrees.remove = async () => {
+      throw new Error("disk on fire");
+    };
+    const cleanedPosts = () => w.surface.posts.filter((p) => p.text.includes("has been cleaned up")).length;
+    expect((await w.manager.collectWorktrees(Date.now() + 5000)).cleaned).toBe(0);
+    expect(cleanedPosts()).toBe(0);
+    expect(w.store.getSession(s.id)).not.toBeNull();
+    worktrees.remove = remove;
+    expect((await w.manager.collectWorktrees(Date.now() + 5000)).cleaned).toBe(1);
+    expect(cleanedPosts()).toBe(1);
+  });
+
+  test("deletion still happens when the final notice cannot be posted", async () => {
+    const w = idleWorld({ worktreeRetentionMs: 1000 });
+    const s = await assigned(w, "idle-postfail");
+    await w.manager.handleEvent({ kind: "command", conv: conv("idle-postfail"), author: architect, name: "stop", args: "clean" });
+    w.surface.post = async () => {
+      throw new Error("slack is down");
+    };
+    expect((await w.manager.collectWorktrees(Date.now() + 5000)).cleaned).toBe(1);
+    expect(existsSync(s.worktree_path)).toBe(false);
   });
 });
 
@@ -2743,6 +3173,19 @@ describe("remote control — driving a thread from the Claude apps", () => {
     expect(w.harness.remoteSink).toBeNull();
   });
 
+  test("an idle stop closes the bridge too", async () => {
+    const w = makeWorld();
+    await assign(w, "rc8i.000001");
+    await rc(w, "rc8i.000001", "on");
+    const id = sid(w, "rc8i.000001");
+    const last = new Date(w.store.getSession(id)!.last_active_at).getTime();
+    await w.manager.sweepIdle(last + 25 * 3600 * 1000);
+    await w.manager.sweepIdle(last + 37.02 * 3600 * 1000);
+    expect(w.store.getSession(id)!.status).toBe("stopped");
+    expect(w.harness.remoteCalls.at(-1)).toMatchObject({ enabled: false });
+    expect(w.harness.remoteSink).toBeNull();
+  });
+
   test("`clear` unpublishes too — the remote transcript is the history being forgotten", async () => {
     const w = makeWorld();
     await assign(w, "rc9.000001");
@@ -2829,6 +3272,7 @@ describe("runtime_grants = false", () => {
   test("the thread help does not advertise grant/revoke", async () => {
     const w = makeWorld(undefined, { manager: { runtimeGrants: false } });
     await w.manager.handleEvent({ kind: "command", conv: conv("rg3.000001"), author: architect, name: "assign", args: "testrepo" });
+    await w.manager.handleEvent({ kind: "command", conv: conv("rg3.000001"), author: architect, name: "help", args: "" });
     const said = w.surface.transcript().join("\n");
     expect(said).toContain("@Condotto budget"); // the help really was posted
     expect(said).not.toContain("@Condotto grant");
@@ -2837,6 +3281,7 @@ describe("runtime_grants = false", () => {
   test("with the default (true), help still advertises them", async () => {
     const w = makeWorld();
     await w.manager.handleEvent({ kind: "command", conv: conv("rg4.000001"), author: architect, name: "assign", args: "testrepo" });
+    await w.manager.handleEvent({ kind: "command", conv: conv("rg4.000001"), author: architect, name: "help", args: "" });
     expect(w.surface.transcript().join("\n")).toContain("@Condotto grant");
   });
 });
