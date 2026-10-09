@@ -373,6 +373,12 @@ export class SlackAdapter implements SurfaceAdapter {
   /** Channels where it was refused repeatedly, and the refusals so far per channel. */
   private nativeStatusOffIn = new Set<string>();
   private nativeStatusRefusals = new Map<string, number>();
+  /**
+   * Threads showing the native status now, by `channel:thread`, with the latest
+   * set-status call in flight. Slack clears the status whenever a message lands in
+   * the thread, so every post we make there sets it again.
+   */
+  private nativeStatusOn = new Map<string, { inFlight: Promise<unknown> }>();
   /** False once `reactions:write` has been refused. */
   private reactionsAllowed = true;
   /** See `SurfaceAdapter.workingGlyph`: `:<working_emoji>:` when configured, else ⏳. Shown only without the native status. */
@@ -708,7 +714,17 @@ export class SlackAdapter implements SurfaceAdapter {
       }),
       (line) => this.log(line),
     );
+    await this.restoreNativeStatus(conv);
     return { conv, messageId: String(res.ts) };
+  }
+
+  /** Our own post just cleared the thread's native status; set it again. */
+  private async restoreNativeStatus(conv: ConversationRef): Promise<void> {
+    const thread = threadTsOf(conv);
+    const on = thread ? this.nativeStatusOn.get(`${conv.channelId}:${thread}`) : undefined;
+    if (!thread || !on) return;
+    on.inFlight = this.setThreadStatus(conv.channelId, thread, true);
+    await on.inFlight;
   }
 
   /**
@@ -755,6 +771,7 @@ export class SlackAdapter implements SurfaceAdapter {
     await (thread
       ? this.app.client.files.uploadV2({ channel_id: conv.channelId, thread_ts: thread, ...common })
       : this.app.client.files.uploadV2({ channel_id: conv.channelId, ...common }));
+    await this.restoreNativeStatus(conv);
   }
 
   async update(ref: PostedRef, msg: OutboundMessage): Promise<void> {
@@ -777,19 +794,22 @@ export class SlackAdapter implements SurfaceAdapter {
     const nativeOn = this.nativeStatusAllowed && !this.nativeStatusOffIn.has(conv.channelId);
     if (nativeOn && (await this.setThreadStatus(conv.channelId, thread, true))) {
       // Refreshed until done: Slack clears a status after two minutes without a
-      // message, and a mid-turn post (a plan) clears it too. `done` waits for a
-      // refresh already in flight, or it could land after the clear and leave the
-      // status showing past the reply.
-      let inFlight: Promise<unknown> = Promise.resolve();
+      // message, and any message in the thread clears it too, which is why `post`
+      // sets it again. `done` waits for a set already in flight, or it could land
+      // after the clear and leave the status showing past the reply.
+      const key = `${conv.channelId}:${thread}`;
+      const on = { inFlight: Promise.resolve() as Promise<unknown> };
+      this.nativeStatusOn.set(key, on);
       const refresh = setInterval(() => {
-        inFlight = this.setThreadStatus(conv.channelId, thread, true);
+        on.inFlight = this.setThreadStatus(conv.channelId, thread, true);
       }, STATUS_REFRESH_MS);
       refresh.unref?.();
       return {
         animated: true,
         done: async () => {
           clearInterval(refresh);
-          await inFlight;
+          if (this.nativeStatusOn.get(key) === on) this.nativeStatusOn.delete(key);
+          await on.inFlight;
           await this.setThreadStatus(conv.channelId, thread, false);
         },
       };

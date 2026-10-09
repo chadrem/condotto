@@ -246,6 +246,7 @@ class FakeHarnessSession implements HarnessSession {
       yield { kind: "progress", text: `step ${i + 1}` };
     }
     yield { kind: "progress", text: "reading README.md" };
+    if (this.parent.replyDelayMs) await Bun.sleep(this.parent.replyDelayMs);
     yield {
       kind: "reply",
       text:
@@ -312,6 +313,8 @@ export class FakeHarness implements HarnessAdapter {
   private resumeScripts: ToolCall[][] = [];
   /** Test hook: awaited at the start of every turn (lets tests hold a turn open). */
   beforeReply: (() => Promise<void>) | null = null;
+  /** Pause between the echo turn's last step and its reply (status edit tests). */
+  replyDelayMs = 0;
   /** Number of extra progress events the default turn emits (status-throttle tests). */
   progressBurst = 0;
   /** If set, the next turn reports that it lost its prior conversation. */

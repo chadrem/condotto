@@ -689,6 +689,12 @@ describe("SlackAdapter — working indicator", () => {
           if (fail.status) throw slackError(fail.status);
           return { ok: true };
         },
+        chat: {
+          postMessage: async (args: Record<string, any>) => {
+            calls.push({ method: "chat.postMessage", args });
+            return { ok: true, ts: "1700000005.000100" };
+          },
+        },
         reactions: {
           add: async (args: Record<string, any>) => {
             calls.push({ method: "reactions.add", args });
@@ -718,6 +724,21 @@ describe("SlackAdapter — working indicator", () => {
     await working!.done("ok");
     expect(calls.at(-1)).toMatchObject({ method: "assistant.threads.setStatus", args: { status: "" } });
     expect(calls.some((c) => c.method.startsWith("reactions."))).toBe(false); // native worked: no reaction
+  });
+
+  test("a post in a thread showing the native status sets it again, since Slack clears it", async () => {
+    const { adapter, calls } = wired();
+    const working = await adapter.showWorking(conv, {});
+    calls.length = 0;
+    await adapter.post(conv, { text: "Reading the code" });
+    expect(calls.map((c) => c.method)).toEqual(["chat.postMessage", "assistant.threads.setStatus"]);
+    expect(calls[1]!.args.status).not.toBe("");
+
+    // Once done, a post (the reply) no longer brings it back.
+    await working!.done("ok");
+    calls.length = 0;
+    await adapter.post(conv, { text: "the reply" });
+    expect(calls.map((c) => c.method)).toEqual(["chat.postMessage"]);
   });
 
   test("where Slack refuses the native status, it falls back to 👀 then ✅, and gives up on the channel after a second refusal", async () => {

@@ -3313,24 +3313,32 @@ export class SessionManager {
     // indicator doesn't: at the agent's first real step, at once if the turn must
     // wait for a slot, and at turn start if there is no animation to stand in. A
     // quick answer is then the only message the turn posts. Until it is posted,
-    // edits are no-ops and the reply is a fresh post.
+    // edits are no-ops and the reply is a fresh post. A skill turn names its first
+    // step, but the skill notice already said it, so that alone doesn't post.
     const glyph = surface.workingGlyph ?? "⚙︎";
     // The surface's own sign of life (Slack: its animated status), started once
     // the turn really runs. Declared first: the status line reads it.
     let working: WorkingIndicator | null = null;
     // The clock starts when the turn really starts (it may first wait for a slot).
     let turnStarted: number | null = null;
-    let currentStep = firstStep ?? "Thinking";
+    // The agent's latest step; null until it reports one (or a skill names one).
+    let currentStep: string | null = firstStep ?? null;
     const statusText = (): string => {
       const elapsed = turnStarted === null ? 0 : Date.now() - turnStarted;
       // No clock in the first few seconds: "· 0s" reads as noise.
       // One busy signal: no glyph while the surface animates its own indicator.
       const lead = working?.animated ? "" : `${glyph} `;
-      return `${lead}${currentStep}${elapsed < 5000 ? "" : ` · ${durationLabel(elapsed, "compact")}`}`;
+      // Until the turn has a slot it is waiting, whatever its first step. After,
+      // with no step yet, "Thinking" unless that would echo the animation.
+      const step =
+        turnStarted === null
+          ? "Waiting for another thread to finish"
+          : (currentStep ?? (working?.animated ? "Started" : "Thinking"));
+      return `${lead}${step}${elapsed < 5000 ? "" : ` · ${durationLabel(elapsed, "compact")}`}`;
     };
     const canEdit = surface.capabilities.editMessages;
-    let statusRef: PostedRef | null = null;
-    let statusPosting = false;
+    // The status message: null until posted, then the post (null if it failed).
+    let statusPost: Promise<PostedRef | null> | null = null;
     let turnFailed = false;
     let lastEdit = 0;
     let replyDelivered = false;
@@ -3346,27 +3354,28 @@ export class SessionManager {
     const CLOCK_TICK_MS = 15_000;
 
     // Posted at most once, on the same chain as the edits, so it lands before them
-    // and delivery waits for it.
+    // and delivery waits for it. It counts as an edit for the throttle.
     const postStatus = (): void => {
-      if (!canEdit || statusPosting || progressClosed) return;
-      statusPosting = true;
-      progressInFlight = progressInFlight
-        .then(async () => {
-          if (!progressClosed) statusRef = await surface.post(conv, { text: statusText() }).catch(() => null);
-        })
-        .catch(() => {});
+      if (!canEdit || statusPost || progressClosed) return;
+      lastEdit = Date.now();
+      const post = progressInFlight
+        .then(() => (progressClosed ? null : surface.post(conv, { text: statusText() })))
+        .catch(() => null);
+      statusPost = post;
+      progressInFlight = post;
     };
 
     const flushProgress = (): void => {
-      if (!statusPosting || progressClosed) return;
+      const post = statusPost;
+      if (!post || progressClosed) return;
       lastEdit = Date.now();
       // Chained, so edits land in order, and delivery waits for every one of them
       // rather than only the latest: an earlier edit finishing late would
       // otherwise overwrite the reply. Each renders when it runs, so it is current.
       progressInFlight = progressInFlight
-        .then(() => {
-          const ref = statusRef;
-          return progressClosed || !ref ? undefined : surface.update(ref, { text: statusText() });
+        .then(async () => {
+          const ref = await post;
+          if (ref && !progressClosed) await surface.update(ref, { text: statusText() });
         })
         .catch(() => {});
     };
@@ -3384,7 +3393,7 @@ export class SessionManager {
       step = step.replace(/\s+/g, " ").trim().slice(0, 120);
       if (!step || step === currentStep) return;
       currentStep = step;
-      if (!statusPosting) {
+      if (!statusPost) {
         postStatus();
         return;
       }
@@ -3414,6 +3423,7 @@ export class SessionManager {
       }
       if (clockTimer) clearInterval(clockTimer);
       await progressInFlight.catch(() => {});
+      const statusRef = statusPost ? await statusPost : null;
       try {
         if (statusRef && !replyDelivered) {
           await surface.update(statusRef, { text });
@@ -3435,9 +3445,7 @@ export class SessionManager {
     // The one acknowledgement that can't wait for a step: a turn about to queue for
     // a slot would otherwise show nothing at all until one frees up.
     const slots = this.turnSlots.snapshot();
-    const queued = slots.active >= slots.max;
-    if (queued && !firstStep) currentStep = "Waiting for another thread to finish";
-    if (queued || firstStep) postStatus();
+    if (slots.active >= slots.max) postStatus();
 
     let producedOutput = false;
     // Bound concurrent harness turns box-wide (the FIFO already serializes per
@@ -3469,16 +3477,10 @@ export class SessionManager {
         clockTimer.unref?.();
       }
       working = surface.showWorking ? await surface.showWorking(conv, replyTo ? { replyTo } : {}).catch(() => null) : null;
-      if (!working?.animated) {
-        // Nothing else shows the turn is alive, so the status line does.
-        postStatus();
-      } else if (statusPosting) {
-        // A waiting notice went out with the glyph before the animation started.
-        // Take the glyph off, and say the wait is over without echoing the
-        // animation's own "thinking".
-        if (!firstStep) currentStep = "Started";
-        flushProgress();
-      }
+      // A waiting notice is replaced by where the turn is now; otherwise, with no
+      // animation, the status line is the only sign the turn is alive.
+      if (statusPost) flushProgress();
+      else if (!working?.animated) postStatus();
       const harnessSession = await this.getOrAttachHarness(session, memoryRoot);
       // A daemon restart kills the bridge but not the row's flag, so the first turn
       // after one re-publishes. Idempotent and a map lookup when the bridge is already

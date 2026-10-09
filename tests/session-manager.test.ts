@@ -1461,6 +1461,7 @@ describe("busy indicator", () => {
   test("the status is one line: the surface's glyph and the current step, never a list", async () => {
     const w = makeWorld();
     w.harness.progressBurst = 5;
+    w.harness.replyDelayMs = 2700; // long enough for the throttled step edit to land
     await turn(w, "bz1.000001");
     const status = w.surface.posts.find((p) => p.text.startsWith("⏳"))!;
     expect(status.text).toBe("⏳ Thinking");
@@ -1556,9 +1557,15 @@ describe("busy indicator", () => {
     expect(w.surface.updates).toHaveLength(0);
   });
 
-  test("a turn that must wait for a slot says so at once, then drops the wait when it starts", async () => {
+  async function until(cond: () => boolean): Promise<void> {
+    for (let i = 0; i < 500 && !cond(); i++) await Bun.sleep(5);
+    expect(cond()).toBe(true);
+  }
+
+  /** Two threads and one slot: the second thread's turn queues behind the first. */
+  async function queuedTurn(animated: boolean) {
     const w = makeWorld(undefined, { maxConcurrentTurns: 1 });
-    w.surface.workingAnimated = true;
+    w.surface.workingAnimated = animated;
     for (const id of ["bz12.00001", "bz13.00001"]) {
       await w.manager.handleEvent({ kind: "command", conv: conv(id), author: architect, name: "assign", args: "testrepo" });
     }
@@ -1571,15 +1578,25 @@ describe("busy indicator", () => {
       return held;
     };
     const a = w.manager.handleEvent({ kind: "message", conv: conv("bz12.00001"), author: architect, text: "a", attachments: [] });
-    await Bun.sleep(20);
+    await until(() => w.harness.allTurns.length === 1);
     const b = w.manager.handleEvent({ kind: "message", conv: conv("bz13.00001"), author: architect, text: "b", attachments: [] });
-    await Bun.sleep(20);
+    await until(() => w.surface.posts.some((p) => p.text === "⏳ Waiting for another thread to finish"));
     const waiting = w.surface.posts.find((p) => p.text === "⏳ Waiting for another thread to finish")!;
-    expect(waiting).toBeDefined();
     release();
     await Promise.all([a, b]);
-    const edits = w.surface.updates.filter((u) => u.messageId === waiting.messageId).map((u) => u.text);
+    return w.surface.updates.filter((u) => u.messageId === waiting.messageId).map((u) => u.text);
+  }
+
+  test("a turn that must wait for a slot says so at once, then drops the wait when it starts", async () => {
+    const edits = await queuedTurn(true);
     expect(edits[0]).toBe("Started");
+    expect(edits.at(-1)).toContain("echo(");
+  });
+
+  test("without animation, a queued turn's waiting notice becomes 'Thinking' when it starts", async () => {
+    const edits = await queuedTurn(false);
+    expect(edits[0]).toBe("⏳ Thinking");
+    expect(edits.some((t) => t.includes("Waiting"))).toBe(false);
     expect(edits.at(-1)).toContain("echo(");
   });
 
