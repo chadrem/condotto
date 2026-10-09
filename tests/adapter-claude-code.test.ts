@@ -377,7 +377,6 @@ describe("claude-code adapter: background cost/cancel (rider b)", () => {
   });
 
   test("a cancel that lands AFTER a success was buffered delivers the completed reply + cost (not dropped)", async () => {
-    let interrupts = 0;
     let releaseHold: () => void = () => {};
     const held = new Promise<void>((r) => { releaseHold = r; });
     const q = fakeQueryI(async function* () {
@@ -388,7 +387,7 @@ describe("claude-code adapter: background cost/cancel (rider b)", () => {
       // cancel that lands once the turn has already finished its work.
       yield { type: "assistant", message: { content: [{ type: "tool_use", name: "Read", input: { file_path: "x" } }] } };
       await held;
-    }, () => { interrupts++; releaseHold(); });
+    }, () => { releaseHold(); });
     const session = await new ClaudeCodeAdapter(q).create({ cwd: "/wt/x", system: "s" });
     const events: TurnEvent[] = [];
     let fired = false;
@@ -553,26 +552,6 @@ describe("claude-code adapter: plan mode", () => {
   test("the adapter advertises the capability, so the core may offer the command", async () => {
     expect(new ClaudeCodeAdapter(fakeQuery(async function* () {})).capabilities.planMode).toBe(true);
   });
-});
-
-describe("claude-code adapter: skill shell execution is pinned off", () => {
-  async function captureSettings(harness?: Record<string, unknown>): Promise<any> {
-    let captured: any;
-    const q = fakeQuery(async function* (opts) {
-      captured = opts;
-      yield { type: "result", subtype: "success", result: "ok", total_cost_usd: 0 };
-    });
-    await collect(new ClaudeCodeAdapter(q), allowGate, harness);
-    return captured.settings;
-  }
-
-  // A skill body's `!`cmd`` runs during EXPANSION — before the model, and so before
-  // the PreToolUse hook — which puts it outside policy.ts entirely: no allowlist,
-  // no hard-deny, no audit. It must be off, and it must be off in BOTH memory
-  // postures, because `settings` is rebuilt per turn from `h.memoryDir` and an
-  // early version of that ternary would have dropped this key on one branch.
-
-
 });
 
 describe("claude-code adapter: model + effort resolution", () => {
@@ -978,5 +957,18 @@ describe("claude-code adapter: sandbox mode", () => {
     expect(on.ok).toBe(false);
     if (!on.ok) expect(on.reason).toMatch(/sandboxed/);
     expect((await session.setRemoteControl!(false, { name: "t", sink })).ok).toBe(true);
+  });
+});
+
+describe("claude-code adapter: remote control under api_key auth", () => {
+  test("is refused before any keychain read, when built the way the daemon builds it", async () => {
+    const session = await new ClaudeCodeAdapter(undefined, undefined, { mode: "api_key", apiKey: "sk-test" }).create({
+      cwd: "/wt/s1",
+      system: "s",
+    });
+    const sink = { onMessage: () => {}, onClosed: () => {} } as any;
+    const on = await session.setRemoteControl!(true, { name: "t", sink });
+    expect(on.ok).toBe(false);
+    if (!on.ok) expect(on.reason).toMatch(/API key/);
   });
 });

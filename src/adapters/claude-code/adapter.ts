@@ -664,7 +664,7 @@ const MAX_COMMAND_NAME_LEN = 64;
 
 function asHandle(handle: SessionHandle): ClaudeCodeHandle {
   const h = handle as Partial<ClaudeCodeHandle> | null;
-  if (!h || h.v !== 1 || (h.sessionId !== null && h.sessionId !== undefined && typeof h.sessionId !== "string")) {
+  if (h?.v !== 1 || (h.sessionId !== null && h.sessionId !== undefined && typeof h.sessionId !== "string")) {
     throw new Error("claude-code: unrecognized session handle");
   }
   // A legacy (pre-skills) handle and a corrupted one are treated alike: an unusable
@@ -1422,7 +1422,11 @@ export class ClaudeCodeAdapter implements HarnessAdapter {
      * Undefined = today's behaviour, the CLI runs as the daemon's own user.
      */
     private sandbox?: AdapterSandbox,
-  ) {}
+  ) {
+    // Built here, not in a field initializer: those run before parameter properties
+    // are assigned, so one would see `auth` as undefined.
+    this.bridges = new RemoteBridges(auth);
+  }
   readonly capabilities: HarnessCapabilities = {
     mechanicalGating: true, // defer-based gating (verified), wired live
     resumeAfterRestart: true,
@@ -1465,7 +1469,7 @@ export class ClaudeCodeAdapter implements HarnessAdapter {
    * session's whole life. A per-object registry would drop the architect's claude.ai
    * link every time they typed `subagents off`.
    */
-  private readonly bridges = new RemoteBridges(this.auth);
+  private readonly bridges: RemoteBridges;
 
   async create(opts: { cwd: string; system: string; root?: string }): Promise<HarnessSession> {
     return new ClaudeCodeSession(

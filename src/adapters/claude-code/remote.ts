@@ -4,6 +4,7 @@ import {
   fetchRemoteCredentials,
   isCreateSessionFailure,
   isCredentialsFailure,
+  isCredentialsRejection,
 } from "@anthropic-ai/claude-agent-sdk/bridge";
 import type { RemoteControlResult, RemoteControlSink } from "../../core/types";
 import type { HarnessAuth } from "./adapter";
@@ -204,6 +205,7 @@ export class RemoteBridges {
       if (isCredentialsFailure(creds)) {
         return { ok: false, reason: credentialFailureReason(creds.reason) };
       }
+      if (isCredentialsRejection(creds)) return { ok: false, reason: OAUTH_REJECTED };
 
       const bridge: LiveBridge = {
         handle: undefined as unknown as LiveBridge["handle"],
@@ -267,6 +269,7 @@ export class RemoteBridges {
     if (isCreateSessionFailure(created)) {
       return { ok: false, reason: `claude.ai refused to create the session (${created.status}: ${created.detail ?? "no detail"}).` };
     }
+    if (isCredentialsRejection(created)) return { ok: false, reason: OAUTH_REJECTED };
     return created;
   }
 
@@ -374,6 +377,13 @@ function textOf(msg: unknown): string | null {
 }
 
 /** These are terminal — the SDK marks them as "retrying will fail identically". */
+/**
+ * A 401 on the login itself. Distinct from the terminal failures: the same token
+ * will never work, but a fresh login will.
+ */
+const OAUTH_REJECTED =
+  "claude.ai rejected this machine's login. Run `claude auth login` on the daemon host, then try again.";
+
 function credentialFailureReason(reason: string): string {
   switch (reason) {
     case "untrusted_device":
@@ -404,6 +414,6 @@ function closeReason(code?: number): string {
   }
 }
 
-function withTimeout<T>(p: Promise<T>, ms: number): Promise<T | void> {
-  return Promise.race([p, new Promise<void>((r) => setTimeout(r, ms))]);
+function withTimeout<T>(p: Promise<T>, ms: number): Promise<T | undefined> {
+  return Promise.race([p, new Promise<undefined>((r) => setTimeout(() => r(undefined), ms))]);
 }
