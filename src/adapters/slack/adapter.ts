@@ -96,8 +96,13 @@ export function slashEphemeralText(
 //   @Condotto assign        -> assigns the EXISTING thread the mention is in
 //                             (app_mention events do carry thread_ts).
 //   @Condotto stop|status   -> thread-scoped commands.
+//   @Condotto at top level  -> refused with an ephemeral note; nothing else runs.
 
 const SURFACE_ID = "slack";
+
+const TOP_LEVEL_REFUSAL =
+  "I only work in threads, so each piece of work gets its own conversation. " +
+  "Start a thread under any message and mention me there, or run `/condotto assign <repo>` to open a fresh one.";
 
 /**
  * Spread into EVERY `chat.postMessage` and `chat.update`. An unfurl makes Slack's
@@ -493,21 +498,38 @@ export class SlackAdapter implements SurfaceAdapter {
     if (this.dedup.has(`mention:${event.channel}:${event.ts}`)) return;
     const text = String(event.text ?? "");
     const channelId = String(event.channel);
-    const rootTs = String(event.thread_ts ?? event.ts);
+    // Condotto only works in threads, so each piece of work is its own
+    // conversation. A top-level mention, command or not, never reaches the core.
+    if (!event.thread_ts) {
+      await this.refuseTopLevel(channelId, String(event.user));
+      return;
+    }
     const author = { surface: SURFACE_ID, externalId: String(event.user) };
-    const conv = { surfaceId: SURFACE_ID, channelId, conversationId: encodeConversationId(channelId, rootTs) };
+    const conv = {
+      surfaceId: SURFACE_ID,
+      channelId,
+      conversationId: encodeConversationId(channelId, String(event.thread_ts)),
+    };
 
     const cmd = this.mentionCommand(text);
     if (cmd) {
       this.emit({ kind: "command", conv, author, name: cmd.name, args: cmd.args });
       return;
     }
-    // A bare/"help" mention, or ANY non-command mention at the top level (no
-    // thread yet), is a request for guidance — root a thread if needed and let
-    // the core guide (onboarding if unassigned, command summary if assigned). A
-    // conversational mention INSIDE a thread instead flows through handleMessage.
-    if (this.isHelpMention(text) || !event.thread_ts) {
+    // A bare/"help" mention is a request for guidance: the core answers with
+    // onboarding if unassigned, the command summary if assigned. Any other
+    // mention is conversation and flows through handleMessage.
+    if (this.isHelpMention(text)) {
       this.emit({ kind: "command", conv, author, name: "help", args: "" });
+    }
+  }
+
+  /** Tell only the sender, so a refused mention leaves nothing in the channel. */
+  private async refuseTopLevel(channel: string, user: string): Promise<void> {
+    try {
+      await this.app.client.chat.postEphemeral({ channel, user, text: TOP_LEVEL_REFUSAL });
+    } catch (err) {
+      this.log(`[slack] top-level mention refusal failed: ${err}`);
     }
   }
 

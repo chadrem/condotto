@@ -336,6 +336,73 @@ describe("SlackAdapter.handleMessage — sync guards run ahead of the async hop"
   });
 });
 
+describe("SlackAdapter.handleMention — threads only", () => {
+  // Condotto only works in threads. A top-level mention, command or not, gets a
+  // private note and never reaches the core.
+  function wired(postEphemeral?: (args: Record<string, any>) => Promise<unknown>) {
+    const logs: string[] = [];
+    const emitted: InboundEvent[] = [];
+    const ephemerals: Record<string, any>[] = [];
+    const adapter = new SlackAdapter(TOKENS, AUTHORITY, OPERATOR, (m) => logs.push(m));
+    (adapter as any).botUserId = BOT;
+    (adapter as any).emit = (e: InboundEvent) => emitted.push(e);
+    (adapter as any).app = {
+      client: {
+        chat: {
+          postEphemeral:
+            postEphemeral ??
+            (async (args: Record<string, any>) => {
+              ephemerals.push(args);
+              return {};
+            }),
+        },
+      },
+    };
+    const mention = (over: Record<string, any>) =>
+      (adapter as any).handleMention({ user: "U0ABBY", channel: "C1", ts: "1700000001.000100", ...over });
+    return { emitted, ephemerals, logs, mention };
+  }
+
+  test("a top-level command mention emits nothing and tells only the sender", async () => {
+    const { emitted, ephemerals, mention } = wired();
+    await mention({ text: `<@${BOT}> assign webapp` });
+    expect(emitted).toHaveLength(0);
+    expect(ephemerals).toHaveLength(1);
+    expect(ephemerals[0]).toMatchObject({ channel: "C1", user: "U0ABBY" });
+    expect(ephemerals[0]!.thread_ts).toBeUndefined();
+    expect(ephemerals[0]!.text).toContain("only work in threads");
+  });
+
+  test("a top-level bare mention gets the same note instead of help", async () => {
+    const { emitted, ephemerals, mention } = wired();
+    await mention({ text: `<@${BOT}>` });
+    await mention({ text: `<@${BOT}> what does this repo do?`, ts: "1700000002.000100" });
+    expect(emitted).toHaveLength(0);
+    expect(ephemerals).toHaveLength(2);
+  });
+
+  test("inside a thread, commands and help still reach the core", async () => {
+    const { emitted, ephemerals, mention } = wired();
+    await mention({ text: `<@${BOT}> assign webapp`, thread_ts: "1700000000.000100" });
+    await mention({ text: `<@${BOT}> help`, thread_ts: "1700000000.000100", ts: "1700000002.000100" });
+    expect(ephemerals).toHaveLength(0);
+    expect(emitted).toEqual([
+      expect.objectContaining({ kind: "command", name: "assign", args: "webapp" }),
+      expect.objectContaining({ kind: "command", name: "help" }),
+    ]);
+    for (const e of emitted) expect((e as any).conv.conversationId).toBe("C1:1700000000.000100");
+  });
+
+  test("a failed note is logged, not thrown", async () => {
+    const { emitted, logs, mention } = wired(async () => {
+      throw new Error("not_in_channel");
+    });
+    await mention({ text: `<@${BOT}> assign webapp` });
+    expect(emitted).toHaveLength(0);
+    expect(logs.some((l) => l.includes("not_in_channel"))).toBe(true);
+  });
+});
+
 describe("parseMentionCommand — clear", () => {
   test("`clear` and `/clear` are the same command, and case doesn't matter", () => {
     // `/clear` is accepted because that is how Claude Code spells it, and it is what

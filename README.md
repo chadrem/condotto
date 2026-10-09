@@ -317,7 +317,8 @@ In a channel the bot has been invited to:
 | `/condotto status` | architect | Daemon-wide dashboard: uptime, session counts, turns in flight, config. |
 | `/condotto stop` | anyone | Lists this channel's sessions and points you to the in-thread stop. |
 
-**In a session thread**, mention `@Condotto`.
+**In a session thread**, mention `@Condotto`. Condotto only works in threads: a
+mention at the top of a channel just gets a private note asking you to start one.
 
 | Mention | Who | Default | Does |
 |---|---|---|---|
