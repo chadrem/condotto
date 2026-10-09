@@ -1533,14 +1533,54 @@ describe("busy indicator", () => {
     expect(w.surface.posts.some((p) => p.text.includes("couldn't pick up our earlier conversation"))).toBe(true);
   });
 
-  test("while the surface animates its own indicator, the status line drops its glyph", async () => {
+  test("while the surface animates, the status message waits for a real step and has no glyph", async () => {
     const w = makeWorld();
     w.surface.workingAnimated = true;
     await turn(w, "bz10.00001");
-    const status = w.surface.posts.find((p) => p.text.startsWith("⏳"))!; // the acknowledgement, before it started
-    const edits = w.surface.updates.filter((u) => u.messageId === status.messageId && !u.text.includes("echo("));
-    expect(edits.length).toBeGreaterThan(0);
-    for (const u of edits) expect(u.text.startsWith("⏳")).toBe(false);
+    expect(w.surface.transcript().some((t) => t.startsWith("⏳") || t === "Thinking")).toBe(false);
+    const status = w.surface.posts.find((p) => p.text === "reading README.md")!;
+    expect(w.surface.updates.at(-1)).toMatchObject({ messageId: status.messageId });
+    expect(w.surface.updates.at(-1)!.text).toContain("echo(");
+  });
+
+  test("while the surface animates, a quick answer is the turn's only message", async () => {
+    const w = makeWorld();
+    w.surface.workingAnimated = true;
+    await w.manager.handleEvent({ kind: "command", conv: conv("bz11.00001"), author: architect, name: "assign", args: "testrepo" });
+    const before = w.surface.posts.length;
+    w.harness.scriptTurn([]);
+    await w.manager.handleEvent({ kind: "message", conv: conv("bz11.00001"), author: architect, text: "go", attachments: [] });
+    const posted = w.surface.posts.slice(before);
+    expect(posted).toHaveLength(1);
+    expect(posted[0]!.text).toContain("echo(");
+    expect(w.surface.updates).toHaveLength(0);
+  });
+
+  test("a turn that must wait for a slot says so at once, then drops the wait when it starts", async () => {
+    const w = makeWorld(undefined, { maxConcurrentTurns: 1 });
+    w.surface.workingAnimated = true;
+    for (const id of ["bz12.00001", "bz13.00001"]) {
+      await w.manager.handleEvent({ kind: "command", conv: conv(id), author: architect, name: "assign", args: "testrepo" });
+    }
+    let release!: () => void;
+    const held = new Promise<void>((r) => (release = r));
+    let first = true;
+    w.harness.beforeReply = () => {
+      if (!first) return Promise.resolve();
+      first = false;
+      return held;
+    };
+    const a = w.manager.handleEvent({ kind: "message", conv: conv("bz12.00001"), author: architect, text: "a", attachments: [] });
+    await Bun.sleep(20);
+    const b = w.manager.handleEvent({ kind: "message", conv: conv("bz13.00001"), author: architect, text: "b", attachments: [] });
+    await Bun.sleep(20);
+    const waiting = w.surface.posts.find((p) => p.text === "⏳ Waiting for another thread to finish")!;
+    expect(waiting).toBeDefined();
+    release();
+    await Promise.all([a, b]);
+    const edits = w.surface.updates.filter((u) => u.messageId === waiting.messageId).map((u) => u.text);
+    expect(edits[0]).toBe("Started");
+    expect(edits.at(-1)).toContain("echo(");
   });
 
   test("a surface with no working indicator still gets the status line", async () => {

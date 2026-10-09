@@ -185,10 +185,11 @@ Create the app at <https://api.slack.com/apps> using **From scratch**. Then:
 7. **Invite the bot**: `/invite @Condotto`. Without this, reads fail with
    `not_in_channel`.
 
-> **The "working" animation.** While Condotto works, its status line shows one plain
-> step and a clock, like `Running a command: “Run the tests” · 42s`. On top of
-> that it shows Slack's native animated "Condotto is working on it…" status, with
-> rotating messages. That works with the scopes above, no extra setup. If your
+> **The "working" animation.** While Condotto works, Slack shows its native
+> animated "Condotto is working on it…" status, with rotating messages. Once the
+> agent starts doing something, a status line appears with one plain step and a
+> clock, like `Running a command: “Run the tests” · 42s`, and it becomes the reply.
+> A quick answer skips the status line entirely. That works with the scopes above, no extra setup. If your
 > workspace refuses it, Condotto notices on its own, uses the 👀 reaction instead
 > and logs why, once; turning on the app's **Agents** feature (with the
 > `assistant:write` scope) may then help. Only then does the status line carry an
