@@ -651,6 +651,16 @@ describe("SlackAdapter — no unfurls", () => {
     expect(calls[1]!.args).toMatchObject({ unfurl_links: false, unfurl_media: false });
   });
 
+  test("only a block error falls back to text; any other failure is not retried", async () => {
+    const { adapter, calls } = wired();
+    (adapter as any).app.client.chat.postMessage = async (args: Record<string, any>) => {
+      calls.push({ method: "chat.postMessage", args });
+      throw Object.assign(new Error("request timed out"), { data: { ok: false, error: "timeout" } });
+    };
+    await expect(adapter.post(conv, { text: "| a |\n|---|\n| 1 |" })).rejects.toThrow("request timed out");
+    expect(calls).toHaveLength(1);
+  });
+
   test("every chat.postMessage / chat.update call site in the adapter spreads NO_UNFURL", async () => {
     // The anchor message posted by `/condotto assign` lives inside a Bolt handler
     // that needs a live app to reach, so pin the source instead: one NO_UNFURL per

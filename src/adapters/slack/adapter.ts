@@ -117,16 +117,21 @@ export const NO_UNFURL = { unfurl_links: false, unfurl_media: false } as const;
 /**
  * Send a rendered message, and if Slack refuses its blocks, send the text alone.
  * The text already carries every table as a monospace fence, so a refused table
- * block costs formatting, never the reply.
+ * block costs formatting, never the reply. Only a block error retries: any other
+ * failure may have been stored already, and a retry would post the reply twice.
  */
 async function withTextFallback<T>(
   msg: { text: string; blocks?: unknown[] },
   send: (body: { text: string; blocks?: never[] }) => Promise<T>,
+  log: (line: string) => void,
 ): Promise<T> {
   if (!msg.blocks) return send({ text: msg.text });
   try {
     return await send(msg as { text: string; blocks: never[] });
-  } catch {
+  } catch (err) {
+    const code = (err as { data?: { error?: string } }).data?.error;
+    if (code !== "invalid_blocks" && code !== "invalid_blocks_format") throw err;
+    log(`[slack] Slack refused a table block (${code}); sent the reply as plain text.`);
     return send({ text: msg.text });
   }
 }
@@ -699,6 +704,7 @@ export class SlackAdapter implements SurfaceAdapter {
         ...body,
         ...NO_UNFURL,
       }),
+      (line) => this.log(line),
     );
     return { conv, messageId: String(res.ts) };
   }
@@ -759,6 +765,7 @@ export class SlackAdapter implements SurfaceAdapter {
         ...body,
         ...NO_UNFURL,
       }),
+      (line) => this.log(line),
     );
   }
 

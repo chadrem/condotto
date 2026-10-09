@@ -33,59 +33,39 @@ const MAX_MENTIONS_PER_MESSAGE = 8; // bounded blast radius, counted per DISTINC
  * markup. A raw `<@U…>` written by the model was already escaped above and stays
  * escaped — the token is the only sanctioned path to a notification.
  */
-function linkifyMentions(text: string, seen: Set<string> = new Set()): string {
+function linkifyMentions(text: string, seen: Set<string>): string {
   return text.replace(MENTION_TOKEN_RE, (_whole, key: string) => {
-    const m = key.match(SLACK_ID_RE);
-    if (!m) return key;
-    const id = m[1]!;
-    if (!seen.has(id)) {
-      if (seen.size >= MAX_MENTIONS_PER_MESSAGE) return key;
-      seen.add(id);
-    }
-    return `<@${id}>`;
+    const id = mentionId(key, seen);
+    return id ? `<@${id}>` : key;
   });
 }
+
+/**
+ * The Slack id a mention token may ping, or null when it must degrade to its bare
+ * key. Every mention Condotto mints, in text or in a table cell, is decided here,
+ * against one `seen` budget per message.
+ */
+function mentionId(key: string, seen: Set<string>): string | null {
+  const id = key.match(SLACK_ID_RE)?.[1];
+  if (!id) return null;
+  if (!seen.has(id)) {
+    if (seen.size >= MAX_MENTIONS_PER_MESSAGE) return null;
+    seen.add(id);
+  }
+  return id;
+}
+
+// The markdown we rewrite, shared by prose and table cells so the two can't drift.
+const BOLD_RE = /\*\*(.+?)\*\*/;
+const LINK_RE = /\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/;
+const INLINE_CODE_RE = /`([^`\n]+)`/;
+const all = (re: RegExp): RegExp => new RegExp(re.source, "g");
 
 export function renderMrkdwn(markdown: string): string {
-  return renderMrkdwnSharing(markdown, new Set());
+  return textOf(parse(markdown), new Set());
 }
 
-// `seen` is the mention budget. One message rendered in several pieces shares a
-// single set, so the cap still holds for the whole message.
-function renderMrkdwnSharing(markdown: string, seen: Set<string>): string {
-  // Protect code (fenced blocks AND inline spans) from any rewriting. The
-  // placeholder is delimited with NUL bytes, which cannot collide with model
-  // output text because any pre-existing NULs are stripped first.
-  const code: string[] = [];
-  const protect = (m: string): string => {
-    code.push(m);
-    return `\u0000${code.length - 1}\u0000`;
-  };
-  let text = tablesToFences(markdown.replace(/\u0000/g, ""))
-    .replace(/```[\s\S]*?```/g, protect)
-    .replace(/`[^`\n]+`/g, protect);
-
-  text = escapeSlack(text);
-  text = linkifyMentions(text, seen); // after escaping, before code is restored (A4)
-  text = text.replace(/^#{1,6}\s+(.+)$/gm, "*$1*"); // headers -> bold lines
-  text = text.replace(/\*\*(.+?)\*\*/g, "*$1*"); // **bold** -> *bold*
-  text = text.replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g, "<$2|$1>"); // [t](url) -> <url|t>
-
-  text = text.replace(/\u0000(\d+)\u0000/g, (_, i) => {
-    // Slack has no fence language tags — they'd render as literal first-line text.
-    const block = code[Number(i)]!.replace(/^```[a-zA-Z0-9_+-]+\n/, "```\n");
-    return escapeSlack(block);
-  });
-
-  if (text.length > MAX_MESSAGE_CHARS) {
-    // Never leave a half-written `<@U…>` or `<url|text>` at the cut — Slack
-    // renders the remnant as literal junk.
-    text = `${text.slice(0, MAX_MESSAGE_CHARS).replace(/<[^>]*$/, "")}\n… _(truncated)_`;
-  }
-  return text;
-}
-
-// -- tables -------------------------------------------------------------------
+// -- parsing --------------------------------------------------------------------
 //
 // mrkdwn has no tables, so a GitHub pipe table would arrive as literal pipes and
 // dashes. One table per message becomes a native `table` block. Every other table,
@@ -98,14 +78,33 @@ interface PipeTable {
   aligns: Align[];
   rows: string[][];
 }
-type Segment = { raw: string; table?: PipeTable };
+type Segment = { prose: string } | { table: PipeTable };
+interface Parsed {
+  segs: Segment[];
+  code: string[];
+}
 
-// Slack's table block limits. It allows one table per message.
-const TABLE_MAX_ROWS = 100; // header included
-const TABLE_MAX_COLS = 20;
-const TABLE_MAX_CHARS = 10_000; // across every cell in the message
-const SECTION_MAX_CHARS = 3_000; // a section block's mrkdwn text
-const MAX_BLOCKS = 50;
+/**
+ * Protect code, then cut what is left into prose and pipe tables. Code (fences
+ * anywhere, then inline spans) becomes NUL-delimited placeholders FIRST, which
+ * cannot collide with model text because any pre-existing NULs are stripped. So
+ * "inside code" is decided once: a table quoted in code is never seen as one, and
+ * no later rewrite touches code.
+ */
+function parse(markdown: string): Parsed {
+  const code: string[] = [];
+  const protect = (m: string): string => {
+    code.push(m);
+    return `\u0000${code.length - 1}\u0000`;
+  };
+  const text = markdown
+    .replace(/\u0000/g, "")
+    .replace(/```[\s\S]*?```/g, protect)
+    .replace(all(INLINE_CODE_RE), protect);
+  return { segs: splitTables(text), code };
+}
+
+const restore = (s: string, code: string[]): string => s.replace(/\u0000(\d+)\u0000/g, (_, i) => code[Number(i)]!);
 
 const DELIMITER_RE = /^\s*\|?\s*:?-+:?\s*(\|\s*:?-+:?\s*)*\|?\s*$/;
 
@@ -124,20 +123,18 @@ function alignOf(cell: string): Align {
 }
 
 /**
- * Cut markdown into prose and pipe tables. A table is a header row, a delimiter
- * row with the same cell count, then every following line that has a pipe. Lines
- * inside a ``` fence are never tables, so quoted markdown stays literal.
+ * A table is a header row, a delimiter row with the same cell count, then every
+ * following line that has a pipe. Short rows are padded and long ones trimmed to
+ * the header.
  */
-function splitTables(markdown: string): Segment[] {
-  const lines = markdown.split("\n");
+function splitTables(text: string): Segment[] {
+  const lines = text.split("\n");
   const out: Segment[] = [];
   let prose: string[] = [];
-  let inFence = false;
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i]!;
-    if (line.trimStart().startsWith("```")) inFence = !inFence;
     const next = lines[i + 1];
-    if (!inFence && line.includes("|") && next?.includes("|") && DELIMITER_RE.test(next)) {
+    if (line.includes("|") && next?.includes("|") && DELIMITER_RE.test(next)) {
       const header = splitRow(line);
       const delims = splitRow(next);
       if (header.length === delims.length) {
@@ -149,30 +146,51 @@ function splitTables(markdown: string): Segment[] {
           rows.push(cells);
           j++;
         }
-        if (prose.length) out.push({ raw: prose.join("\n") });
+        if (prose.length) out.push({ prose: prose.join("\n") });
         prose = [];
-        out.push({ raw: lines.slice(i, j).join("\n"), table: { header, aligns: delims.map(alignOf), rows } });
+        out.push({ table: { header, aligns: delims.map(alignOf), rows } });
         i = j - 1;
         continue;
       }
     }
     prose.push(line);
   }
-  if (prose.length) out.push({ raw: prose.join("\n") });
+  if (prose.length) out.push({ prose: prose.join("\n") });
   return out;
 }
 
-/** A cell as plain text: emphasis and code markers dropped, links kept readable. */
-function plainCell(cell: string): string {
-  return cell
-    .replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g, "$1 ($2)")
-    .replace(/\*\*(.+?)\*\*/g, "$1")
+// -- rendering ------------------------------------------------------------------
+
+/** Prose as Slack mrkdwn. Escaping happens BEFORE link and mention markup. */
+function renderProse(prose: string, code: string[], seen: Set<string>): string {
+  let text = escapeSlack(prose);
+  text = linkifyMentions(text, seen); // after escaping, before code is restored (A4)
+  text = text.replace(/^#{1,6}\s+(.+)$/gm, "*$1*"); // headers -> bold lines
+  text = text.replace(all(BOLD_RE), "*$1*"); // **bold** -> *bold*
+  text = text.replace(all(LINK_RE), "<$2|$1>"); // [t](url) -> <url|t>
+  return text.replace(/\u0000(\d+)\u0000/g, (_, i) => {
+    // Slack has no fence language tags — they'd render as literal first-line text.
+    const block = code[Number(i)]!.replace(/^```[a-zA-Z0-9_+-]+\n/, "```\n");
+    return escapeSlack(block);
+  });
+}
+
+/**
+ * A cell as plain text for a monospace fence: emphasis and code markers dropped,
+ * links kept readable, and a mention token shown as its bare key, since nothing
+ * inside a fence can ping.
+ */
+function plainCell(cell: string, code: string[]): string {
+  return restore(cell, code)
+    .replace(all(LINK_RE), "$1 ($2)")
+    .replace(all(BOLD_RE), "$1")
+    .replace(MENTION_TOKEN_RE, "$1")
     .replace(/`/g, "");
 }
 
-function fenceTable(t: PipeTable): string {
-  const all = [t.header, ...t.rows].map((r) => r.map(plainCell));
-  const widths = t.header.map((_, c) => Math.max(...all.map((r) => r[c]!.length)));
+function fenceTable(t: PipeTable, code: string[]): string {
+  const rows = [t.header, ...t.rows].map((r) => r.map((c) => plainCell(c, code)));
+  const widths = t.header.map((_, c) => Math.max(...rows.map((r) => r[c]!.length)));
   const pad = (s: string, c: number): string => {
     const gap = widths[c]! - s.length;
     if (t.aligns[c] === "right") return " ".repeat(gap) + s;
@@ -181,37 +199,47 @@ function fenceTable(t: PipeTable): string {
   };
   const line = (r: string[]): string => r.map(pad).join("  ").trimEnd();
   const rule = widths.map((w) => "-".repeat(w)).join("  ");
-  return ["```", line(all[0]!), rule, ...all.slice(1).map(line), "```"].join("\n");
+  return escapeSlack(["```", line(rows[0]!), rule, ...rows.slice(1).map(line), "```"].join("\n"));
 }
 
-function tablesToFences(markdown: string): string {
-  if (!markdown.includes("|")) return markdown;
-  return splitTables(markdown)
-    .map((s) => (s.table ? fenceTable(s.table) : s.raw))
-    .join("\n");
+function renderPieces(segs: Segment[], code: string[], seen: Set<string>): string {
+  return segs.map((s) => ("prose" in s ? renderProse(s.prose, code, seen) : fenceTable(s.table, code))).join("\n");
 }
 
-function fitsTableBlock(t: PipeTable): boolean {
-  const cells = [t.header, ...t.rows];
-  const chars = cells.reduce((n, r) => n + r.reduce((m, c) => m + c.length, 0), 0);
-  return cells.length <= TABLE_MAX_ROWS && t.header.length <= TABLE_MAX_COLS && chars <= TABLE_MAX_CHARS;
+function textOf({ segs, code }: Parsed, seen: Set<string>): string {
+  const text = renderPieces(segs, code, seen);
+  if (text.length <= MAX_MESSAGE_CHARS) return text;
+  // Never leave a half-written `<@U…>` or `<url|text>` at the cut — Slack
+  // renders the remnant as literal junk.
+  return `${text.slice(0, MAX_MESSAGE_CHARS).replace(/<[^>]*$/, "")}\n… _(truncated)_`;
+}
+
+// -- table blocks ---------------------------------------------------------------
+
+// Slack's table block limits. It allows one table per message.
+const TABLE_MAX_ROWS = 100; // header included
+const TABLE_MAX_COLS = 20;
+const TABLE_MAX_CHARS = 10_000; // across every cell in the message
+const SECTION_MAX_CHARS = 3_000; // a section block's mrkdwn text
+
+function fitsTableBlock(t: PipeTable, code: string[]): boolean {
+  const rows = [t.header, ...t.rows];
+  const chars = rows.reduce((n, r) => n + r.reduce((m, c) => m + restore(c, code).length, 0), 0);
+  return rows.length <= TABLE_MAX_ROWS && t.header.length <= TABLE_MAX_COLS && chars <= TABLE_MAX_CHARS;
 }
 
 const CELL_TOKEN_RE = new RegExp(
-  [
-    /\*\*(.+?)\*\*/.source, // 1: bold
-    /`([^`]+)`/.source, // 2: code
-    /\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/.source, // 3, 4: link
-    MENTION_TOKEN_RE.source, // 5: mention token
-  ].join("|"),
+  [BOLD_RE.source, INLINE_CODE_RE.source, LINK_RE.source, MENTION_TOKEN_RE.source].join("|"),
   "gi",
 );
 
 /**
- * One cell as rich text. rich_text elements are literal, so nothing is escaped,
- * and a mention token degrades to its bare key: a cell never pings anyone.
+ * One cell as rich text. rich_text elements are literal, so nothing is escaped. A
+ * mention token becomes a `user` element within the message's mention budget and
+ * its bare key past it, exactly as in prose.
  */
-function richCell(cell: string, bold: boolean): unknown {
+function richCell(cell: string, code: string[], bold: boolean, seen: Set<string>): unknown {
+  const raw = restore(cell, code);
   const elements: unknown[] = [];
   const text = (t: string, style: Record<string, boolean> = {}): void => {
     if (!t) return;
@@ -219,32 +247,55 @@ function richCell(cell: string, bold: boolean): unknown {
     elements.push(Object.keys(s).length ? { type: "text", text: t, style: s } : { type: "text", text: t });
   };
   let last = 0;
-  for (const m of cell.matchAll(CELL_TOKEN_RE)) {
-    text(cell.slice(last, m.index));
+  for (const m of raw.matchAll(CELL_TOKEN_RE)) {
+    text(raw.slice(last, m.index));
     if (m[1] !== undefined) text(m[1], { bold: true });
     else if (m[2] !== undefined) text(m[2], { code: true });
     else if (m[3] !== undefined) elements.push({ type: "link", url: m[4], text: m[3] });
-    else text(m[5]!);
+    else {
+      const id = mentionId(m[5]!, seen);
+      if (id) elements.push({ type: "user", user_id: id });
+      else text(m[5]!);
+    }
     last = m.index + m[0].length;
   }
-  text(cell.slice(last));
+  text(raw.slice(last));
   // An empty cell still needs an element; a lone space renders as blank.
   if (!elements.length) elements.push({ type: "text", text: " " });
   return { type: "rich_text", elements: [{ type: "rich_text_section", elements }] };
 }
 
-function tableBlock(t: PipeTable): unknown {
+function tableBlock(t: PipeTable, code: string[], seen: Set<string>): unknown {
   const block: Record<string, unknown> = {
     type: "table",
-    rows: [t.header.map((c) => richCell(c, true)), ...t.rows.map((r) => r.map((c) => richCell(c, false)))],
+    rows: [
+      t.header.map((c) => richCell(c, code, true, seen)),
+      ...t.rows.map((r) => r.map((c) => richCell(c, code, false, seen))),
+    ],
   };
   if (t.aligns.some((a) => a)) block.column_settings = t.aligns.map((a) => (a ? { align: a } : null));
   return block;
 }
 
 /**
- * Rendered mrkdwn cut into section-sized pieces at line breaks. A fence open at
- * a cut is closed there and reopened in the next piece, so code stays code.
+ * Pull a cut point back so it never lands inside `<url|text>` or `<@U…>`, inside
+ * an entity like `&amp;`, or between the halves of a surrogate pair.
+ */
+function safeCut(s: string, cut: number): number {
+  const lt = s.lastIndexOf("<", cut - 1);
+  if (lt > s.lastIndexOf(">", cut - 1)) cut = lt;
+  const amp = s.lastIndexOf("&", cut - 1);
+  if (amp > s.lastIndexOf(";", cut - 1)) cut = amp;
+  const c = s.charCodeAt(cut - 1);
+  if (c >= 0xd800 && c <= 0xdbff) cut--;
+  return cut;
+}
+
+/**
+ * Rendered mrkdwn cut into section-sized pieces, at a line break if there is one
+ * in the back half, else at a space, else wherever `safeCut` allows. Nothing is
+ * dropped at a cut. A fence open at a cut is closed there and reopened in the next
+ * piece, so code stays code.
  */
 function sections(mrkdwn: string): unknown[] {
   const limit = SECTION_MAX_CHARS - 8; // room to close and reopen a fence
@@ -252,10 +303,12 @@ function sections(mrkdwn: string): unknown[] {
   let rest = mrkdwn.trim();
   while (rest.length > limit) {
     let cut = rest.lastIndexOf("\n", limit);
+    if (cut < limit / 2) cut = rest.lastIndexOf(" ", limit);
     if (cut < limit / 2) cut = limit;
+    cut = safeCut(rest, cut);
+    if (cut <= 0) cut = limit; // one unbreakable run: cut it rather than loop
     let piece = rest.slice(0, cut);
-    rest = rest.slice(cut).replace(/^\n/, "");
-    if (cut === limit) piece = piece.replace(/<[^>]*$/, ""); // never a half-written link
+    rest = rest.slice(cut).replace(/^[\n ]/, "");
     if ((piece.match(/```/g) ?? []).length % 2) {
       piece += "\n```";
       rest = `\`\`\`\n${rest}`;
@@ -267,24 +320,24 @@ function sections(mrkdwn: string): unknown[] {
 }
 
 /**
- * A whole outbound message. Without a table this is exactly `renderMrkdwn`. With
- * one, the first table that fits becomes a `table` block between mrkdwn sections,
- * and `text` (every table fenced) is what notifications show.
+ * A whole outbound message. `text` is exactly `renderMrkdwn`. When there is a table
+ * that fits, the first one becomes a `table` block between mrkdwn sections, and
+ * `text` (every table fenced) is what notifications show.
  */
 export function renderMessage(markdown: string): { text: string; blocks?: unknown[] } {
+  const parsed = parse(markdown);
+  const { segs, code } = parsed;
   const seen = new Set<string>();
-  const text = renderMrkdwnSharing(markdown, seen);
-  if (!markdown.includes("|")) return { text };
-  const segs = splitTables(markdown.replace(/\u0000/g, ""));
-  const at = segs.findIndex((s) => s.table && fitsTableBlock(s.table));
+  const text = textOf(parsed, seen);
+  const at = segs.findIndex((s) => "table" in s && fitsTableBlock(s.table, code));
   if (at === -1) return { text };
-  const raw = (ss: Segment[]): string => ss.map((s) => s.raw).join("\n");
-  const blocks = [
-    ...sections(renderMrkdwnSharing(raw(segs.slice(0, at)), seen)),
-    tableBlock(segs[at]!.table!),
-    ...sections(renderMrkdwnSharing(raw(segs.slice(at + 1)), seen)),
-  ];
-  return blocks.length > MAX_BLOCKS ? { text } : { text, blocks };
+  const before = renderPieces(segs.slice(0, at), code, seen);
+  const after = renderPieces(segs.slice(at + 1), code, seen);
+  // Blocks have no truncation marker of their own, so a message too long to send
+  // whole goes as `text`, which says where it was cut.
+  if (before.length + after.length > MAX_MESSAGE_CHARS) return { text };
+  const table = (segs[at] as { table: PipeTable }).table;
+  return { text, blocks: [...sections(before), tableBlock(table, code, seen), ...sections(after)] };
 }
 
 // -- guided choice rendering (Block Kit) ------------------------------------
@@ -298,7 +351,7 @@ export function choiceBlocks(prompt: ChoicePrompt): { text: string; blocks: unkn
   const options = prompt.options.slice(0, 5); // Slack caps buttons per actions block
   return {
     // Notification fallback: bypasses renderMrkdwn, so escape then linkify (A4).
-    text: linkifyMentions(escapeSlack(prompt.text)),
+    text: linkifyMentions(escapeSlack(prompt.text), new Set()),
     blocks: [
       { type: "section", text: { type: "mrkdwn", text: renderMrkdwn(prompt.text) } },
       {

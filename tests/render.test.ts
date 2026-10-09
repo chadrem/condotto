@@ -79,7 +79,7 @@ describe("renderMessage (tables)", () => {
     expect(text).toContain("```");
   });
 
-  test("cells carry bold, code and links; a mention token in a cell never pings", () => {
+  test("cells carry bold, code, links and mentions", () => {
     const md = "| a | b |\n|---|---|\n| **x** `y` | [d](https://e.com) @[[slack:U12345]] |";
     const { blocks } = renderMessage(md) as { blocks: any[] };
     const [c1, c2] = blocks[0].rows[1].map((c: any) => c.elements[0].elements);
@@ -89,8 +89,54 @@ describe("renderMessage (tables)", () => {
       { type: "text", text: "y", style: { code: true } },
     ]);
     expect(c2[0]).toEqual({ type: "link", url: "https://e.com", text: "d" });
-    expect(JSON.stringify(c2)).not.toContain("<@");
-    expect(c2.at(-1).text).toBe("slack:U12345");
+    expect(c2.at(-1)).toEqual({ type: "user", user_id: "U12345" });
+  });
+
+  test("a cell mention counts against the message's mention cap", () => {
+    const ids = Array.from({ length: 8 }, (_, i) => `@[[slack:U${1000 + i}]]`).join(" ");
+    const { blocks } = renderMessage(`${ids}\n\n| who |\n|---|\n| @[[slack:U9999]] |`) as { blocks: any[] };
+    expect(blocks[1].rows[1][0].elements[0].elements).toEqual([{ type: "text", text: "slack:U9999" }]);
+  });
+
+  test("a one-line fence before a table doesn't hide the table", () => {
+    const { blocks } = renderMessage("```npm test``` passes now.\n\n| a | b |\n|---|---|\n| 1 | 2 |") as {
+      blocks: any[];
+    };
+    expect(blocks.map((b) => b.type)).toEqual(["section", "table"]);
+    expect(blocks[0].text.text).toBe("```npm test``` passes now.");
+  });
+
+  test("a table inside a fence opened mid-line stays code", () => {
+    const md = "Output: ```\n| a | b |\n|---|---|\n| 1 | 2 |\n```";
+    expect(renderMessage(md)).toEqual({ text: md });
+  });
+
+  test("a mention in a fenced table shows its bare key, never the raw token", () => {
+    const out = renderMrkdwn("| who |\n|---|\n| @[[slack:U12345]] |");
+    expect(out).toContain("slack:U12345");
+    expect(out).not.toContain("@[[");
+  });
+
+  test("a section cut never drops or splits a link, an entity or an emoji", () => {
+    const line = `${"x".repeat(2980)} see [docs](https://example.com/aaaa) tail`;
+    const amps = `${"a&b ".repeat(10)}${"&".repeat(1000)}${"😀".repeat(600)}`;
+    for (const prose of [line, amps]) {
+      const { blocks } = renderMessage(`${prose}\n\n| a |\n|---|\n| 1 |`) as { blocks: any[] };
+      const secs = blocks.filter((b) => b.type === "section").map((b) => b.text.text as string);
+      expect(secs.length).toBeGreaterThan(1);
+      expect(secs.join("").replace(/\s/g, "")).toBe(renderMrkdwn(prose).replace(/\s/g, ""));
+      for (const t of secs) {
+        expect(t).not.toMatch(/&[a-z]*$|^[a-z]*;|<[^>]*$|^[^<]*>/);
+        expect(t).not.toMatch(/[\ud800-\udbff]$|^[\udc00-\udfff]/);
+      }
+    }
+  });
+
+  test("a message too long for blocks goes as truncated text, not a table after '(truncated)'", () => {
+    const md = `${"line of prose\n".repeat(1000)}\n| a |\n|---|\n| 1 |\n\nafter`;
+    const out = renderMessage(md);
+    expect(out.blocks).toBeUndefined();
+    expect(out.text).toContain("(truncated)");
   });
 
   test("ragged rows are padded or trimmed to the header", () => {
