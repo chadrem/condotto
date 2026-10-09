@@ -336,10 +336,10 @@ In a channel the bot has been invited to:
 | `@Condotto /<skill> [args]` | architect | — | Run one of your skills. Mention Condotto first: Slack eats a message that starts with `/`. |
 | `@Condotto skills` | architect | — | List the skills this thread can run, and the file each one is. |
 | `@Condotto grant @user <architect\|member> [everywhere]` | architect | — | Let someone else drive. The role is required. This channel unless you add `everywhere`. Survives restarts. |
-| `@Condotto revoke @user [everywhere]` | architect | — | Take it back. |
+| `@Condotto revoke @user [everywhere]` | architect | — | Take it back. Unless config gives them a role, they are no longer heard, and anything of theirs not yet passed on is dropped. |
 | `@Condotto member @user [@user…]` | architect | **nobody** | Let someone be heard in *this* thread. Also `@Condotto add @user`. |
-| `@Condotto remove @user [@user…]` | architect | — | Stop hearing them here. Anything of theirs not yet passed on is dropped. |
-| `@Condotto members` | architect | — | Who, besides architects, this thread hears. |
+| `@Condotto remove @user [@user…]` | architect | — | Stop hearing them here. Anything of theirs not yet passed on is dropped. Someone heard through a channel role stays heard; use `revoke` or config. |
+| `@Condotto members` | architect | — | Who, besides architects, this thread hears, including anyone heard through a channel role. Also `@Condotto member list`. |
 
 Every default above comes from `condotto.toml` and can be changed there, per repo,
 or per thread with the command. A thread starts with `opus` at `high` effort
@@ -657,7 +657,8 @@ Common events: `tool_call` (with `tool`, `decision`, and `agentId` when a subage
 made the call), `message_in` / `message_out`, `message_held` for a message kept for
 the next architect turn, `attachments_received` / `attachment_sent` /
 `attachment_failed`, `session_assigned` / `session_stopped`, `role_granted` /
-`role_revoked`, `budget_exceeded`, `error`.
+`role_revoked`, `member_added` / `member_removed`, `message_ignored` for a message
+from someone not heard (who and when, never the text), `budget_exceeded`, `error`.
 
 Reading the live database is safe. WAL mode reads without blocking the writer. For
 a guaranteed-consistent copy, `sqlite3 condotto.sqlite ".backup snapshot.sqlite"`.
@@ -680,6 +681,13 @@ starts keeping notes at the next boot. Set `memory = false` on a repo, or
 `[defaults].memory = false`, if you would rather it did not. And if your
 `condotto.toml` still has a `role = "observer"` entry, change it to `member` —
 there are only two roles now, and the daemon will refuse to start until you do.
+
+**Upgrading from a version where everyone was heard:** people without a role used
+to be heard in every thread. Now they are not, and nothing in the thread says so.
+Add them to the threads they belong in with `@Condotto member @them`, or give them
+`member` for a whole channel in `[[roles]]`. Check `@Condotto members` too: an old
+`observer` grant became `member`, which is now heard in every thread of its
+channel.
 
 ### Worktrees and cleanup
 

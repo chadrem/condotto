@@ -44,6 +44,11 @@ What follows is the whole model.
   attaches only to the verified `user=` id in the header, never to display names
   or message content. This is the control that a trusted team does not replace:
   the attacker here is a string in a dependency README, not a person in Slack.
+- **Who is heard.** Only architects, `member` role holders and people an
+  architect added to the thread (`session_members`). Everyone else's message is
+  dropped in `handleMessage` before files are fetched, framing or the turn log.
+  `hears()` is asked again after files land and when a queued turn starts, because
+  `remove` and `revoke` can land in between. Any new inbound path goes through it.
 - **Cost cap.** Off by default, money not security. `@Condotto budget <usd>` opts
   a thread in, `budget off` opts back out, and the row is authoritative once
   `assign` has seeded it. The thread cap is checked BETWEEN turns; a thread that
