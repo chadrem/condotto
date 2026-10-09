@@ -1,0 +1,12 @@
+#!/bin/sh
+# Runs the same check as GitHub CI before anything leaves this machine.
+# `bun install` points git here (the `prepare` script). Bypass with --no-verify.
+
+# The check runs against the working tree, so uncommitted edits would be
+# tested in place of the commits actually being pushed.
+if ! git diff --quiet || ! git diff --cached --quiet; then
+  echo "pre-push: commit or stash your changes first, so CI tests what you push." >&2
+  exit 1
+fi
+
+exec bun run ci

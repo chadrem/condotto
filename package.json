@@ -15,6 +15,7 @@
     "typecheck": "tsc --noEmit -p .",
     "lint": "biome lint --error-on-warnings",
     "ci": "bun run typecheck && bun run lint && bun test",
+    "prepare": "git config core.hooksPath .githooks || true",
     "build": "bun run scripts/build-binary.ts",
     "build:darwin-arm64": "bun run scripts/build-binary.ts --target bun-darwin-arm64",
     "build:darwin-x64": "bun run scripts/build-binary.ts --target bun-darwin-x64",
