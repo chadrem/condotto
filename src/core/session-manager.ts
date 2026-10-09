@@ -312,7 +312,7 @@ function threadCommandHelp(opts: { runtimeGrants: boolean; remoteControl: boolea
   return [
     `Architect commands — mention me in this thread:`,
     `• \`@Condotto model <opus|sonnet|fable>\` / \`@Condotto effort <low…max>\` — tune the implementer`,
-    `• \`@Condotto subagents on|off\` · \`@Condotto workflows on|off\` — multi-agent power (both on by default)`,
+    `• \`@Condotto subagents on|off\` · \`@Condotto workflows on|off\` — multi-agent power (the settings above show this thread's)`,
     ...(opts.runtimeGrants
       ? [`• \`@Condotto grant @user architect [everywhere]\` · \`@Condotto revoke @user\` — delegate authority (this channel, or everywhere)`]
       : []),

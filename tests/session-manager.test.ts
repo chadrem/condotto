@@ -1623,6 +1623,17 @@ describe("harness capabilities — subagents & workflows", () => {
     expect(intro).toContain("cost budget");
   });
 
+  test("help never claims a default the install doesn't have", async () => {
+    // The operator turned workflows off for this repo; help must not say they're on.
+    const w = makeWorld();
+    w.store.upsertRepo({ name: "testrepo", path: repoPath, defaultBranch: "main", workflows: false });
+    await assign(w, "set0.000001");
+    await w.manager.handleEvent({ kind: "command", conv: conv("set0.000001"), author: architect, name: "help", args: "" });
+    const msg = w.surface.posts.at(-1)!.text;
+    expect(msg).toContain("workflows off");
+    expect(msg).not.toContain("on by default");
+  });
+
   test("re-announcing reflects a capability the architect changed", async () => {
     const w = makeWorld();
     const c = conv("set2.000001");
