@@ -641,7 +641,7 @@ describe("SlackAdapter — no unfurls", () => {
     calls.length = 0;
     (adapter as any).app.client.chat.update = async (args: Record<string, any>) => {
       calls.push({ method: "chat.update", args });
-      if (args.blocks) throw Object.assign(new Error("invalid_blocks"), { data: { ok: false, error: "invalid_blocks" } });
+      if (args.blocks) throw Object.assign(new Error("msg_blocks_too_long"), { data: { ok: false, error: "msg_blocks_too_long" } });
       return { ok: true };
     };
     await adapter.update({ conv, messageId: "1700000009.000100" }, { text: md });

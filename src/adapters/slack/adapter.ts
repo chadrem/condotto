@@ -117,8 +117,10 @@ export const NO_UNFURL = { unfurl_links: false, unfurl_media: false } as const;
 /**
  * Send a rendered message, and if Slack refuses its blocks, send the text alone.
  * The text already carries every table as a monospace fence, so a refused table
- * block costs formatting, never the reply. Only a block error retries: any other
- * failure may have been stored already, and a retry would post the reply twice.
+ * block costs formatting, never the reply. Only an error about the blocks retries
+ * (`invalid_blocks`, `invalid_blocks_format`, `msg_blocks_too_long`, and any later
+ * code that names blocks): any other failure may have been stored already, and a
+ * retry would post the reply twice.
  */
 async function withTextFallback<T>(
   msg: { text: string; blocks?: unknown[] },
@@ -130,7 +132,7 @@ async function withTextFallback<T>(
     return await send(msg as { text: string; blocks: never[] });
   } catch (err) {
     const code = (err as { data?: { error?: string } }).data?.error;
-    if (code !== "invalid_blocks" && code !== "invalid_blocks_format") throw err;
+    if (!code?.includes("block")) throw err;
     log(`[slack] Slack refused a table block (${code}); sent the reply as plain text.`);
     return send({ text: msg.text });
   }

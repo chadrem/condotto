@@ -132,6 +132,64 @@ describe("renderMessage (tables)", () => {
     }
   });
 
+  test("an unclosed fence keeps everything after it as code, closed", () => {
+    const md = "```\n| a | b |\n|---|---|\n| 1 | 2 |";
+    expect(renderMessage(md)).toEqual({ text: `${md}\n\`\`\`` });
+  });
+
+  test("a link too long for one section stays readable text, so no cut breaks it", () => {
+    const url = `https://e.com/${"a".repeat(3100)}`;
+    const { blocks } = renderMessage(`see [t](${url}) ok\n\n| a |\n|---|\n| 1 |`) as { blocks: any[] };
+    const secs = blocks.filter((b) => b.type === "section").map((b) => b.text.text as string);
+    expect(secs.join("")).toContain("see t (https://e.com/");
+    for (const t of secs) expect(t).not.toMatch(/<[^>]*$|^[^<]*>/);
+  });
+
+  test("the 12k truncation never splits an entity or an emoji", () => {
+    expect(renderMrkdwn(`${"x".repeat(11998)}&&&&&`)).toBe(`${"x".repeat(11998)}\n… _(truncated)_`);
+    expect(renderMrkdwn(`${"x".repeat(11999)}😀`)).toBe(`${"x".repeat(11999)}\n… _(truncated)_`);
+  });
+
+  test("a mention inside bold in a cell still becomes a mention", () => {
+    const { blocks } = renderMessage("| a |\n|---|\n| **@[[slack:U1]]** |") as { blocks: any[] };
+    expect(blocks[0].rows[1][0].elements[0].elements).toEqual([{ type: "user", user_id: "U1" }]);
+  });
+
+  test("a multi-line code block on a table row stays on one line", () => {
+    const md = "| a | b |\n|---|---|\n| ```\nx\ny\n``` | 2 |";
+    expect(renderMrkdwn(md)).toBe("```\na    b\n---  -\nx y  2\n```");
+    const { blocks } = renderMessage(md) as { blocks: any[] };
+    expect(blocks[0].rows[1][0].elements[0].elements).toEqual([{ type: "text", text: "x y", style: { code: true } }]);
+  });
+
+  test("a one-line fence in a cell keeps all its text", () => {
+    expect(renderMrkdwn("| cmd |\n|---|\n| ```npm test``` |")).toBe("```\ncmd\n--------\nnpm test\n```");
+  });
+
+  test("a pipe inside `code` on a table row separates cells, as on GitHub", () => {
+    const { blocks } = renderMessage("| `x | y` |\n|---|---|\n| 1 | 2 |") as { blocks: any[] };
+    expect(blocks[0].rows[1]).toHaveLength(2);
+  });
+
+  test("a long code block splits between lines, never inside one", () => {
+    const line1 = "a ".repeat(500).trim();
+    const line2 = "b ".repeat(1000).trim();
+    const { blocks } = renderMessage(`\`\`\`\n${line1}\n${line2}\n\`\`\`\n\n| a |\n|---|\n| 1 |`) as {
+      blocks: any[];
+    };
+    const secs = blocks.filter((b) => b.type === "section").map((b) => b.text.text as string);
+    expect(secs.length).toBe(2);
+    expect(secs.flatMap((t) => t.split("\n")).filter((l) => l !== "```")).toEqual([line1, line2]);
+  });
+
+  test("a code line longer than a section is split, and the split ends", () => {
+    const line = "c".repeat(5000);
+    const { blocks } = renderMessage(`\`\`\`\n${line}\n\`\`\`\n\n| a |\n|---|\n| 1 |`) as { blocks: any[] };
+    const secs = blocks.filter((b) => b.type === "section").map((b) => b.text.text as string);
+    expect(secs.length).toBe(2);
+    expect(secs.flatMap((t) => t.split("\n")).filter((l) => l !== "```").join("")).toBe(line);
+  });
+
   test("a message too long for blocks goes as truncated text, not a table after '(truncated)'", () => {
     const md = `${"line of prose\n".repeat(1000)}\n| a |\n|---|\n| 1 |\n\nafter`;
     const out = renderMessage(md);
