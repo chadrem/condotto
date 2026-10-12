@@ -30,6 +30,8 @@ import { RemoteBridges } from "./remote";
  */
 export type QueryFn = (args: { prompt: unknown; options: Record<string, any> }) => AsyncIterable<Record<string, any>> & {
   interrupt(): Promise<void>;
+  /** Terminates the CLI subprocess, and with it every background shell it started. */
+  close?(): void;
 };
 
 // Claude Code harness adapter over the Agent SDK.
@@ -1070,6 +1072,14 @@ class ClaudeCodeSession implements HarnessSession {
     // result still carries total_cost_usd, so the runaway cap stays accurate.
     let abortReason: AbortReason | null = null;
     let drainedCost: number | undefined;
+    // The main thread's words since its last tool call. A completed result does not
+    // end the turn while a background task is live: a finished shell or subagent
+    // wakes the model for another result, so the loop waits for the CLI to exit. A
+    // shell that never exits holds it until the watchdog, and these words are then
+    // the answer, posted rather than thrown away.
+    let lastWords = "";
+    // The iterator finished on its own, so the CLI has exited and there is nothing to close.
+    let ended = false;
     try {
       const iterator = q[Symbol.asyncIterator]();
       // A SINGLE in-flight pull, re-raced against the timeout across abort re-arms. It
@@ -1077,7 +1087,15 @@ class ClaudeCodeSession implements HarnessSession {
       // iterator.next() pending, and a fresh next() would be queued BEHIND it — so the
       // stale pull would swallow the interrupt's aborted result (and its cost) and the
       // new one would get `done`. Advance `pending` only after actually consuming a step.
-      let pending = iterator.next();
+      // Every pull is marked handled up front: the loop can leave with one still in
+      // flight, and if that one rejects nothing else would be listening. The race below
+      // still sees the rejection.
+      const pull = () => {
+        const p = iterator.next();
+        p.catch(() => {});
+        return p;
+      };
+      let pending = pull();
       while (true) {
         // Inactivity watchdog: a wedged SDK query must not hang the session's turn
         // queue forever. Once we're draining after an abort, wait only briefly for
@@ -1108,13 +1126,18 @@ class ClaudeCodeSession implements HarnessSession {
           // No SDK activity for 10 minutes. Interrupt to halt any detached background
           // workflow (which would otherwise keep spending after the turn parks), then
           // re-race the SAME `pending` so the interrupt's aborted result is drained.
+          // Sent, not awaited: with the model idle and a background shell holding the
+          // CLI, interrupt() does not resolve, and the drain window is the bound.
           abortReason = "timeout";
-          await q.interrupt().catch(() => {});
+          void q.interrupt().catch(() => {});
           continue;
         }
-        if (step.done) break;
+        if (step.done) {
+          ended = true;
+          break;
+        }
         // Consumed a real message — prefetch the next one on a fresh pull.
-        pending = iterator.next();
+        pending = pull();
 
         const m = step.value as Record<string, any>;
         // Mirror every runtime message to the remote transcript when this session is
@@ -1189,10 +1212,18 @@ class ClaudeCodeSession implements HarnessSession {
         }
         if (m.type === "assistant") {
           const blocks: any[] = m.message?.content ?? [];
+          // A subagent's messages carry the tool_use that started it; only the main
+          // thread's words can be the turn's answer.
+          const mainThread = !m.parent_tool_use_id;
           for (const block of blocks) {
             if (block?.type === "tool_use") {
+              if (mainThread) lastWords = "";
               if (block.name === WORKFLOW_TOOL) ranWorkflow = true;
               yield { kind: "progress", text: describeToolUse(block.name, block.input) };
+            } else if (mainThread && block?.type === "text" && typeof block.text === "string" && block.text.trim()) {
+              // The CLI streams one content block per message, so a long answer can
+              // arrive as several consecutive text messages.
+              lastWords = lastWords ? `${lastWords}\n\n${block.text.trim()}` : block.text.trim();
             }
           }
           continue;
@@ -1207,10 +1238,13 @@ class ClaudeCodeSession implements HarnessSession {
           // now emits an aborted result. Capture its cost and report the cancellation.
           if (this.cancelRequested && !abortReason) abortReason = "cancel";
           // Already aborting (cancel/timeout, or a budget breach handled just below):
-          // just drain the cost; the single post-loop notice reports it.
+          // drain the cost; the single post-loop notice reports it. This result is the
+          // interrupt's last word, so stop here: a background shell keeps the CLI alive
+          // through an interrupt, and waiting for it to exit would only burn the drain
+          // window.
           if (abortReason) {
             if (cost !== undefined) drainedCost = cost;
-            continue;
+            break;
           }
           if (m.subtype === "success") {
             // Buffer, don't yield: a later result may supersede this one (workflow
@@ -1227,7 +1261,7 @@ class ClaudeCodeSession implements HarnessSession {
               // drain + report once via the post-loop notice.
               abortReason = "budget";
               if (cost !== undefined) drainedCost = cost;
-              await q.interrupt().catch(() => {});
+              void q.interrupt().catch(() => {});
               continue;
             }
             // The turn hit its cost budget and stopped. Surface it clearly
@@ -1252,7 +1286,15 @@ class ClaudeCodeSession implements HarnessSession {
       // (the cancel raced a just-finished turn), deliver that reply + its cost — dropping
       // it would lose the reply AND under-count the turn's spend against the runaway cap.
       const abort: AbortReason | null = abortReason ?? (this.cancelRequested && !pendingReply ? "cancel" : null);
-      if (abort) {
+      // The watchdog stopped a turn after the agent had written something with no tool
+      // call since. Post those words, then the notice as its own error, so the thread
+      // keeps the answer and the turn is still recorded and audited as stopped. Not the
+      // buffered result: that can be a resume's empty one or a workflow's "launched".
+      if (abort === "timeout" && lastWords) {
+        const costUsd = drainedCost ?? pendingReply?.costUsd;
+        yield { kind: "reply", text: lastWords, costUsd, workflow: ranWorkflow };
+        yield { kind: "error", message: `${abortNotice(abort, ranWorkflow, costUsd)} The reply above is the last thing I wrote.` };
+      } else if (abort) {
         yield { kind: "error", message: abortNotice(abort, ranWorkflow, drainedCost), costUsd: drainedCost };
       } else if (pendingReply) {
         // Deliver the final buffered reply (the last success result of the turn).
@@ -1292,6 +1334,12 @@ class ClaudeCodeSession implements HarnessSession {
       // The query is done (or being abandoned) — stop routing interrupts to it so a
       // later `@Condotto cancel` on an idle session is a clean no-op, not a stray abort.
       if (this.activeQuery === q) this.activeQuery = null;
+      // A query we stopped reading (a timeout, a thrown pull) can still have a live CLI
+      // behind it, kept up by a background shell even after an interrupt. Closing it
+      // ends both, so nothing a turn started outlives the turn. The session resumes
+      // cleanly afterwards, opening with the orphaned shell's stopped notification and
+      // an empty zero-turn result.
+      if (!ended) q.close?.();
       // Close the remote transcript's turn so the Claude app stops showing a spinner.
       // In the finally, not after the loop, because an aborted or thrown turn has to
       // stop the spinner too — a remote viewer left watching a dead spinner has no way
@@ -1338,7 +1386,15 @@ class ClaudeCodeSession implements HarnessSession {
     const q = this.activeQuery;
     if (!q) return;
     this.cancelRequested = true;
-    await q.interrupt().catch(() => {});
+    // Not awaited: interrupt() can stay pending indefinitely (see the timeout path),
+    // and a cancel must not hang on it. The turn loop is parked on the inactivity
+    // window and only wakes on a message, so if none comes, closing the query is
+    // what ends the turn.
+    void q.interrupt().catch(() => {});
+    const giveUp = setTimeout(() => {
+      if (this.activeQuery === q) q.close?.();
+    }, DRAIN_AFTER_ABORT_MS);
+    giveUp.unref?.();
   }
 }
 

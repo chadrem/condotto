@@ -417,6 +417,104 @@ describe("claude-code adapter: background cost/cancel (rider b)", () => {
     expect(events.some((e) => e.kind === "error")).toBe(false); // not reported as a cancel
   });
 
+  /** A query that, after its scripted messages, never ends — the CLI held open by a
+   *  background shell that will never exit — until interrupt() releases it. */
+  function heldOpen(
+    script: Record<string, any>[],
+    afterInterrupt: Record<string, any>[] = [{ type: "result", subtype: "error_during_execution", terminal_reason: "aborted_streaming" }],
+  ) {
+    const calls = { interrupts: 0, closes: 0 };
+    let release: () => void = () => {};
+    const held = new Promise<void>((r) => { release = r; });
+    const q = ((_args: unknown) => {
+      const gen = (async function* () {
+        yield* script;
+        await held;
+        yield* afterInterrupt;
+        // The shell outlives the interrupt too: the CLI still does not exit.
+        await new Promise(() => {});
+      })();
+      return Object.assign(gen, {
+        interrupt: async () => { calls.interrupts++; release(); },
+        close: () => { calls.closes++; },
+      });
+    }) as unknown as QueryFn;
+    return { q, calls };
+  }
+
+  const replies = (events: TurnEvent[]) =>
+    events.filter((e): e is Extract<TurnEvent, { kind: "reply" }> => e.kind === "reply");
+  const errors = (events: TurnEvent[]) =>
+    events.filter((e): e is Extract<TurnEvent, { kind: "error" }> => e.kind === "error");
+
+  test("an answer held up by a shell that never exits is posted at the timeout, then the notice", async () => {
+    const { q, calls } = heldOpen(
+      [
+        { type: "system", subtype: "init", session_id: "s1" },
+        { type: "system", subtype: "background_tasks_changed", tasks: [{ task_id: "b1", task_type: "local_bash", description: "stray cat" }] },
+        { type: "assistant", message: { content: [{ type: "tool_use", name: "Bash", input: { command: "make check", description: "Syntax-check" } }] } },
+        { type: "assistant", message: { content: [{ type: "text", text: "All done: the patch is ready." }] } },
+        // A subagent's words are not the main thread's answer.
+        { type: "assistant", parent_tool_use_id: "toolu_x", message: { content: [{ type: "text", text: "subagent chatter" }] } },
+        { type: "result", subtype: "success", result: "All done: the patch is ready.", terminal_reason: "completed", total_cost_usd: 1.4 },
+      ],
+      [{ type: "result", subtype: "error_during_execution", terminal_reason: "aborted_streaming", total_cost_usd: 1.43 }],
+    );
+    const session = await new ClaudeCodeAdapter(q, 40).create({ cwd: "/wt/x", system: "s" });
+    const events: TurnEvent[] = [];
+    for await (const ev of session.turn({ text: "hi" }, allowGate)) events.push(ev);
+    expect(calls.interrupts).toBe(1);
+    expect(calls.closes).toBe(1); // the CLI, and the shell with it, does not outlive the turn
+    expect(replies(events).map((r) => [r.text, r.costUsd])).toEqual([["All done: the patch is ready.", 1.43]]);
+    // Still recorded and audited as a stopped turn, and its cost is on the reply only.
+    expect(errors(events).map((e) => [e.message, e.costUsd])).toEqual([
+      ["I stopped the running turn after 10 minutes with no activity ($1.43 spent this turn). The reply above is the last thing I wrote.", undefined],
+    ]);
+  });
+
+  test("a background shell that finishes still gets the model's follow-up answer", async () => {
+    // A finished background shell wakes the model for a second result, so a completed
+    // result alone must not end the turn.
+    const q = fakeQuery(async function* () {
+      yield { type: "system", subtype: "init", session_id: "s1" };
+      yield { type: "system", subtype: "background_tasks_changed", tasks: [{ task_id: "b1", task_type: "local_bash", description: "tests" }] };
+      yield { type: "result", subtype: "success", result: "Started the tests, will report.", terminal_reason: "completed", total_cost_usd: 0.01 };
+      yield { type: "system", subtype: "task_notification", task_id: "b1", status: "completed" };
+      yield { type: "system", subtype: "background_tasks_changed", tasks: [] };
+      yield { type: "result", subtype: "success", result: "Tests passed.", terminal_reason: "completed", total_cost_usd: 0.02 };
+    });
+    const events = await collect(new ClaudeCodeAdapter(q), allowGate);
+    expect(replies(events).map((r) => r.text)).toEqual(["Tests passed."]);
+  });
+
+  test("a timeout never posts a stale buffered result as the answer", async () => {
+    // A resume opens with the orphaned shell's notification and an empty zero-turn
+    // result, buffered as "(no reply)", before the real turn runs.
+    const { q } = heldOpen([
+      { type: "system", subtype: "task_notification", task_id: "b0", status: "stopped" },
+      { type: "result", subtype: "success", result: "", num_turns: 0, total_cost_usd: 0.001 },
+      { type: "system", subtype: "init", session_id: "s1" },
+      { type: "assistant", message: { content: [{ type: "text", text: "the real answer" }] } },
+    ]);
+    const session = await new ClaudeCodeAdapter(q, 40).create({ cwd: "/wt/x", system: "s" });
+    const events: TurnEvent[] = [];
+    for await (const ev of session.turn({ text: "hi" }, allowGate)) events.push(ev);
+    expect(replies(events).map((r) => r.text)).toEqual(["the real answer"]);
+  });
+
+  test("a timeout mid-work (a tool call after the last words) still reports only the notice", async () => {
+    const { q } = heldOpen([
+      { type: "system", subtype: "init", session_id: "s1" },
+      { type: "assistant", message: { content: [{ type: "text", text: "Let me check the build." }] } },
+      { type: "assistant", message: { content: [{ type: "tool_use", name: "Bash", input: { command: "make", description: "Build" } }] } },
+    ]);
+    const session = await new ClaudeCodeAdapter(q, 40).create({ cwd: "/wt/x", system: "s" });
+    const events: TurnEvent[] = [];
+    for await (const ev of session.turn({ text: "hi" }, allowGate)) events.push(ev);
+    expect(replies(events).length).toBe(0);
+    expect(errors(events).map((e) => e.message)).toEqual(["I stopped the running turn after 10 minutes with no activity."]);
+  });
+
   test("interrupt() on an idle session (no live query) is a clean no-op", async () => {
     const q = fakeQuery(async function* () {
       yield { type: "result", subtype: "success", result: "ok", total_cost_usd: 0 };
