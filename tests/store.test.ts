@@ -452,7 +452,7 @@ describe("store schema migrations", () => {
   // The current schema version == the number of migrations in the runner. Bump
   // this constant in lockstep whenever a migration is appended — the tests below
   // pin the runner's behavior to it.
-  const CURRENT_SCHEMA_VERSION = 15;
+  const CURRENT_SCHEMA_VERSION = 16;
 
   const migPath = (name: string): string => join(mkdtempSync(join(tmpdir(), "condotto-mig-")), name);
   const userVersion = (path: string): number => {
@@ -539,6 +539,56 @@ describe("store schema migrations", () => {
     expect(userVersion(path)).toBe(CURRENT_SCHEMA_VERSION);
     // A session nobody asked to publish must not come back published.
     expect(store.getSession("s12")!.remote_control).toBeNull();
+    store.close();
+  });
+
+  test("v16 turns stored running totals into per-turn cost", () => {
+    const path = migPath("v16.sqlite");
+    let store = new Store(path);
+    store.upsertRepo({ name: "r", path: "/tmp/r", defaultBranch: "main" });
+    store.createSession({ ...baseSession, id: "sA", conversation_id: "1.16" });
+    store.createSession({ ...baseSession, id: "sB", conversation_id: "1.17" });
+    store.close();
+
+    const raw = new Database(path);
+    let n = 0;
+    const at = () => `2026-10-13T12:00:${String(n++).padStart(2, "0")}.000Z`;
+    const turn = (sid: string, cost: number | null) =>
+      raw.run(
+        `INSERT INTO turns (session_id, direction, text, cost_usd, started_at, ended_at) VALUES (?, ?, 'x', ?, ?, ?)`,
+        [sid, cost === null ? "in" : "out", cost, at(), at()],
+      );
+    const clear = (sid: string) =>
+      raw.run(`INSERT INTO audit_log (session_id, ts, actor, event) VALUES (?, ?, 'slack:U1', 'context_cleared')`, [sid, at()]);
+    // Running totals, a /clear, running totals again.
+    for (const c of [0.38, 1.16, 2.2, 2.46, 2.57, 2.7, 2.92, 2.98, 3.12, 3.9]) {
+      turn("sA", null);
+      turn("sA", c);
+    }
+    clear("sA");
+    for (const c of [0.44, 0.8, 0.95, 0.97, 1.29, 1.43]) turn("sA", c);
+    // A clear whose next total is HIGHER than the last one still starts over, and a
+    // zeroed crash result neither counts nor resets the running figure.
+    turn("sB", 0.3);
+    clear("sB");
+    turn("sB", 0.5);
+    turn("sB", 0);
+    turn("sB", 0.7);
+    raw.run("PRAGMA user_version = 15");
+    raw.close();
+
+    store = new Store(path);
+    expect(userVersion(path)).toBe(CURRENT_SCHEMA_VERSION);
+    expect(store.sessionCostUsd("sA")).toBeCloseTo(5.33, 6);
+    expect(store.sessionCostUsd("sB")).toBeCloseTo(1.0, 6);
+    const costs = (sid: string) =>
+      new Database(path, { readonly: true })
+        .query<{ c: number | null }, [string]>(`SELECT cost_usd AS c FROM turns WHERE session_id = ? ORDER BY id`)
+        .all(sid)
+        .map((r) => (r.c === null ? null : Math.round(r.c * 100) / 100));
+    expect(costs("sA").slice(0, 4)).toEqual([null, 0.38, null, 0.78]);
+    expect(costs("sA").slice(-6)).toEqual([0.44, 0.36, 0.15, 0.02, 0.32, 0.14]);
+    expect(costs("sB")).toEqual([0.3, 0.5, 0, 0.2]);
     store.close();
   });
 

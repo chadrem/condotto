@@ -3512,10 +3512,13 @@ export class SessionManager {
             break;
           case "reply":
             producedOutput = true;
-            // A resumed (empty-prompt) turn can emit more than one result; record
-            // and post only the first — recording every result would double-count
-            // cost, since total_cost_usd is cumulative per query.
-            if (!replyDelivered) {
+            // A turn can end in more than one event; only the first is posted. Each
+            // event's cost is its own share, though, so a later one is still recorded.
+            if (replyDelivered) {
+              if (ev.costUsd !== undefined) {
+                this.store.insertTurn({ sessionId, direction: "out", text: "(unposted reply)", costUsd: ev.costUsd, resultSubtype: "success" });
+              }
+            } else {
               this.store.insertTurn({
                 sessionId,
                 direction: "out",
@@ -3543,8 +3546,8 @@ export class SessionManager {
             producedOutput = true;
             // An error result (incl. error_max_budget_usd) still reports spend —
             // record it so the runaway cap can't be evaded by turns that end in
-            // error. Guarded like reply, to avoid double-counting.
-            if (ev.costUsd !== undefined && !replyDelivered) {
+            // error. Every event's cost is its own share, so none is skipped.
+            if (ev.costUsd !== undefined) {
               this.store.insertTurn({ sessionId, direction: "out", text: "(turn error)", costUsd: ev.costUsd, resultSubtype: "error" });
             }
             this.store.audit({ sessionId, actor: "system", event: "error", detail: { message: ev.message, costUsd: ev.costUsd } });

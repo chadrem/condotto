@@ -92,6 +92,15 @@ interface ClaudeCodeHandle {
    * compatible in both directions: an older binary reads the row and drops the key.
    */
   runtimeCommands?: string[];
+  /**
+   * The runtime's running cost total for `sessionId` as of its last result. The
+   * SDK's `total_cost_usd` is that running total, not a turn's cost: a resumed
+   * session continues from what its transcript saved, on every SDK version this
+   * repo has run. A turn's own cost is the new total minus this. Tied to the session
+   * id so a fresh or replaced session never inherits another's total. Absent on a
+   * handle written before this field existed, when the baseline is unknown.
+   */
+  spent?: { sessionId: string; usd: number };
 }
 
 // `allowedTools` auto-approves reads (the hook still denies out-of-worktree
@@ -677,7 +686,18 @@ function asHandle(handle: SessionHandle): ClaudeCodeHandle {
         .filter((s): s is string => typeof s === "string" && s.length > 0 && s.length <= MAX_COMMAND_NAME_LEN)
         .slice(0, MAX_RUNTIME_COMMANDS)
     : undefined;
-  return { v: 1, sessionId: h.sessionId ?? null, ...(runtimeCommands ? { runtimeCommands } : {}) };
+  // A malformed total degrades to "unknown", which costs one turn's figure, never
+  // a thrown turn.
+  const spent =
+    h.spent && typeof h.spent.sessionId === "string" && typeof h.spent.usd === "number" && Number.isFinite(h.spent.usd) && h.spent.usd >= 0
+      ? { sessionId: h.spent.sessionId, usd: h.spent.usd }
+      : undefined;
+  return {
+    v: 1,
+    sessionId: h.sessionId ?? null,
+    ...(runtimeCommands ? { runtimeCommands } : {}),
+    ...(spent ? { spent } : {}),
+  };
 }
 
 /** True when running inside a `bun build --compile` binary: its module URLs live
@@ -1055,7 +1075,7 @@ class ClaudeCodeSession implements HarnessSession {
     // once the background workflow completes. Buffer the latest
     // success and deliver only it at turn end, so the human sees the real answer,
     // not "launched; waiting". A terminal deferred/error supersedes and clears it.
-    let pendingReply: { text: string; costUsd?: number } | null = null;
+    let pendingReply: { text: string; total?: number } | null = null;
     // Two different facts. `sawBackground`: something detached is running (a
     // workflow, but also a plain subagent or a background command), which is what
     // the budget brake must interrupt. `ranWorkflow`: the model actually used the
@@ -1071,13 +1091,36 @@ class ClaudeCodeSession implements HarnessSession {
     // halts a detached workflow (maxBudgetUsd does NOT), and the aborted
     // result still carries total_cost_usd, so the runaway cap stays accurate.
     let abortReason: AbortReason | null = null;
-    let drainedCost: number | undefined;
+    let drainedTotal: number | undefined;
     // The main thread's words since its last tool call. A completed result does not
     // end the turn while a background task is live: a finished shell or subagent
     // wakes the model for another result, so the loop waits for the CLI to exit. A
     // shell that never exits holds it until the watchdog, and these words are then
     // the answer, posted rather than thrown away.
     let lastWords = "";
+    // How much of the runtime's running total the core has been given, so every
+    // event carries only cost it has not seen; null when unknown (a handle from
+    // before `spent`). A fresh session starts at zero. Results keep their raw total
+    // until the moment they are yielded, so a turn that yields more than one cost
+    // never counts a share twice.
+    const resumedId = this._handle.sessionId;
+    let reported: number | null =
+      resumedId === null ? 0 : this._handle.spent?.sessionId === resumedId ? this._handle.spent.usd : null;
+    // A total below what was reported means the runtime started counting again, so
+    // all of it is new.
+    const costTo = (total: number | undefined): number | undefined =>
+      total === undefined || reported === null ? undefined : total >= reported ? total - reported : total;
+    // Run once the core holds an event carrying `costTo(total)`. Saved straight
+    // away, after the cost and before anything else can throw, so the cost and the
+    // baseline that excludes it next time land together. A zero total is the
+    // runtime's crash case and moves nothing.
+    const settle = (total: number | undefined): TurnEvent | null => {
+      if (total === undefined || total <= 0) return null;
+      reported = total;
+      if (!this._handle.sessionId) return null;
+      this._handle = { ...this._handle, spent: { sessionId: this._handle.sessionId, usd: total } };
+      return { kind: "handle_updated", handle: this._handle };
+    };
     // The iterator finished on its own, so the CLI has exited and there is nothing to close.
     let ended = false;
     try {
@@ -1158,6 +1201,9 @@ class ClaudeCodeSession implements HarnessSession {
                 .slice(0, MAX_RUNTIME_COMMANDS)
             : undefined;
           const nextCommands = commands ?? this._handle.runtimeCommands;
+          // The runtime opened a session other than the one asked for: its total
+          // starts from nothing.
+          if (nextId !== resumedId) reported = 0;
           const changed =
             nextId !== this._handle.sessionId ||
             JSON.stringify(nextCommands ?? null) !== JSON.stringify(this._handle.runtimeCommands ?? null);
@@ -1232,8 +1278,9 @@ class ClaudeCodeSession implements HarnessSession {
           sawResult = true;
           // total_cost_usd is reported on EVERY result — success, deferred, and
           // error (incl. error_max_budget_usd) — so the core's cost ledger and
-          // runaway cap count all of them (verified against SDKResult* types).
-          const cost = typeof m.total_cost_usd === "number" ? m.total_cost_usd : undefined;
+          // runaway cap count all of them (verified against SDKResult* types). It is
+          // the session's running total; `costTo` turns it into new spend.
+          const total = typeof m.total_cost_usd === "number" && Number.isFinite(m.total_cost_usd) ? m.total_cost_usd : undefined;
           // An architect `@Condotto cancel` interrupted this turn out-of-band: the SDK
           // now emits an aborted result. Capture its cost and report the cancellation.
           if (this.cancelRequested && !abortReason) abortReason = "cancel";
@@ -1243,7 +1290,7 @@ class ClaudeCodeSession implements HarnessSession {
           // through an interrupt, and waiting for it to exit would only burn the drain
           // window.
           if (abortReason) {
-            if (cost !== undefined) drainedCost = cost;
+            if (total !== undefined) drainedTotal = total;
             break;
           }
           if (m.subtype === "success") {
@@ -1251,7 +1298,7 @@ class ClaudeCodeSession implements HarnessSession {
             // "launched" → "completed"). Delivered after the loop (last wins).
             pendingReply = {
               text: typeof m.result === "string" && m.result.length > 0 ? m.result : "(no reply)",
-              costUsd: cost,
+              total,
             };
           } else if (m.subtype === "error_max_budget_usd" || m.terminal_reason === "budget_exhausted") {
             if (sawBackground) {
@@ -1260,13 +1307,14 @@ class ClaudeCodeSession implements HarnessSession {
               // Interrupt to actually halt it (auto-cancel on breach), then
               // drain + report once via the post-loop notice.
               abortReason = "budget";
-              if (cost !== undefined) drainedCost = cost;
+              if (total !== undefined) drainedTotal = total;
               void q.interrupt().catch(() => {});
               continue;
             }
             // The turn hit its cost budget and stopped. Surface it clearly
             // with the spend — the core will then pause the session.
             pendingReply = null;
+            const cost = costTo(total);
             yield {
               kind: "error",
               message:
@@ -1274,9 +1322,13 @@ class ClaudeCodeSession implements HarnessSession {
                 `stopped before finishing. An architect can raise the budget to let me continue.`,
               costUsd: cost,
             };
+            const saved = settle(total);
+            if (saved) yield saved;
           } else {
             pendingReply = null;
-            yield { kind: "error", message: `session turn ended abnormally (${m.subtype})`, costUsd: cost };
+            yield { kind: "error", message: `session turn ended abnormally (${m.subtype})`, costUsd: costTo(total) };
+            const saved = settle(total);
+            if (saved) yield saved;
           }
         }
       }
@@ -1291,14 +1343,22 @@ class ClaudeCodeSession implements HarnessSession {
       // keeps the answer and the turn is still recorded and audited as stopped. Not the
       // buffered result: that can be a resume's empty one or a workflow's "launched".
       if (abort === "timeout" && lastWords) {
-        const costUsd = drainedCost ?? pendingReply?.costUsd;
+        const total = drainedTotal ?? pendingReply?.total;
+        const costUsd = costTo(total);
         yield { kind: "reply", text: lastWords, costUsd, workflow: ranWorkflow };
+        const saved = settle(total);
+        if (saved) yield saved;
         yield { kind: "error", message: `${abortNotice(abort, ranWorkflow, costUsd)} The reply above is the last thing I wrote.` };
       } else if (abort) {
-        yield { kind: "error", message: abortNotice(abort, ranWorkflow, drainedCost), costUsd: drainedCost };
+        const costUsd = costTo(drainedTotal);
+        yield { kind: "error", message: abortNotice(abort, ranWorkflow, costUsd), costUsd };
+        const saved = settle(drainedTotal);
+        if (saved) yield saved;
       } else if (pendingReply) {
         // Deliver the final buffered reply (the last success result of the turn).
-        yield { kind: "reply", text: pendingReply.text, costUsd: pendingReply.costUsd, workflow: ranWorkflow };
+        yield { kind: "reply", text: pendingReply.text, costUsd: costTo(pendingReply.total), workflow: ranWorkflow };
+        const saved = settle(pendingReply.total);
+        if (saved) yield saved;
       }
     } catch (err) {
       // A persisted session id the runtime no longer knows (pruned storage,

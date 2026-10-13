@@ -648,6 +648,19 @@ describe("conversing", () => {
     expect(w.surface.updates.at(-1)?.text).toEndWith("_$0.01 this turn · $0.51 this thread_");
   });
 
+  test("every event's cost counts, even one that follows the posted message", async () => {
+    const w = makeWorld();
+    const c = conv("400.000006");
+    await w.manager.handleEvent({ kind: "command", conv: c, author: architect, name: "assign", args: "testrepo" });
+    w.harness.nextEvents = [
+      { kind: "error", message: "boom", costUsd: 0.3 },
+      { kind: "reply", text: "late", costUsd: 0.9 },
+    ];
+    await w.manager.handleEvent({ kind: "message", conv: c, author: architect, text: "first", attachments: [] });
+    await w.manager.handleEvent({ kind: "message", conv: c, author: architect, text: "second", attachments: [] });
+    expect(w.surface.updates.at(-1)?.text).toEndWith("_$0.01 this turn · $1.21 this thread_");
+  });
+
   test("tiny spend reads as under a cent, never $0.00", async () => {
     const w = makeWorld();
     w.harness.replyCostUsd = 0.004;

@@ -494,6 +494,40 @@ function migrateV15(db: Database): void {
   db.run(`ALTER TABLE sessions ADD COLUMN notice_failed_since TEXT`);
 }
 
+/**
+ * Migration **v16**: rewrite `turns.cost_usd` from running totals to per-turn cost.
+ * Every earlier build stored the harness's running session total on each turn and
+ * then summed the rows, so a thread's spend counted every earlier turn again on
+ * each new one. Within a session each row becomes its total minus the one before.
+ * The count starts again at a `context_cleared`, and wherever the total drops
+ * (a session the runtime replaced). A zero total is the runtime's crash case and
+ * leaves the running figure alone. Data only; the audit log keeps what was reported.
+ */
+function migrateV16(db: Database): void {
+  const sessions = db.query<{ session_id: string }, []>(
+    `SELECT DISTINCT session_id FROM turns WHERE cost_usd IS NOT NULL`,
+  );
+  const rows = db.query<{ id: number; cost_usd: number; started_at: string }, [string]>(
+    `SELECT id, cost_usd, started_at FROM turns WHERE session_id = ? AND cost_usd IS NOT NULL ORDER BY id`,
+  );
+  const clears = db.query<{ ts: string }, [string]>(
+    `SELECT ts FROM audit_log WHERE session_id = ? AND event = 'context_cleared' ORDER BY ts`,
+  );
+  const set = db.query(`UPDATE turns SET cost_usd = ? WHERE id = ?`);
+  for (const { session_id } of sessions.all()) {
+    const resets = clears.all(session_id).map((c) => c.ts);
+    let prev = 0;
+    let prevAt = "";
+    for (const r of rows.all(session_id)) {
+      if (resets.some((ts) => ts > prevAt && ts <= r.started_at)) prev = 0;
+      const cost = r.cost_usd >= prev ? r.cost_usd - prev : r.cost_usd;
+      if (r.cost_usd > 0) prev = r.cost_usd;
+      prevAt = r.started_at;
+      if (cost !== r.cost_usd) set.run(cost, r.id);
+    }
+  }
+}
+
 /** Add `column` to `table` only if absent (idempotent ALTER — SQLite has no
  *  `ADD COLUMN IF NOT EXISTS`). Used by the baseline migration to evolve tables
  *  a pre-runner DB already created. */
@@ -546,7 +580,8 @@ export class Store {
       migrateV13, // v13: repos.instructions, the per-repo operator prompt addendum.
       migrateV14, // v14: session_members, who an architect let speak in a thread.
       migrateV15, // v15: sessions.idle_warned_at + notice_failed_since for idle auto-cleanup.
-      // v16+: append new migrations here. They only ever run on a store already
+      migrateV16, // v16: turns.cost_usd from running totals to per-turn cost.
+      // v17+: append new migrations here. They only ever run on a store already
       // at the prior version, so they can be plain forward DDL — no IF NOT EXISTS
       // gymnastics.
     ];

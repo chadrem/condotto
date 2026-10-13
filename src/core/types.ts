@@ -324,6 +324,8 @@ export type TurnEvent =
    * The turn's final reply. `workflow` marks a turn that ran a multi-agent
    * workflow, so the surface can append a terse "what ran + cost" summary
    * footer — the synthesized text is the agent's; the footer is Condotto's.
+   * `costUsd` is what THIS turn cost, never a running total: the core sums it
+   * into the thread's spend. Absent when the adapter cannot tell.
    */
   | { kind: "reply"; text: string; costUsd?: number; workflow?: boolean }
   /**
@@ -620,7 +622,7 @@ export interface RepoConfig {
   defaultBranch: string;
   /**
    * Per-thread cost ceiling in USD. A session whose cumulative
-   * `total_cost_usd` reaches this pauses and pings the architect; the ceiling is
+   * spend reaches this pauses and pings the architect; the ceiling is
    * seeded onto each session and an architect can raise it. `undefined` = fall
    * back to the daemon-wide default.
    */

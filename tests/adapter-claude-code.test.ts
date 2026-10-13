@@ -92,6 +92,132 @@ describe("claude-code adapter: multi-result buffering", () => {
   });
 });
 
+describe("claude-code adapter: per-turn cost from the running total", () => {
+  // total_cost_usd is the session's running total and a resume continues it, so a
+  // turn's cost is the difference from the total the core was last given.
+  const result = (total: number, sessionId = "s1") =>
+    fakeQuery(async function* () {
+      yield { type: "system", subtype: "init", session_id: sessionId };
+      yield { type: "result", subtype: "success", result: "ok", total_cost_usd: total };
+    });
+  async function turn(session: any): Promise<TurnEvent[]> {
+    const events: TurnEvent[] = [];
+    for await (const ev of session.turn({ text: "hi" }, allowGate)) events.push(ev);
+    return events;
+  }
+  const costOf = (events: TurnEvent[]) => (events.find((e) => e.kind === "reply") as any).costUsd;
+
+  test("a resumed session's first result already carries earlier turns; only the new part counts", async () => {
+    const s = await new ClaudeCodeAdapter(result(4.68)).resume(
+      { v: 1, sessionId: "s1", spent: { sessionId: "s1", usd: 3.9 } },
+      "/wt/session-abc",
+      "sys",
+    );
+    expect(costOf(await turn(s))).toBeCloseTo(0.78, 9);
+    expect((s.handle as any).spent).toEqual({ sessionId: "s1", usd: 4.68 });
+  });
+
+  test("consecutive turns on one session each report their own cost", async () => {
+    let total = 0;
+    const q = fakeQuery(async function* () {
+      yield { type: "system", subtype: "init", session_id: "s1" };
+      total += total === 0 ? 0.38 : 1.16;
+      yield { type: "result", subtype: "success", result: "ok", total_cost_usd: total };
+    });
+    const s = await new ClaudeCodeAdapter(q).create({ cwd: "/wt/session-abc", system: "sys" });
+    expect(costOf(await turn(s))).toBeCloseTo(0.38, 9);
+    expect(costOf(await turn(s))).toBeCloseTo(1.16, 9);
+  });
+
+  test("a handle from before the running total was kept reports no cost rather than all of it", async () => {
+    const s = await new ClaudeCodeAdapter(result(3.9)).resume({ v: 1, sessionId: "s1" }, "/wt/session-abc", "sys");
+    expect(costOf(await turn(s))).toBeUndefined();
+    // ...and knows the baseline from then on.
+    expect((s.handle as any).spent).toEqual({ sessionId: "s1", usd: 3.9 });
+  });
+
+  test("a total below the baseline means the runtime started over: all of it is this turn's", async () => {
+    const s = await new ClaudeCodeAdapter(result(0.44)).resume(
+      { v: 1, sessionId: "s1", spent: { sessionId: "s1", usd: 3.9 } },
+      "/wt/session-abc",
+      "sys",
+    );
+    expect(costOf(await turn(s))).toBeCloseTo(0.44, 9);
+  });
+
+  test("a session the runtime replaced starts from zero, whatever the old one had spent", async () => {
+    const s = await new ClaudeCodeAdapter(result(5, "s2")).resume(
+      { v: 1, sessionId: "s1", spent: { sessionId: "s1", usd: 3.9 } },
+      "/wt/session-abc",
+      "sys",
+    );
+    expect(costOf(await turn(s))).toBe(5);
+    expect((s.handle as any).spent).toEqual({ sessionId: "s2", usd: 5 });
+  });
+
+  test("two costs in one turn each carry only their own share", async () => {
+    const q = fakeQuery(async function* () {
+      yield { type: "system", subtype: "init", session_id: "s1" };
+      yield { type: "result", subtype: "error_during_execution", total_cost_usd: 4.2 };
+      yield { type: "result", subtype: "success", result: "done", total_cost_usd: 5.1 };
+    });
+    const s = await new ClaudeCodeAdapter(q).resume(
+      { v: 1, sessionId: "s1", spent: { sessionId: "s1", usd: 3.9 } },
+      "/wt/session-abc",
+      "sys",
+    );
+    const costs = (await turn(s)).filter((e) => e.kind === "error" || e.kind === "reply").map((e: any) => e.costUsd);
+    expect(costs.map((c) => Math.round(c * 100) / 100)).toEqual([0.3, 0.9]);
+  });
+
+  test("a cost already handed over is in the saved baseline before the turn can throw", async () => {
+    const q = fakeQuery(async function* () {
+      yield { type: "system", subtype: "init", session_id: "s1" };
+      yield { type: "result", subtype: "error_during_execution", total_cost_usd: 4.5 };
+      throw new Error("CLI exited with code 1");
+    });
+    const s = await new ClaudeCodeAdapter(q).resume(
+      { v: 1, sessionId: "s1", spent: { sessionId: "s1", usd: 3.9 } },
+      "/wt/session-abc",
+      "sys",
+    );
+    const events: TurnEvent[] = [];
+    await expect(
+      (async () => {
+        for await (const ev of s.turn({ text: "hi" }, allowGate)) events.push(ev);
+      })(),
+    ).rejects.toThrow(/exited/);
+    const i = events.findIndex((e) => e.kind === "error");
+    expect((events[i] as any).costUsd).toBeCloseTo(0.6, 9);
+    // The very next event saves the baseline, so the core has it before the throw.
+    expect(events[i + 1]).toEqual({ kind: "handle_updated", handle: expect.objectContaining({ spent: { sessionId: "s1", usd: 4.5 } }) });
+  });
+
+  test("a negative saved total is treated as unknown", async () => {
+    const s = await new ClaudeCodeAdapter(result(4)).resume(
+      { v: 1, sessionId: "s1", spent: { sessionId: "s1", usd: -3 } } as any,
+      "/wt/session-abc",
+      "sys",
+    );
+    expect(costOf(await turn(s))).toBeUndefined();
+  });
+
+  test("a zeroed crash result does not reset the baseline", async () => {
+    const q = fakeQuery(async function* () {
+      yield { type: "system", subtype: "init", session_id: "s1" };
+      yield { type: "result", subtype: "error_during_execution", total_cost_usd: 0 };
+    });
+    const s = await new ClaudeCodeAdapter(q).resume(
+      { v: 1, sessionId: "s1", spent: { sessionId: "s1", usd: 3.9 } },
+      "/wt/session-abc",
+      "sys",
+    );
+    const errs = (await turn(s)).filter((e) => e.kind === "error");
+    expect((errs[0] as any).costUsd).toBe(0);
+    expect((s.handle as any).spent).toEqual({ sessionId: "s1", usd: 3.9 });
+  });
+});
+
 describe("claude-code adapter: gate wiring", () => {
   test("the PreToolUse hook forwards agent_id/escaped and maps allow and deny", async () => {
     const seen: { name: string; agentId?: string; escaped?: boolean }[] = [];

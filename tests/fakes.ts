@@ -171,6 +171,12 @@ class FakeHarnessSession implements HarnessSession {
       this.parent.nextContextLost = false;
       yield { kind: "context_lost" };
     }
+    if (this.parent.nextEvents) {
+      const events = this.parent.nextEvents;
+      this.parent.nextEvents = null;
+      yield* events;
+      return;
+    }
     // Simulate a turn that ends in an error carrying a cost (e.g. the SDK's
     // error_max_budget_usd), for cost-accounting tests.
     if (this.parent.nextError) {
@@ -323,6 +329,8 @@ export class FakeHarness implements HarnessAdapter {
   replyCostUsd: number | undefined = 0.01;
   /** If set, the next turn ends in an error carrying this cost (budget tests). */
   nextError: { message: string; costUsd?: number } | null = null;
+  /** If set, the next turn yields exactly these events and nothing else. */
+  nextEvents: TurnEvent[] | null = null;
   /** How many times a live session's interrupt() was called (cancel tests). */
   interruptCount = 0;
   /** Fired inside interrupt() so a test can release a held turn. */
