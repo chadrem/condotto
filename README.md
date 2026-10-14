@@ -193,9 +193,10 @@ Create the app at <https://api.slack.com/apps> using **From scratch**. Then:
 > status line appears with one plain step and a clock, like `Running a command:
 > “Run the tests” · 42s`. The reply is always a new message, so other bots in the
 > thread see it and followers are notified, and the status line is deleted once it
-> has landed. A quick answer has no status line at all. If your workspace refuses the animation, Condotto notices on its own,
-> uses the 👀 reaction instead and logs why, once; turning on the app's **Agents**
-> feature (with the `assistant:write` scope) may then help. Without the animation,
+> has landed. A quick answer has no status line at all. If your workspace refuses
+> the animation, Condotto notices on its own, uses the 👀 reaction instead and logs
+> why, once; turning on the app's **Agents** feature (with the `assistant:write`
+> scope) may then help. Without the animation,
 > the status line appears straight away and carries an emoji of its own (⏳, or an
 > animated custom one named in `[slack].working_emoji`): one busy signal at a time.
 > The same emoji marks the notice you see when every turn slot is busy and your

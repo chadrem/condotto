@@ -3320,7 +3320,7 @@ export class SessionManager {
     // delivers an edit as a `message_changed` event, which other bots in the
     // thread ignore and which notifies nobody, so a reply edited into place was
     // invisible to both. Once the reply has landed the status line is deleted
-    // (or, on a surface that can't delete, edited down to a short "Done").
+    // (or, on a surface that can't delete, edited down to a short "Finished").
     const glyph = surface.workingGlyph ?? "⚙︎";
     // The surface's own sign of life (Slack: its animated status), started once
     // the turn really runs. Declared first: the status line reads it.
@@ -3329,9 +3329,12 @@ export class SessionManager {
     let turnStarted: number | null = null;
     // The agent's latest step; null until it reports one (or a skill names one).
     let currentStep: string | null = firstStep ?? null;
-    const statusText = (): string => {
+    // No clock in the first few seconds: "· 0s" reads as noise.
+    const clockSuffix = (): string => {
       const elapsed = turnStarted === null ? 0 : Date.now() - turnStarted;
-      // No clock in the first few seconds: "· 0s" reads as noise.
+      return elapsed < 5000 ? "" : ` · ${durationLabel(elapsed, "compact")}`;
+    };
+    const statusText = (): string => {
       // One busy signal: no glyph while the surface animates its own indicator.
       const lead = working?.animated ? "" : `${glyph} `;
       // Until the turn has a slot it is waiting, whatever its first step. After,
@@ -3340,7 +3343,18 @@ export class SessionManager {
         turnStarted === null
           ? "Waiting for another thread to finish"
           : (currentStep ?? (working?.animated ? "Started" : "Thinking"));
-      return `${lead}${step}${elapsed < 5000 ? "" : ` · ${durationLabel(elapsed, "compact")}`}`;
+      return `${lead}${step}${clockSuffix()}`;
+    };
+    // Ends the surface's working indicator, once. Not awaited: clearing it is
+    // cosmetic, and a rate-limited Slack call can be retried for minutes, so it
+    // must never hold a turn slot or keep the session from parking. Called BEFORE
+    // the reply posts, because a post re-arms the surface's indicator while it is
+    // live (Slack clears the native status on any message, so the adapter sets it
+    // again); ended first, the reply is the last thing the thread shows.
+    const finishWorking = (): void => {
+      if (!working) return;
+      void working.done(turnFailed ? "failed" : "ok").catch((e) => this.log(`[session ${sessionId}] working indicator: ${e}`));
+      working = null;
     };
     const canEdit = surface.capabilities.editMessages;
     const canDelete = surface.capabilities.deleteMessages;
@@ -3431,31 +3445,38 @@ export class SessionManager {
       if (clockTimer) clearInterval(clockTimer);
       await progressInFlight.catch(() => {});
       const statusRef = statusPost ? await statusPost : null;
+      finishWorking();
+      // The status line is this turn's to retire only until the first reply lands.
+      const retire = statusRef && !replyDelivered ? statusRef : null;
       try {
         await surface.post(conv, { text });
       } catch (err) {
-        this.log(`[session ${sessionId}] reply delivery failed: ${err}`);
-        this.store.audit({ sessionId, actor: "system", event: "error", detail: { deliveryFailed: true } });
+        // Second chance: edit the reply into the status line, the old delivery
+        // path. Worse for other bots, far better than a thread with no answer and
+        // a step that reads as still running.
+        try {
+          if (!retire) throw err;
+          await surface.update(retire, { text });
+          replyDelivered = true;
+        } catch {
+          this.log(`[session ${sessionId}] reply delivery failed: ${err}`);
+          this.store.audit({ sessionId, actor: "system", event: "error", detail: { deliveryFailed: true } });
+        }
         return;
       }
+      replyDelivered = true;
       // Reply first, then retire the status line: the thread never shows a gap,
       // and a reply that failed to post leaves the status line standing rather
       // than vanishing without a word. Retiring it is best-effort and happens
-      // once; a failure here is not a delivery failure.
-      if (statusRef && !replyDelivered) {
-        try {
-          if (canDelete) {
-            await surface.delete(statusRef);
-          } else {
-            const elapsed = turnStarted === null ? 0 : Date.now() - turnStarted;
-            const clock = elapsed < 5000 ? "" : ` · ${durationLabel(elapsed, "compact")}`;
-            await surface.update(statusRef, { text: `Done${clock}` });
-          }
-        } catch (err) {
-          this.log(`[session ${sessionId}] could not retire the status line: ${err}`);
-        }
+      // once; a failure here is not a delivery failure. The word is neutral
+      // because the reply right below it says how the turn went.
+      if (!retire) return;
+      try {
+        if (canDelete) await surface.delete(retire);
+        else await surface.update(retire, { text: `Finished${clockSuffix()}` });
+      } catch (err) {
+        this.log(`[session ${sessionId}] could not retire the status line: ${err}`);
       }
-      replyDelivered = true;
     };
 
     // The one acknowledgement that can't wait for a step: a turn about to queue for
@@ -3593,12 +3614,9 @@ export class SessionManager {
         this.turnSlots.release();
         slotHeld = false;
       }
-      // Not awaited: clearing the indicator is cosmetic, and a rate-limited Slack
-      // call can be retried for minutes. It must never hold a turn slot or keep
-      // the session from parking.
-      if (working) {
-        void working.done(turnFailed ? "failed" : "ok").catch((e) => this.log(`[session ${sessionId}] working indicator: ${e}`));
-      }
+      // Normally already ended by deliverFinal; this covers a turn that never
+      // reached delivery.
+      finishWorking();
       // Post anything the agent left in the outbox. After the reply, so the
       // explanation arrives before the file, and outside the try above so a
       // failed turn still delivers whatever it managed to produce.

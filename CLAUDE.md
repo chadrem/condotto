@@ -119,8 +119,9 @@ seams:
   Adapters own their transport and prefer outbound connections. Slack uses Bolt
   over Socket Mode, and that is a hard requirement: no public URL. Capabilities
   are flags, not a lowest common denominator: `buttons`, `editMessages`,
-  `attachments` and `identityStrength` each gate real behaviour. (`threads` is
-  declared and read nowhere — every surface so far has them.)
+  `deleteMessages`, `attachments` and `identityStrength` each gate real
+  behaviour. (`threads` is declared and read nowhere — every surface so far has
+  them.)
 - **Harness port** — how Condotto drives a coding agent (Claude Code via the
   Agent SDK v1; others later). The non-negotiable capability is mechanically
   stopping a tool call before it runs. Never simulate that by watching output.

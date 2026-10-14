@@ -50,6 +50,10 @@ export class FakeSurface implements SurfaceAdapter {
   async stop(): Promise<void> {}
 
   async post(conv: ConversationRef, msg: OutboundMessage): Promise<PostedRef> {
+    if (this.failNextPost) {
+      this.failNextPost = false;
+      throw new Error("post refused");
+    }
     const messageId = `fake-msg-${this.nextId++}`;
     this.posts.push({ conv, text: msg.text, messageId });
     return { conv, messageId };
@@ -59,8 +63,14 @@ export class FakeSurface implements SurfaceAdapter {
     this.updates.push({ messageId: ref.messageId, text: msg.text });
   }
 
+  /** Set true to make every delete throw (after recording the attempt). */
+  deleteFails = false;
+  /** Set true to make the NEXT post throw. */
+  failNextPost = false;
+
   async delete(ref: PostedRef): Promise<void> {
     this.deletes.push(ref.messageId);
+    if (this.deleteFails) throw new Error("delete refused");
   }
 
   async fetchAttachment(a: Attachment): Promise<Uint8Array | null> {

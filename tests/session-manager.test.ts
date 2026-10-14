@@ -1562,6 +1562,60 @@ describe("busy indicator", () => {
     expect(w.surface.posts.at(-1)!.text).toContain("echo(");
   });
 
+  test("the working indicator ends before the reply posts, so a post can't re-arm it", async () => {
+    const w = makeWorld();
+    w.surface.workingAnimated = true;
+    let outcomeAtPost: string | undefined = "never";
+    const post = w.surface.post.bind(w.surface);
+    w.surface.post = async (conv, msg) => {
+      if (msg.text.includes("echo(")) outcomeAtPost = w.surface.working.at(-1)?.outcome;
+      return post(conv, msg);
+    };
+    await turn(w, "bz14.00001");
+    expect(outcomeAtPost).toBe("ok");
+  });
+
+  test("a surface that can edit but not delete gets a neutral 'Finished' line, even on a failed turn", async () => {
+    const w = makeWorld();
+    w.surface.capabilities.deleteMessages = false;
+    w.harness.progressBurst = 2;
+    w.harness.nextError = { message: "boom" };
+    await turn(w, "bz15.00001");
+    const status = w.surface.posts.find((p) => p.text.startsWith("⏳"))!;
+    expect(w.surface.deletes).toHaveLength(0);
+    expect(w.surface.updates.filter((u) => u.messageId === status.messageId).at(-1)?.text).toMatch(/^Finished/);
+    expect(w.surface.posts.at(-1)?.text).toContain("⚠️ boom");
+  });
+
+  test("a refused delete still counts as delivered: one reply, one attempt, no repeat", async () => {
+    const w = makeWorld();
+    w.surface.deleteFails = true;
+    w.harness.nextEvents = [
+      { kind: "reply", text: "first", costUsd: 0.01 },
+      { kind: "reply", text: "second", costUsd: 0.01 },
+    ];
+    await turn(w, "bz16.00001");
+    // Only the first reply event is posted; a refused delete must not make the
+    // turn look undelivered and let the second one post too.
+    const replies = w.surface.posts.filter((p) => p.text.startsWith("first") || p.text.startsWith("second"));
+    expect(replies.map((p) => p.text.split("\n")[0])).toEqual(["first"]);
+    expect(w.surface.deletes).toHaveLength(1);
+  });
+
+  test("when the reply post fails, the reply is edited into the status line instead", async () => {
+    const w = makeWorld();
+    w.harness.progressBurst = 2;
+    w.harness.beforeReply = () => {
+      w.surface.failNextPost = true;
+      return Promise.resolve();
+    };
+    await turn(w, "bz17.00001");
+    const status = w.surface.posts.find((p) => p.text.startsWith("⏳"))!;
+    expect(w.surface.updates.at(-1)).toMatchObject({ messageId: status.messageId });
+    expect(w.surface.updates.at(-1)?.text).toContain("echo(");
+    expect(w.surface.deletes).toHaveLength(0);
+  });
+
   test("while the surface animates, a quick answer is the turn's only message", async () => {
     const w = makeWorld();
     w.surface.workingAnimated = true;
