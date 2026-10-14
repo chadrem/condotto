@@ -31,11 +31,13 @@ export class FakeSurface implements SurfaceAdapter {
 
   /** identityStrength defaults to "verified"; pass "weak" for spoofable-surface tests. */
   constructor(identityStrength: "verified" | "weak" = "verified") {
-    this.capabilities = { threads: true, editMessages: true, buttons: true, attachments: true, identityStrength };
+    this.capabilities = { threads: true, editMessages: true, deleteMessages: true, buttons: true, attachments: true, identityStrength };
   }
 
   posts: { conv: ConversationRef; text: string; messageId: string }[] = [];
   updates: { messageId: string; text: string }[] = [];
+  /** Message ids taken back, in order. */
+  deletes: string[] = [];
   choiceRequests: { conv: ConversationRef; prompt: ChoicePrompt }[] = [];
   /** Files posted back to the thread, in order. */
   postedFiles: { conv: ConversationRef; name: string; comment?: string; bytes: string }[] = [];
@@ -55,6 +57,10 @@ export class FakeSurface implements SurfaceAdapter {
 
   async update(ref: PostedRef, msg: OutboundMessage): Promise<void> {
     this.updates.push({ messageId: ref.messageId, text: msg.text });
+  }
+
+  async delete(ref: PostedRef): Promise<void> {
+    this.deletes.push(ref.messageId);
   }
 
   async fetchAttachment(a: Attachment): Promise<Uint8Array | null> {

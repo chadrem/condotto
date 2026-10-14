@@ -3313,8 +3313,14 @@ export class SessionManager {
     // indicator doesn't: at the agent's first real step, at once if the turn must
     // wait for a slot, and at turn start if there is no animation to stand in. A
     // quick answer is then the only message the turn posts. Until it is posted,
-    // edits are no-ops and the reply is a fresh post. A skill turn names its first
-    // step, but the skill notice already said it, so that alone doesn't post.
+    // edits are no-ops. A skill turn names its first step, but the skill notice
+    // already said it, so that alone doesn't post.
+    //
+    // The reply is always a NEW message, never an edit of the status line: Slack
+    // delivers an edit as a `message_changed` event, which other bots in the
+    // thread ignore and which notifies nobody, so a reply edited into place was
+    // invisible to both. Once the reply has landed the status line is deleted
+    // (or, on a surface that can't delete, edited down to a short "Done").
     const glyph = surface.workingGlyph ?? "⚙︎";
     // The surface's own sign of life (Slack: its animated status), started once
     // the turn really runs. Declared first: the status line reads it.
@@ -3337,6 +3343,7 @@ export class SessionManager {
       return `${lead}${step}${elapsed < 5000 ? "" : ` · ${durationLabel(elapsed, "compact")}`}`;
     };
     const canEdit = surface.capabilities.editMessages;
+    const canDelete = surface.capabilities.deleteMessages;
     // The status message: null until posted, then the post (null if it failed).
     let statusPost: Promise<PostedRef | null> | null = null;
     let turnFailed = false;
@@ -3412,10 +3419,10 @@ export class SessionManager {
       }
     };
 
-    /** Deliver final output; falls back from edit to post; never throws. */
+    /** Deliver final output as a fresh post, then retire the status line; never throws. */
     const deliverFinal = async (text: string): Promise<void> => {
-      // Close progress and let any in-flight progress edit settle first, so the
-      // final text is the last write to the status message.
+      // Close progress and let any in-flight progress edit settle first, so no
+      // late edit revives the status line after it has been retired.
       progressClosed = true;
       if (progressTimer) {
         clearTimeout(progressTimer);
@@ -3425,18 +3432,27 @@ export class SessionManager {
       await progressInFlight.catch(() => {});
       const statusRef = statusPost ? await statusPost : null;
       try {
-        if (statusRef && !replyDelivered) {
-          await surface.update(statusRef, { text });
-        } else {
-          await surface.post(conv, { text });
-        }
-      } catch {
+        await surface.post(conv, { text });
+      } catch (err) {
+        this.log(`[session ${sessionId}] reply delivery failed: ${err}`);
+        this.store.audit({ sessionId, actor: "system", event: "error", detail: { deliveryFailed: true } });
+        return;
+      }
+      // Reply first, then retire the status line: the thread never shows a gap,
+      // and a reply that failed to post leaves the status line standing rather
+      // than vanishing without a word. Retiring it is best-effort and happens
+      // once; a failure here is not a delivery failure.
+      if (statusRef && !replyDelivered) {
         try {
-          await surface.post(conv, { text });
+          if (canDelete) {
+            await surface.delete(statusRef);
+          } else {
+            const elapsed = turnStarted === null ? 0 : Date.now() - turnStarted;
+            const clock = elapsed < 5000 ? "" : ` · ${durationLabel(elapsed, "compact")}`;
+            await surface.update(statusRef, { text: `Done${clock}` });
+          }
         } catch (err) {
-          this.log(`[session ${sessionId}] reply delivery failed: ${err}`);
-          this.store.audit({ sessionId, actor: "system", event: "error", detail: { deliveryFailed: true } });
-          return;
+          this.log(`[session ${sessionId}] could not retire the status line: ${err}`);
         }
       }
       replyDelivered = true;

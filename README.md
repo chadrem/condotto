@@ -191,8 +191,9 @@ Create the app at <https://api.slack.com/apps> using **From scratch**. Then:
 > animated "Condotto is working on it…" status, with rotating messages. That works
 > with the scopes above, no extra setup. Once the agent starts doing something, a
 > status line appears with one plain step and a clock, like `Running a command:
-> “Run the tests” · 42s`, and it becomes the reply. A quick answer has no status
-> line at all. If your workspace refuses the animation, Condotto notices on its own,
+> “Run the tests” · 42s`. The reply is always a new message, so other bots in the
+> thread see it and followers are notified, and the status line is deleted once it
+> has landed. A quick answer has no status line at all. If your workspace refuses the animation, Condotto notices on its own,
 > uses the 👀 reaction instead and logs why, once; turning on the app's **Agents**
 > feature (with the `assistant:write` scope) may then help. Without the animation,
 > the status line appears straight away and carries an emoji of its own (⏳, or an

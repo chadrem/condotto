@@ -351,6 +351,7 @@ export class SlackAdapter implements SurfaceAdapter {
   readonly capabilities: SurfaceCapabilities = {
     threads: true,
     editMessages: true,
+    deleteMessages: true,
     buttons: true,
     attachments: true,
     identityStrength: "verified",
@@ -806,6 +807,12 @@ export class SlackAdapter implements SurfaceAdapter {
       }),
       (line) => this.log(line),
     );
+  }
+
+  async delete(ref: PostedRef): Promise<void> {
+    // Deleting the bot's own message needs only `chat:write`, the scope the
+    // README already asks for.
+    await this.app.client.chat.delete({ channel: ref.conv.channelId, ts: ref.messageId });
   }
 
   async showWorking(conv: ConversationRef, opts: { replyTo?: string }): Promise<WorkingIndicator | null> {

@@ -196,6 +196,8 @@ export interface PostedRef {
 export interface SurfaceCapabilities {
   threads: boolean;
   editMessages: boolean;
+  /** Can take back a message it posted. Only ever used on the turn's status line. */
+  deleteMessages: boolean;
   buttons: boolean;
   attachments: boolean;
   identityStrength: "verified" | "weak";
@@ -242,6 +244,8 @@ export interface SurfaceAdapter {
   postFile(conv: ConversationRef, file: OutboundFile): Promise<void>;
   /** Only called when capabilities.editMessages is true. */
   update(ref: PostedRef, msg: OutboundMessage): Promise<void>;
+  /** Only called when capabilities.deleteMessages is true. */
+  delete(ref: PostedRef): Promise<void>;
   /** Present a guided choice. Only called when capabilities.buttons. */
   requestChoice(conv: ConversationRef, prompt: ChoicePrompt): Promise<void>;
   /**

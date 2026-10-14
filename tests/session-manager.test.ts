@@ -635,7 +635,7 @@ describe("conversing", () => {
     const w = makeWorld();
     await assignAndMessage(w, "400.000002", "first");
     await w.manager.handleEvent({ kind: "message", conv: conv("400.000002"), author: architect, text: "second", attachments: [] });
-    expect(w.surface.updates.at(-1)?.text).toEndWith("_$0.01 this turn · $0.02 this thread_");
+    expect(w.surface.posts.at(-1)?.text).toEndWith("_$0.01 this turn · $0.02 this thread_");
   });
 
   test("the thread total counts a turn that ended in an error", async () => {
@@ -645,7 +645,7 @@ describe("conversing", () => {
     w.harness.nextError = { message: "boom", costUsd: 0.5 };
     await w.manager.handleEvent({ kind: "message", conv: c, author: architect, text: "first", attachments: [] });
     await w.manager.handleEvent({ kind: "message", conv: c, author: architect, text: "second", attachments: [] });
-    expect(w.surface.updates.at(-1)?.text).toEndWith("_$0.01 this turn · $0.51 this thread_");
+    expect(w.surface.posts.at(-1)?.text).toEndWith("_$0.01 this turn · $0.51 this thread_");
   });
 
   test("every event's cost counts, even one that follows the posted message", async () => {
@@ -658,14 +658,14 @@ describe("conversing", () => {
     ];
     await w.manager.handleEvent({ kind: "message", conv: c, author: architect, text: "first", attachments: [] });
     await w.manager.handleEvent({ kind: "message", conv: c, author: architect, text: "second", attachments: [] });
-    expect(w.surface.updates.at(-1)?.text).toEndWith("_$0.01 this turn · $1.21 this thread_");
+    expect(w.surface.posts.at(-1)?.text).toEndWith("_$0.01 this turn · $1.21 this thread_");
   });
 
   test("tiny spend reads as under a cent, never $0.00", async () => {
     const w = makeWorld();
     w.harness.replyCostUsd = 0.004;
     await assignAndMessage(w, "400.000004", "cheap");
-    expect(w.surface.updates.at(-1)?.text).toEndWith("_<$0.01 this turn · <$0.01 this thread_");
+    expect(w.surface.posts.at(-1)?.text).toEndWith("_<$0.01 this turn · <$0.01 this thread_");
   });
 
   test("a reply with no reported cost still shows the thread total", async () => {
@@ -673,7 +673,7 @@ describe("conversing", () => {
     await assignAndMessage(w, "400.000005", "first");
     w.harness.replyCostUsd = undefined;
     await w.manager.handleEvent({ kind: "message", conv: conv("400.000005"), author: architect, text: "second", attachments: [] });
-    expect(w.surface.updates.at(-1)?.text).toEndWith("\n\n_$0.01 this thread_");
+    expect(w.surface.posts.at(-1)?.text).toEndWith("\n\n_$0.01 this thread_");
   });
 
   test("thread messages become framed turns; replies land in the thread", async () => {
@@ -688,12 +688,15 @@ describe("conversing", () => {
     const row = w.store.getSessionByConversation("fake", "400.000001");
     expect(turn.cwd).toBe(row!.worktree_path);
 
-    // The human saw a status message that became the reply.
-    expect(w.surface.updates.at(-1)?.text).toContain("echo(fake-session-1)");
+    // The human saw a status message, then the reply as a message of its own,
+    // and the status message was taken back.
+    const status = w.surface.posts.find((p) => p.text.startsWith("⏳"))!;
+    expect(w.surface.deletes).toEqual([status.messageId]);
+    expect(w.surface.posts.at(-1)?.text).toContain("echo(fake-session-1)");
     // Gate allowed the in-worktree read and denied the /etc/hosts escape.
-    expect(w.surface.updates.at(-1)?.text).toContain("gate=allow,deny");
+    expect(w.surface.posts.at(-1)?.text).toContain("gate=allow,deny");
     // Every reply ends with its cost; only a turn that ran a workflow says so.
-    expect(w.surface.updates.at(-1)?.text).toEndWith("\n\n_$0.01 this turn · $0.01 this thread_");
+    expect(w.surface.posts.at(-1)?.text).toEndWith("\n\n_$0.01 this turn · $0.01 this thread_");
     // Handle was persisted for park & resume.
     expect(row!.harness_session_handle).toMatchObject({ sessionId: "fake-session-1" });
   });
@@ -732,7 +735,7 @@ describe("conversing", () => {
     expect(w2.harness.resumed.length).toBe(1);
     expect(w2.harness.resumed[0]!.cwd).toBe(row.worktree_path);
     expect(w2.harness.resumed[0]!.handle).toMatchObject({ sessionId: "fake-session-1" });
-    expect(w2.surface.updates.at(-1)?.text).toContain("echo(fake-session-1)");
+    expect(w2.surface.posts.at(-1)?.text).toContain("echo(fake-session-1)");
   });
 
   test("resume re-supplies the CURRENT system prompt, not the one frozen in the handle", async () => {
@@ -1455,13 +1458,15 @@ describe("streaming progress", () => {
 
     // Throttled: 6 progress events did NOT produce 6 edits.
     expect(w.surface.updates.length).toBeLessThan(4);
-    // The reply is the last thing shown, not a stranded progress line.
-    expect(w.surface.updates.at(-1)?.text).toContain("echo(");
+    // The reply is its own message, and the status line is gone, not a stranded
+    // progress line.
+    expect(w.surface.posts.at(-1)?.text).toContain("echo(");
+    expect(w.surface.deletes).toHaveLength(1);
 
-    // A late trailing flush must not fire after the reply and clobber it.
-    const finalText = w.surface.updates.at(-1)?.text;
+    // A late trailing flush must not fire after the reply and revive the status.
+    const edits = w.surface.updates.length;
     await Bun.sleep(3000);
-    expect(w.surface.updates.at(-1)?.text).toBe(finalText);
+    expect(w.surface.updates.length).toBe(edits);
   });
 });
 
@@ -1553,8 +1558,8 @@ describe("busy indicator", () => {
     await turn(w, "bz10.00001");
     expect(w.surface.transcript().some((t) => t.startsWith("⏳") || t === "Thinking")).toBe(false);
     const status = w.surface.posts.find((p) => p.text === "reading README.md")!;
-    expect(w.surface.updates.at(-1)).toMatchObject({ messageId: status.messageId });
-    expect(w.surface.updates.at(-1)!.text).toContain("echo(");
+    expect(w.surface.deletes).toEqual([status.messageId]);
+    expect(w.surface.posts.at(-1)!.text).toContain("echo(");
   });
 
   test("while the surface animates, a quick answer is the turn's only message", async () => {
@@ -1597,20 +1602,21 @@ describe("busy indicator", () => {
     const waiting = w.surface.posts.find((p) => p.text === "⏳ Waiting for another thread to finish")!;
     release();
     await Promise.all([a, b]);
+    expect(w.surface.deletes).toContain(waiting.messageId);
     return w.surface.updates.filter((u) => u.messageId === waiting.messageId).map((u) => u.text);
   }
 
   test("a turn that must wait for a slot says so at once, then drops the wait when it starts", async () => {
     const edits = await queuedTurn(true);
     expect(edits[0]).toBe("Started");
-    expect(edits.at(-1)).toContain("echo(");
+    expect(edits.some((t) => t.includes("echo("))).toBe(false);
   });
 
   test("without animation, a queued turn's waiting notice becomes 'Thinking' when it starts", async () => {
     const edits = await queuedTurn(false);
     expect(edits[0]).toBe("⏳ Thinking");
     expect(edits.some((t) => t.includes("Waiting"))).toBe(false);
-    expect(edits.at(-1)).toContain("echo(");
+    expect(edits.some((t) => t.includes("echo("))).toBe(false);
   });
 
   test("a surface with no working indicator still gets the status line", async () => {
