@@ -747,7 +747,7 @@ export function loadAuthConfig(
  * more than one person drive sessions. Anthropic scopes OAuth to ordinary
  * individual use of Claude Code and the Agent SDK, so a team on one personal
  * subscription is outside what that credential is for; the API-key path is the
- * documented answer. Whether to keep going is the operator's call, not ours.
+ * documented answer.
  *
  * Returns the warning text, or null when the pairing raises no question. Grants
  * made at runtime (`@Condotto grant`) are deliberately not re-checked here — this

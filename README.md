@@ -142,9 +142,11 @@ On your own machine, run `claude` once and log in; the SDK reuses the keychain
 credentials. On a headless box, run `claude setup-token` and export the
 `CLAUDE_CODE_OAUTH_TOKEN` it prints.
 
-Anthropic scopes subscription OAuth to ordinary individual use, so if you run this
-mode with several people driving sessions the daemon warns at boot and keeps going.
-Your install, your call.
+Subscription mode is for one person driving their own sessions. Anthropic's plan
+limits for Claude Free, Pro, and Max assume ordinary individual use of Claude Code
+and the Agent SDK, so a team should use an API key instead. If your config lets
+more than one person drive sessions, the daemon logs a warning at boot that says
+this and points to the API-key setup.
 
 The daemon logs which credential type it found, never the value.
 
