@@ -589,8 +589,22 @@ export class SlackAdapter implements SurfaceAdapter {
     return !!this.botUserId && text.includes(`<@${this.botUserId}`);
   }
 
+  /**
+   * Slack stamps `bot_id` on everything an app posts, our own replies included.
+   * Another app's post is heard only when its bot user is an architect: a team's
+   * own automation driving Condotto on purpose. Any other bot (CI, alerts, an
+   * integration post with no `user` at all) is dropped here, before a name
+   * lookup or the core ever sees it. The core still gates the turn on `hears()`;
+   * this is noise control, not the security boundary.
+   */
+  private fromUnheardBot(event: Record<string, any>): boolean {
+    if (!event.bot_id) return false;
+    if (!event.user) return true;
+    return !this.authority.isArchitect({ surface: SURFACE_ID, externalId: String(event.user) }, String(event.channel));
+  }
+
   private async handleMention(event: Record<string, any>): Promise<void> {
-    if (!event.user || event.bot_id || event.user === this.botUserId) return;
+    if (!event.user || event.user === this.botUserId || this.fromUnheardBot(event)) return;
     if (this.dedup.has(`mention:${event.channel}:${event.ts}`)) return;
     const text = String(event.text ?? "");
     const channelId = String(event.channel);
@@ -641,14 +655,20 @@ export class SlackAdapter implements SurfaceAdapter {
   }
 
   private handleMessage(event: Record<string, any>): void {
-    if (!event.user || event.bot_id || event.user === this.botUserId) return;
+    if (!event.user || event.user === this.botUserId || this.fromUnheardBot(event)) return;
     const subtype = event.subtype as string | undefined;
     if (subtype && subtype !== "file_share" && subtype !== "thread_broadcast") return;
     if (!event.thread_ts) return; // sessions are threads; top-level chatter is not ours
     if (this.dedup.has(`msg:${event.channel}:${event.ts}`)) return;
     const text = String(event.text ?? "");
-    if (this.mentionCommand(text)) return; // command mentions handled via app_mention
-    if (this.isHelpMention(text)) return; // bare/help mentions handled via app_mention (as `help`)
+    if (this.mentionCommand(text) || this.isHelpMention(text)) {
+      // A person's command or bare/help mention arrives again as `app_mention`,
+      // which handles it. Slack does not promise that event for a bot's post, so
+      // an architect bot's command goes through handleMention from here; its
+      // `mention:` dedup key absorbs the app_mention if one does arrive.
+      if (event.bot_id) void this.handleMention(event);
+      return;
+    }
 
     const attachments: Attachment[] = Array.isArray(event.files)
       ? event.files.map((f: Record<string, any>) => ({

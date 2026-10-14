@@ -177,12 +177,13 @@ function messageEvent(over: Record<string, any> = {}): Record<string, any> {
 
 /** An adapter wired for `handleMessage` without a live client: `start()` normally
  *  sets `botUserId` and `emit`, so we set them here. */
-function testAdapter(names?: DisplayNameCache) {
+function testAdapter(names?: DisplayNameCache, authority: SurfaceAuthority = AUTHORITY) {
   const emitted: InboundEvent[] = [];
-  const adapter = new SlackAdapter(TOKENS, AUTHORITY, OPERATOR, () => {}, names);
+  const adapter = new SlackAdapter(TOKENS, authority, OPERATOR, () => {}, names);
   (adapter as any).botUserId = BOT;
   (adapter as any).emit = (e: InboundEvent) => emitted.push(e);
   const deliver = (event: Record<string, any>) => (adapter as any).handleMessage(event);
+  const mention = (event: Record<string, any>) => (adapter as any).handleMention(event) as Promise<void>;
   const tails = () => (adapter as any).nameTail as Map<string, Promise<void>>;
   /** Wait for every in-flight name chain to settle (the chain self-clears). */
   const settle = async (budgetMs = 2000) => {
@@ -190,7 +191,7 @@ function testAdapter(names?: DisplayNameCache) {
     while (tails().size > 0 && Date.now() < deadline) await sleep(5);
     await sleep(5);
   };
-  return { adapter, emitted, deliver, tails, settle };
+  return { adapter, emitted, deliver, mention, tails, settle };
 }
 
 describe("SlackAdapter.handleMessage — name resolution", () => {
@@ -308,9 +309,12 @@ describe("SlackAdapter.handleMessage — sync guards run ahead of the async hop"
       lookups++;
       return id;
     });
-    const { emitted, deliver, tails, settle } = testAdapter(names);
-    deliver(messageEvent({ bot_id: "B999", ts: "1700000001.000100" }));
-    deliver(messageEvent({ user: BOT, ts: "1700000002.000100" }));
+    // Only Abby is an architect here, so the CI bot's post is just another bot's.
+    const abbyOnly: SurfaceAuthority = { isArchitect: (p) => p.externalId === "U0ABBY" };
+    const { emitted, deliver, tails, settle } = testAdapter(names, abbyOnly);
+    deliver(messageEvent({ user: "UCIBOT", bot_id: "B999", ts: "1700000001.000100" }));
+    deliver(messageEvent({ user: undefined, bot_id: "B998", ts: "1700000001.000200" })); // legacy integration post
+    deliver(messageEvent({ user: BOT, bot_id: "B000", ts: "1700000002.000100" })); // our own reply
     deliver(messageEvent({ user: undefined, ts: "1700000003.000100" }));
     deliver(messageEvent({ thread_ts: undefined, ts: "1700000004.000100" })); // top-level chatter
     deliver(messageEvent({ subtype: "channel_join", ts: "1700000005.000100" }));
@@ -318,6 +322,46 @@ describe("SlackAdapter.handleMessage — sync guards run ahead of the async hop"
     await settle();
     expect(emitted).toHaveLength(0);
     expect(lookups).toBe(0);
+  });
+
+  // A team's own automation can be made an architect by listing its bot user.
+  // Slack stamps `bot_id` on its posts like any app's, so the bot gate must
+  // consult authority instead of dropping every bot outright.
+  test("a bot user who is an architect is heard like a person", async () => {
+    const names = new DisplayNameCache(async () => "The Lobby Bot");
+    const lobbyBot: SurfaceAuthority = { isArchitect: (p) => p.externalId === "ULOBBY" };
+    const { emitted, deliver, settle } = testAdapter(names, lobbyBot);
+    deliver(messageEvent({ user: "ULOBBY", bot_id: "B777", text: "please look at #123" }));
+    deliver(messageEvent({ user: "UCIBOT", bot_id: "B999", text: "build passed", ts: "1700000002.000100" }));
+    await settle();
+    expect(emitted).toHaveLength(1);
+    expect(emitted[0]).toMatchObject({
+      kind: "message",
+      text: "please look at #123",
+      author: { externalId: "ULOBBY" },
+      authorDisplayName: "The Lobby Bot",
+    });
+  });
+
+  test("an architect bot's command mention is handled once, whether or not app_mention also arrives", async () => {
+    const lobbyBot: SurfaceAuthority = { isArchitect: (p) => p.externalId === "ULOBBY" };
+    const { emitted, deliver, mention, settle } = testAdapter(undefined, lobbyBot);
+    const event = messageEvent({ user: "ULOBBY", bot_id: "B777", text: `<@${BOT}> stop` });
+    deliver(event); // the message event, which Slack always sends
+    await mention({ ...event }); // the app_mention Slack may or may not send for a bot's post
+    await settle();
+    expect(emitted).toHaveLength(1);
+    expect(emitted[0]).toMatchObject({ kind: "command", name: "stop", author: { externalId: "ULOBBY" } });
+  });
+
+  test("a bot's command mention is still refused when the bot is not an architect", async () => {
+    const abbyOnly: SurfaceAuthority = { isArchitect: (p) => p.externalId === "U0ABBY" };
+    const { emitted, deliver, mention, settle } = testAdapter(undefined, abbyOnly);
+    const event = messageEvent({ user: "UCIBOT", bot_id: "B999", text: `<@${BOT}> stop` });
+    deliver(event);
+    await mention({ ...event });
+    await settle();
+    expect(emitted).toHaveLength(0);
   });
 
   test("a command mention and a bare/help mention are left to app_mention, unlooked-up", async () => {

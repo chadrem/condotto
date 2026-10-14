@@ -382,6 +382,11 @@ Slack's verified user id, never by the agent), or of a whole channel through
 `[[roles]]` or `grant`. Granting someone architect is the whole decision: hand it
 to people you would hand a laptop and a git remote to.
 
+An architect can be a bot. List your own automation's Slack bot user id and its
+posts drive the agent like a person's; every other app's posts (CI, alerts,
+webhooks) stay dropped. A bot cannot be made a member: it is either an architect
+or unheard.
+
 ---
 
 ## Files

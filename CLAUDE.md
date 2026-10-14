@@ -49,6 +49,9 @@ What follows is the whole model.
   dropped in `handleMessage` before files are fetched, framing or the turn log.
   `hears()` is asked again after files land and when a queued turn starts, because
   `remove` and `revoke` can land in between. Any new inbound path goes through it.
+  Slack's `bot_id` gate in the adapter is noise control in front of this, not a
+  second boundary: a bot's post passes it only when the bot user is an architect
+  (a team's own automation), and the core still decides the turn from `hears()`.
 - **Cost cap.** Off by default, money not security. `@Condotto budget <usd>` opts
   a thread in, `budget off` opts back out, and the row is authoritative once
   `assign` has seeded it. The thread cap is checked BETWEEN turns; a thread that
