@@ -1,4 +1,9 @@
-# Condotto
+<h1>
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="assets/condotto-logo-on-dark.svg">
+    <img alt="Condotto" src="assets/condotto-logo.svg" height="64">
+  </picture>
+</h1>
 
 **Build software with your whole team, in Slack.**
 

@@ -1,0 +1,25 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 550 120" width="550" height="120" role="img" aria-label="Condotto">
+  <title>Condotto</title>
+  <g transform="scale(0.46875)">
+  <rect width="256" height="256" rx="56" fill="#0F5C57"/>
+  <g fill="#5FE0C8">
+    <path d="M51 44 H 85 A 11 11 0 0 1 96 55 V 71 A 11 11 0 0 1 85 82 H 68 L 54 95 V 82 H 51 A 11 11 0 0 1 40 71 V 55 A 11 11 0 0 1 51 44 Z"/>
+    <path d="M119 44 H 153 A 11 11 0 0 1 164 55 V 71 A 11 11 0 0 1 153 82 H 136 L 122 95 V 82 H 119 A 11 11 0 0 1 108 71 V 55 A 11 11 0 0 1 119 44 Z"/>
+    <path d="M187 44 H 205 A 11 11 0 0 1 216 55 V 71 A 11 11 0 0 1 205 82 H 204 L 190 95 V 82 H 187 A 11 11 0 0 1 176 71 V 55 A 11 11 0 0 1 187 44 Z"/>
+  </g>
+  <rect x="40" y="108" width="176" height="104" rx="18" fill="#F4F1EA"/>
+  <path d="M68 138 L 92 160 L 68 182" fill="none" stroke="#0F5C57" stroke-width="17" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M110 184 H 140" fill="none" stroke="#0F5C57" stroke-width="17" stroke-linecap="round"/>
+  </g>
+  <g transform="translate(150 -1.75) scale(0.95)" stroke="#F4F1EA">
+    <g fill="none" stroke-width="10" stroke-linecap="round">
+      <path d="M56.2 43.8 A 30 30 0 1 0 56.2 86.2"/>
+      <circle cx="90" cy="76" r="19"/>
+      <path d="M131 95 V 76 A 19 19 0 0 1 169 76 V 95 M131 57 V 95"/>
+      <circle cx="210" cy="76" r="19"/><path d="M229 35 V 95"/>
+      <circle cx="270" cy="76" r="19"/>
+      <path d="M318 40 V 95 M348 40 V 95 M304 57 H 362"/>
+      <circle cx="392" cy="76" r="19"/>
+    </g>
+  </g>
+</svg>
