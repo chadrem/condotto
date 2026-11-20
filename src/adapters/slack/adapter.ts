@@ -675,9 +675,19 @@ export class SlackAdapter implements SurfaceAdapter {
       ? event.files.map((f: Record<string, any>) => ({
           kind: String(f.mimetype ?? "").startsWith("image/") ? ("image" as const) : ("file" as const),
           name: f.name ? String(f.name) : undefined,
-          // `url_private` needs the bot token; `permalink` is an HTML page, not
-          // the bytes, so it is a last resort that will usually fail the fetch.
-          ref: f.url_private ? String(f.url_private) : f.permalink ? String(f.permalink) : undefined,
+          // `url_private_download` first: for types Slack treats as risky (HTML,
+          // PDF, ...) `url_private` 302s to slack-files.com, a host the sandboxed
+          // container cannot resolve, while the download URL serves the bytes
+          // from files.slack.com itself. Both need the bot token. `permalink` is
+          // an HTML page, not the bytes, so it is a last resort that will usually
+          // fail the fetch.
+          ref: f.url_private_download
+            ? String(f.url_private_download)
+            : f.url_private
+              ? String(f.url_private)
+              : f.permalink
+                ? String(f.permalink)
+                : undefined,
           mimeType: f.mimetype ? String(f.mimetype) : undefined,
           sizeBytes: typeof f.size === "number" ? f.size : undefined,
         }))

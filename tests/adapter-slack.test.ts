@@ -288,6 +288,46 @@ describe("SlackAdapter.handleMessage — name resolution", () => {
   });
 });
 
+describe("SlackAdapter.handleMessage — attachment refs", () => {
+  const base = "https://files.slack.com/files-pri/T1-F1";
+
+  test("prefers url_private_download: url_private 302s HTML/PDF to slack-files.com, which the box cannot reach", async () => {
+    const { emitted, deliver, settle } = testAdapter();
+    deliver(
+      messageEvent({
+        files: [
+          {
+            name: "design.html",
+            mimetype: "text/plain",
+            url_private: `${base}/design.html`,
+            url_private_download: `${base}/download/design.html`,
+            permalink: "https://x.slack.com/files/U1/F1/design.html",
+          },
+        ],
+      }),
+    );
+    await settle();
+    expect((emitted[0] as any).attachments).toMatchObject([{ name: "design.html", ref: `${base}/download/design.html` }]);
+  });
+
+  test("falls back to url_private, then permalink", async () => {
+    const { emitted, deliver, settle } = testAdapter();
+    deliver(
+      messageEvent({
+        files: [
+          { name: "a.png", mimetype: "image/png", url_private: `${base}/a.png` },
+          { name: "b.png", mimetype: "image/png", permalink: "https://x.slack.com/files/U1/F2/b.png" },
+        ],
+      }),
+    );
+    await settle();
+    expect((emitted[0] as any).attachments).toMatchObject([
+      { kind: "image", ref: `${base}/a.png` },
+      { kind: "image", ref: "https://x.slack.com/files/U1/F2/b.png" },
+    ]);
+  });
+});
+
 describe("SlackAdapter.handleMessage — sync guards run ahead of the async hop", () => {
   test("a duplicate ts is dropped even while the first message's name lookup is in flight", async () => {
     const names = new DisplayNameCache(async (id) => {
