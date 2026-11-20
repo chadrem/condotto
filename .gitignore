@@ -15,3 +15,5 @@ condotto.toml
 # still linger on an installed box are never committed.
 condotto.repos.json
 condotto.roles.json
+# macOS Finder metadata.
+.DS_Store
