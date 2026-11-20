@@ -39,6 +39,9 @@ export function smokeHome(): string {
   return process.env.CONDOTTO_SMOKE_HOME?.trim() || join(homedir(), ".cache", "condotto-smoke");
 }
 
+/** The fixture's repo name, as a `[[repos]]` entry and `assign` would spell it. */
+export const FIXTURE_REPO_NAME = "tiny-ledger";
+
 /**
  * Fixture repo content. Deterministic on purpose: the smokes assert against it
  * (smoke-resume matches /ledger\.ts|format\.ts/, smoke-workflows matches
@@ -116,7 +119,7 @@ async function git(args: string[], cwd: string): Promise<string> {
  * discard whatever a previous smoke left behind, rewrite the fixture files, and
  * commit if anything actually changed. Idempotent — safe to run every time.
  */
-async function ensureFixtureRepo(path: string): Promise<void> {
+export async function ensureFixtureRepo(path: string): Promise<void> {
   const fresh = !existsSync(join(path, ".git"));
   if (fresh) {
     mkdirSync(path, { recursive: true });
@@ -192,7 +195,7 @@ export async function smokeEnv(): Promise<SmokeEnv> {
   console.log(`[smoke] fixture repo: ${repoPath} (throwaway — reset with 'bun run smoke:reset')`);
   return {
     repo: {
-      name: "tiny-ledger",
+      name: FIXTURE_REPO_NAME,
       path: repoPath,
       defaultBranch: "main",
     },

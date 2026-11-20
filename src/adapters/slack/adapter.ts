@@ -597,6 +597,11 @@ export class SlackAdapter implements SurfaceAdapter {
    * integration post with no `user` at all) is dropped here, before a name
    * lookup or the core ever sees it. The core still gates the turn on `hears()`;
    * this is noise control, not the security boundary.
+   *
+   * A post made with an app's USER token carries `bot_id` too, with `user` set to
+   * the human who installed the app. So a non-architect posting through an app is
+   * dropped here even when they are a thread member. Deliberate: a member is heard
+   * when they type, not when something they installed posts as them.
    */
   private fromUnheardBot(event: Record<string, any>): boolean {
     if (!event.bot_id) return false;

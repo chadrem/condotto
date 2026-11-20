@@ -240,6 +240,13 @@ of the last three we relied on contradicted the SDK's own documentation.
 - **Build-time safety:** point the system only at a throwaway git repo while
   developing Condotto itself. Slack development runs in the real company
   workspace by explicit architect decision; prefer a dedicated test channel.
+- **`bun run e2e` is the end-to-end suite**: the real daemon and agent, driven
+  through a Slack test channel by a second app, asserting on the thread, the
+  worktree and the store. It costs money and needs Slack, so it is not in `ci`;
+  run it when a change touches the Slack adapter, the session manager or a
+  dependency. It borrows the operator's Condotto app, so no other daemon may be
+  connected to that app during a run. Setup is in `scripts/e2e/run.ts`.
+  `e2e:up` / `e2e:say` / `e2e:down` drive the same world by hand.
 - **`bun run ci` is clean before every commit**: typecheck, lint, tests. The
   `.githooks/pre-push` hook (wired by `bun install`) refuses a push until it is.
   `bun test` alone does not typecheck. Silence a lint rule in `biome.jsonc` with a

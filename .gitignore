@@ -17,3 +17,5 @@ condotto.repos.json
 condotto.roles.json
 # macOS Finder metadata.
 .DS_Store
+# Local secrets for the end-to-end suite (`bun run e2e`).
+condotto.e2e.toml
