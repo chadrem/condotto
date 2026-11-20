@@ -29,6 +29,10 @@ Small, trusted, moving fast.
 Anthropic's sandbox. The Claude Code CLI is one person at one terminal. Condotto
 is your machine, your repo, your team.
 
+**Not tied to Slack or Anthropic.** Condotto talks to your chat app and to your
+coding agent through two swappable adapters. Slack and Claude Code are the first
+ones. Discord, OpenAI and others are planned.
+
 **Contents**
 - [How it works](#how-it-works)
 - [Requirements](#requirements)
