@@ -37,12 +37,12 @@
     "smoke:remote": "bun run scripts/smoke-remote-control.ts"
   },
   "dependencies": {
-    "@anthropic-ai/claude-agent-sdk": "^0.3.295",
+    "@anthropic-ai/claude-agent-sdk": "^0.3.329",
     "@slack/bolt": "^4"
   },
   "devDependencies": {
-    "@biomejs/biome": "2.5.15",
-    "@types/bun": "^1.3.14",
+    "@biomejs/biome": "2.6.8",
+    "@types/bun": "^1.4.5",
     "typescript": "7.0.2"
   }
 }
